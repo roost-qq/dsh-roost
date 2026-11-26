@@ -9,6 +9,44 @@ import assert from 'node:assert/strict';
 import { buildQqToolDefs, buildAtPrefix, AT_ID_RE, shouldRegisterQqTools } from '../src/qq-tools.js';
 
 /**
+ * 造出**全部**工具定义（所有可选能力都接上）。
+ *
+ * `make()` 只接发言相关的几个回调，扫不到 `autotelic_*`、提醒、群管这些
+ * 后置工具；护栏必须用这份全量 fixture，否则新增工具会静默漏扫。
+ */
+function makeAll() {
+  const noop = () => ({ ok: true });
+  return buildQqToolDefs({
+    callerOf: () => ({
+      chatId: 'u1',
+      kind: 'c2c',
+      said: '',
+      hasPayload: true,
+      bucket: 'owner',
+      senderId: '',
+      openid: '',
+    }),
+    sendOf: noop,
+    closeOf: noop,
+    fileOf: noop,
+    cfgOf: () => ({}),
+    stateOf: () => ({ parts: 0 }),
+    groupOf: noop,
+    ledgerOf: noop,
+    sessionOf: noop,
+    infoOf: noop,
+    searchOf: noop,
+    postThreadOf: noop,
+    reminderOf: noop,
+    proposeOf: noop,
+    sayOf: noop,
+    noteOf: noop,
+    modulesOf: noop,
+    handOf: { python: noop, module: noop },
+  });
+}
+
+/**
  * 造一套工具，返回 { send, close } 和记账用的箱子。
  *
  * @param {object} [o]
@@ -175,16 +213,23 @@ test('工具：都有 parameters 和 execute', () => {
  * 都不注入——模型于是既不知道能发语音、也不知道怎么用 qq_send 说话。
  *
  * 这条断言把「可选参数一律不写 required 键」钉死，别再让可选参数变可选工具。
+ *
+ * **不要改成「对每个 def 跑一遍 `defineTool`」**：本仓零依赖，CI 里
+ * `loadDefineTool()` 恒为 null（`src/tools.js:35-44`），那条路会静默退化成
+ * 普通 JSON Schema，等于空跑。这里直接校验 DSH 的硬规则本身。
+ *
+ * 2026-11-26（issue #81）：`autotelic_propose_say.reason` 又写了一次
+ * `required:false`，但当时护栏用 `make()` 只造出 6 个工具，新工具不在里面，
+ * 所以 73/73 全绿也拦不住。全量 fixture 少一个都必须红。
  */
-test('工具：扁平参数表里绝不出现 required:false（否则整组注册失败）', () => {
-  const { defs } = make({
-    fileOf: async () => ({ ok: true }),
-    infoOf: async () => ({ ok: true }),
-    searchOf: async () => ({ ok: true }),
-    postThreadOf: async () => ({ ok: true }),
-  });
-  assert.ok(defs.some((d) => d.name === 'qq_who'), 'qq_who 要在这次构造里');
-  assert.ok(defs.some((d) => d.name === 'qq_search'), 'qq_search 要在这次构造里');
+test('工具：全量参数表里绝不出现 required:false（否则整组注册失败）', () => {
+  const defs = makeAll();
+  /** 18 = qq-tools 14 + group-tools 4；少一个说明新工具的回调没接上，护栏会漏扫 */
+  assert.equal(defs.length, 18, '全量 fixture 应覆盖 18 个工具，新增能力要同步接上回调');
+  assert.ok(
+    defs.some((d) => d.name === 'autotelic_propose_say'),
+    'issue #81 出事的工具必须在护栏范围内',
+  );
   for (const d of defs) {
     for (const [k, v] of Object.entries(d.parameters || {})) {
       assert.notEqual(
