@@ -15740,6 +15740,26 @@ export function apply(ctx) {
       route('/setup/webui', (req, res) => send(res, 200, { ok: true, url: setup.webuiUrl() })),
 
       /**
+       * 框架自带更新：读状态 + 手动触发。
+       *
+       * 状态来自框架自己的 `AutoUpdateService`（启动 3 秒查一次、6h 复查），
+       * 这里只读快照不现场打 GitHub；触发也只转发框架的 `/api/update/apply`。
+       * **都不重启**：框架更新后要手动重启才生效，面板据此常驻提示。
+       */
+      route('/setup/framework-update', (req, res) =>
+        setup.frameworkUpdateStatus().then((r) => send(res, 200, { ok: true, ...r }))
+          .catch((e) => send(res, 200, { ok: false, error: e.message }))),
+      route('/setup/framework-update/apply', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, error: '只支持 POST' });
+        try {
+          const r = await setup.frameworkUpdateApply();
+          return send(res, r.ok ? 200 : 502, r);
+        } catch (e) {
+          return send(res, 200, { ok: false, error: e.message });
+        }
+      }),
+
+      /**
        * 一键直连（外接协议）。
        *
        * 四条路由对应面板上的「看状态 / 一键开 / 关掉 / 测一下」。

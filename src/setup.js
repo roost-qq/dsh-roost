@@ -390,6 +390,19 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
   let child = null;
   let busy = '';
   /**
+   * 本次 DSH 进程里装过的框架版本；null = 没装过。
+   *
+   * 框架 apply 完不会重启，它那份 `last` 快照也要等下一次 tick（6h）才刷新。
+   * 没有这个标记的话，用户连点两次「立即更新」会第二次撞框架的 400「已是最新」，
+   * 面板却报「更新失败」——明明第一次是成功的。
+   *
+   * 记版本号而不是布尔值：重启框架走的是 DSH 内的 stop/start（只重启子进程，
+   * DSH 进程还活着），布尔标记不会自己清零。框架重启后会重算 needsRestart
+   * （pkg mtime vs 进程启动时间），一旦它变 false 且 current 正是我们装的版本，
+   * 就说明重启已生效，`frameworkUpdateStatus()` 会清掉这个标记。
+   */
+  let appliedVersion = null;
+  /**
    * 上一次探活**真的应答了**的端口。
    *
    * 只用来让 `api()` / `webuiUrl()` 跟着探活结果走：Roost 的端口可能因为被占
@@ -708,6 +721,121 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
       throw err;
     }
     return json;
+  }
+
+  /* ---------------- 框架自带更新（只触发，不实现） ---------------- */
+
+  /**
+   * 读框架的更新状态。
+   *
+   * 检查本身由框架的 `AutoUpdateService` 做（启动 3 秒后一次、6h 一次），
+   * 结果挂在 `GET /api/services` 的 `extra.autoUpdate.last` —— 就是
+   * `checkUpdate()` 的返回值，含 `current / latest / hasUpdate / needsRestart`。
+   * 这里**不**自己调 `/api/update/check`：那会多打一次 GitHub，且和框架刚查的
+   * 结果可能因为时序不一致（一个说有、一个说没有）。
+   *
+   * 老框架没有 `/api/services` 时，404 会被 `api()` 抛成带 status 的错；
+   * 这里吞掉并标 `supported:false`，让面板显示「框架版本太旧」而不是红字。
+   */
+  async function frameworkUpdateStatus() {
+    if (!(await isRunning())) {
+      return { ok: false, running: false, supported: false, error: 'Roost 没在跑，先启动框架再看更新' };
+    }
+    let data;
+    try {
+      data = await api('/api/services');
+    } catch (e) {
+      if (e?.status === 404) {
+        return { ok: false, running: true, supported: false, error: '框架版本太旧，没有更新状态接口' };
+      }
+      return { ok: false, running: true, supported: true, error: e?.message || '读框架更新状态失败' };
+    }
+    const au = data?.extra?.autoUpdate;
+    if (!au) {
+      return { ok: false, running: true, supported: false, error: '框架版本太旧，没有更新状态接口' };
+    }
+    const last = au.last;
+    if (!last) {
+      return { ok: true, running: true, supported: true, pending: true, checkedAt: au.checkedAt || 0 };
+    }
+    if (last.ok === false) {
+      return {
+        ok: false, running: true, supported: true,
+        error: last.error || '框架检查更新失败', checkedAt: au.checkedAt || 0,
+      };
+    }
+    const current = String(last.current || '');
+    /**
+     * 清「本进程装过」标记：框架重启后自己重算的 needsRestart 会变 false，
+     * 且当前版本正是我们装的那版 = 重启已生效。不清的话面板会永远挂着
+     * 「需重启」，而且自动更新会被 `applied` 标记永久挡住。
+     * 注意必须是「版本对上 AND needsRestart=false」两个条件，只凭其一都会误清。
+     */
+    if (appliedVersion && current === appliedVersion && last.needsRestart === false) {
+      appliedVersion = null;
+    }
+    return {
+      ok: true, running: true, supported: true, pending: false,
+      current,
+      latest: String(last.latest || ''),
+      hasUpdate: Boolean(last.hasUpdate),
+      /** 本进程装过且还没重启 = 要重启才生效，跟框架 mtime 判定等价 */
+      needsRestart: Boolean(appliedVersion) || Boolean(last.needsRestart),
+      checkedAt: au.checkedAt || 0,
+      detail: String(au.detail || ''),
+    };
+  }
+
+  /**
+   * 触发框架自带更新。验签 / 备份 / 回滚都在框架 `updater.js` 里，
+   * 这里只做转发 + 记录，绝不自己下载或覆盖文件（见方案里的"不重复造轮子"）。
+   *
+   * 不重启——框架更新后必须手动重启才生效，这是用户明确的选择。
+   */
+  async function frameworkUpdateApply() {
+    if (!(await isRunning())) return { ok: false, error: 'Roost 没在跑，先启动框架再更新' };
+    let r;
+    try {
+      r = await api('/api/update/apply', { method: 'POST', body: '{}' });
+    } catch (e) {
+      return { ok: false, error: e?.body?.error || e?.message || '更新失败' };
+    }
+    if (!r?.ok) return { ok: false, error: r?.error || '更新失败' };
+    appliedVersion = String(r.to || '');
+    log(`框架已更新 ${r.from || ''} → ${r.to || ''}（需手动重启才生效）`);
+    return {
+      ok: true, from: r.from, to: r.to, backup: r.backup,
+      message: r.message || '更新完成，重启框架后生效',
+    };
+  }
+
+  /**
+   * Roost 启动成功后挂的自动更新钩子。
+   *
+   * 默认关：开关不是 `true` 直接返回，连框架状态都不读。
+   * 开着也要过三道闸：没装过本次 / 框架在跑 / 真有新版且不在「等重启」状态。
+   * fire-and-forget 调用——绝不能让 GitHub 抖动拖住 `startOnce()` 的返回。
+   */
+  async function maybeAutoUpdate() {
+    if (cfgOf().setup?.frameworkAutoUpdate !== true) return { ok: true, skipped: 'disabled' };
+    if (!(await isRunning())) return { ok: true, skipped: 'not_running' };
+    const st = await frameworkUpdateStatus();
+    /**
+     * 必须在读状态**之后**再判 applied：frameworkUpdateStatus() 会在框架已重启
+     * 生效时清掉标记。放在前面的话，重启后第一次自动检查照样被旧标记挡住，
+     * 得等到用户手动刷一次面板才恢复——那不算真的修好。
+     */
+    if (appliedVersion) return { ok: true, skipped: 'applied' };
+    if (!st.ok || st.pending) return { ok: true, skipped: 'unavailable' };
+    /**
+     * 先判 needsRestart：框架装完自身 `hasUpdate` 会变 false，但代码还没重启
+     * 生效。若先判 hasUpdate，这条会走 `up_to_date` 悄悄放过——看起来没事，
+     * 实际是「已更新但没生效」被当成了「已是最新」，用户永远等不到重启提示。
+     */
+    if (st.needsRestart) return { ok: true, skipped: 'needs_restart' };
+    if (!st.hasUpdate) return { ok: true, skipped: 'up_to_date' };
+    const r = await frameworkUpdateApply();
+    return r.ok ? { ok: true, applied: true, from: r.from, to: r.to } : r;
   }
 
   /** 是不是在跑（直接问它自己） */
@@ -1059,6 +1187,11 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
        * 否则开关在界面上会是个 undefined 的空档。
        */
       verifyIdentity: cfgOf().setup?.verifyIdentity === true,
+      /**
+       * 框架自更新开关的生效值（接入页复选框的初值）。
+       * 默认 false，见 config.js 的 setup.frameworkAutoUpdate 说明。
+       */
+      frameworkAutoUpdate: cfgOf().setup?.frameworkAutoUpdate === true,
       busy,
     };
   }
@@ -1566,7 +1699,15 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
       panel = await panelHealth();
       if (!panel) continue;
       const verdict = startVerdict(panel);
-      if (verdict.done) return { ok: true, message: verdict.message };
+      if (verdict.done) {
+        /**
+         * 框架启动成功后，按开关决定是否自动装新版（默认关，见 config.js）。
+         * 必须 fire-and-forget：框架的 checkUpdate 要打 GitHub，慢的时候好几秒，
+         * 不能让它拖住「启动完成」的返回。失败只记日志，不影响启动结果。
+         */
+        void maybeAutoUpdate().catch((e) => log(`自动检查框架更新失败：${e?.message ?? e}`));
+        return { ok: true, message: verdict.message };
+      }
       /**
        * 机器人已经 `error` 就**立刻返回**，不要等满 20 秒。
        *
@@ -1740,6 +1881,12 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
      * 而 key 只在这边有；让调用方自己拼 URL 迟早会漏掉鉴权。
      */
     api,
+    /** 框架自带更新的状态（读框架 /api/services 的快照，不自己查 GitHub） */
+    frameworkUpdateStatus,
+    /** 触发框架自带更新（POST /api/update/apply），不重启 */
+    frameworkUpdateApply,
+    /** Roost 启动成功后的自动更新钩子，默认关 */
+    maybeAutoUpdate,
     /** Roost 配置里的主人 openid（主动搭话的收件人）。空 = 那边也没配 */
     roostOwner,
     /** 框架里所有主人 openid（跨 bot，不去重；解绑保护数的是条目数） */
