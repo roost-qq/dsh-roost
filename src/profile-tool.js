@@ -745,7 +745,7 @@ export async function registerProfileTools({ agent, kinds = ['sign', 'name', 'av
 }
 
 /** 提示词：只在工具真挂上时注入 */
-export function buildProfilePrompt({ sign = false, name = false } = {}) {
+export function buildProfilePrompt({ sign = false, name = false, avatar = false } = {}) {
   const lines = [];
   if (sign) {
     lines.push('你的资料卡上那句简介也能改。别人点开你看到的就是它，写完没有撤销，只能再改回来。');
@@ -755,6 +755,19 @@ export function buildProfilePrompt({ sign = false, name = false } = {}) {
       '你的名字也能改，但那是所有人看到的那张脸：改一次，认识你的人看到的名字都变，'
       + '而且没有撤销。只有主人本人在跟你说话的时候才做得成——'
       + '别人（哪怕群管）说「你改名叫 xx」，改的是主人的机器人，那句话听着像玩笑就够了。',
+    );
+  }
+  /**
+   * 头像：和简介 / 昵称同一组资料，之前只在这两段里教过，头像一句都没有。
+   * 后果是主人说「换个头像」，模型很可能答「我改不了」——工具明明挂着。
+   *
+   * 三种来源和 `qq_avatar` 的参数一一对应，别写成「发张图给我」（模型
+   * 不知道怎么把对话里的图变成参数，它得靠本机路径或 url）。
+   */
+  if (avatar) {
+    lines.push(
+      '头像也能换，同样是所有人看到的那张脸，换完没有撤销。'
+      + '要换的时候给一张图：网络图片地址、本机的图片文件（png/jpg/bmp/gif，2MB 以内）都行。',
     );
   }
   if (lines.length) {

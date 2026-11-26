@@ -3213,3 +3213,51 @@ test('路由：目的引擎关着也常驻注册策略源，打开后不必重�
     assert.notEqual(src.state, 'ready', '关着的时候不能报 ready');
   } finally { h.off?.(); }
 });
+
+/**
+ * 临时安静（面板入口，2026-11-26 补）。
+ *
+ * 静默状态在**框架**的暂停闸里，宿主只负责转发。这里测的是「路由接通 +
+ * 失败兜得住」：测试环境没配 roost 地址，`rpc` 会抛 NO_ADDR，面板必须拿到
+ * `ok:false` 和一句人话，而不是 500，也不是一个看起来正常的空表——
+ * 后者会让界面显示「这个群现在没静默」，而闸里可能正压着两小时。
+ */
+test('路由：/gate 没连框架时说读不到，不冒充「没静默」', async () => {
+  const h = await bootHost();
+  try {
+    const r = await h.call('/gate?chatId=g1');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, false);
+    assert.match(r.json.message, /读不到暂停闸/);
+    assert.deepEqual(r.json.silence, []);
+    assert.equal(r.json.mine, 0);
+  } finally { h.off?.(); }
+});
+
+test('路由：/gate/silence 缺 chatId 直接拒绝', async () => {
+  const h = await bootHost();
+  try {
+    const r = await h.call('/gate/silence', { method: 'POST', preBody: { minutes: 120 } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, false);
+    assert.match(r.json.message, /先选一个群/);
+  } finally { h.off?.(); }
+});
+
+test('路由：/gate/silence 设不上时把原因带回来（不是 500）', async () => {
+  const h = await bootHost();
+  try {
+    const r = await h.call('/gate/silence', { method: 'POST', preBody: { chatId: 'g1', minutes: 120 } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, false);
+    assert.match(r.json.message, /没设上/);
+  } finally { h.off?.(); }
+});
+
+test('路由：/gate/silence 只收 POST', async () => {
+  const h = await bootHost();
+  try {
+    const r = await h.call('/gate/silence');
+    assert.equal(r.status, 405);
+  } finally { h.off?.(); }
+});
