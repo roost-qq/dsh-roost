@@ -12571,9 +12571,42 @@ window.__ModuleLoader__.load({
       const [ovDraft, setOvDraft] = useState(null)
       /** 翻聊天记录设置弹窗：和「记忆星图」同范式，关掉就卸载 */
       const [lookOpen, setLookOpen] = useState(false)
+      /**
+       * 选中的群。**提到 hooks 之前**：下面的「临时安静」要按这个群拉状态，
+       * 而 hooks 不能写在 `if (!config) return` 之后。
+       */
+      const pickOv = ovGid || groups[0]?.chatId || Object.keys(overrides)[0] || ''
+      /**
+       * 临时安静（`<<silence:2h>>` 的手动版）。
+       *
+       * 状态在框架的暂停闸里、不在 config：所以它**不走 saveCfg**、
+       * 也不参与「恢复成全局」。`null` = 还没读到，`error` = 框架没连上。
+       */
+      const [quiet, setQuiet] = useState(null)
+      const [quietBusy, setQuietBusy] = useState(false)
 
       /** 换群要丢掉上一个群的草稿，别把它写到新群头上 */
       useEffect(() => { setOvDraft(null) }, [ovGid])
+
+      const loadQuiet = useCallback(async (chatId) => {
+        if (!chatId) { setQuiet(null); return }
+        const r = await get('/gate?chatId=' + encodeURIComponent(chatId))
+        setQuiet(r?.ok === false ? { error: r.message || '读不到暂停闸' } : r)
+      }, [])
+
+      /** 群一换就重拉：A 群的到期时间不能显示在 B 群头上 */
+      useEffect(() => { loadQuiet(pickOv) }, [pickOv, loadQuiet])
+
+      const setQuietFor = async (minutes) => {
+        if (!pickOv || quietBusy) return
+        setQuietBusy(true)
+        try {
+          const r = await post('/gate/silence', { chatId: pickOv, minutes })
+          if (r?.ok === false) toast(r.message || '没设上')
+          else toast(minutes > 0 ? `已让这个群安静 ${minutes} 分钟` : '已经解除安静')
+          await loadQuiet(pickOv)
+        } finally { setQuietBusy(false) }
+      }
 
       /**
        * 配置没到不渲染控件：在空对象上点保存，会把 roostHost 的 token /
@@ -12596,8 +12629,14 @@ window.__ModuleLoader__.load({
       const setChat = (k, v) => put({ chat: { [k]: v } })
       const setGroup = (k, v) => put({ group: { [k]: v } })
 
-      const pickOv = ovGid || groups[0]?.chatId || Object.keys(overrides)[0] || ''
       const ov = ovDraft !== null ? ovDraft : { ...(overrides[pickOv] || {}) }
+      /**
+       * 静默剩余分钟**现算**，不用服务端回的 `now`：面板开着不动时数字得自己
+       * 往下走，否则会一直显示「还剩 120 分钟」直到用户手动刷新。
+       */
+      const quietLeftMin = Number(quiet?.mine) > Date.now()
+        ? Math.ceil((Number(quiet.mine) - Date.now()) / 60000)
+        : 0
       const setOv = (k, v) => {
         const next = { ...ov }
         if (v === undefined) delete next[k]
@@ -13137,6 +13176,44 @@ window.__ModuleLoader__.load({
               ? '已经设了例外的群：' + Object.keys(overrides)
                   .map((id) => `${chatName(id)}（${Object.keys(overrides[id] || {}).length} 项）`).join('、')
               : '目前没有群设了例外，所有群都用上面的全局设置。'),
+          /**
+           * 临时安静：和上面的覆写**不是一回事**——那些写 config，这个只改
+           * 框架闸里的到期时间。所以按钮不进「保存这个群的例外」那一排，
+           * 「恢复成全局」也清不掉它（它压根不在配置里）。
+           */
+          h('div', {
+            style: {
+              marginTop: 14, paddingTop: 10,
+              borderTop: '1px solid rgba(128,128,128,.25)',
+            },
+          },
+            h('div', { style: { fontWeight: 600, marginBottom: 2 } }, '临时安静（不写配置）'),
+            h('div', { className: 'roost-g-unit', style: { marginBottom: 8 } },
+              quiet === null
+                ? '读取中…'
+                : quiet.error
+                  ? quiet.error
+                  : quietLeftMin > 0
+                    ? `${chatName(pickOv)} 现在静默中，还剩 ${quietLeftMin} 分钟；到点自动恢复。`
+                    : `${chatName(pickOv)} 现在没静默。`),
+            h('div', { className: 'roost-g-modes' },
+              [[30, '安静 30 分钟'], [120, '安静 2 小时'], [1440, '安静 1 天']]
+                .map(([m, label]) => h('button', {
+                  key: m, type: 'button', className: 'roost-chip',
+                  disabled: quietBusy || !pickOv,
+                  onClick: () => setQuietFor(m),
+                }, label)),
+              h('button', {
+                key: 'off', type: 'button', className: 'roost-chip',
+                'data-on': quietLeftMin > 0 ? '1' : '0',
+                disabled: quietBusy || !pickOv || !(quietLeftMin > 0),
+                onClick: () => setQuietFor(0),
+              }, '解除')),
+            h('div', { className: 'roost-g-note', style: { marginTop: 6 } },
+              '静默期间这个群的消息她收不到、也不回（消息照样记进账本，恢复后能翻到），别人 @ 她也没用；'
+              + '和她自己写 `<<silence: 2h>>` 是同一个闸、同一张表。'
+              + '「暂停」（排障页）是另一级闸，连私聊一起停，两者互不覆盖。'),
+          ),
         ),
 
         ),

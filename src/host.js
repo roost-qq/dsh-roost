@@ -13785,6 +13785,84 @@ export function apply(ctx) {
         });
       }),
 
+      /* ---------------- 临时安静 ----------------
+       *
+       * `<<silence:2h>>` 是**她自己**决定闭嘴；这里给主人一个手动入口，
+       * 走同一个闸、同一张表、同一个到期时间，效果完全一致。
+       *
+       * 为什么不写进配置：静默是**运行时状态**（框架
+       * `data/gate/<botId>.json` 的 silence 表）。塞进 config 会变成
+       * 「面板上点了一次安静，重启之后还安静着」，而它本来只是个临时动作。
+       * 同理也不进「保存这个群的例外」——那套是持久覆写，混一个不落盘的
+       * 动作进去，「恢复成全局」清不掉它，用户没法理解。
+       */
+      route('/gate', async (req, res) => {
+        const url = new URL(req.url || '/', 'http://localhost');
+        const chatId = String(url.searchParams.get('chatId') || '').trim();
+        let snap = null;
+        try {
+          snap = await roost.rpc('gate.get', {});
+        } catch (e) {
+          /**
+           * 读不到就说读不到。**不返回空表冒充「没静默」**：那会让面板显示
+           * 「这个群现在没静默」，而实际可能是框架没连上、闸里正压着两小时。
+           */
+          return send(res, 200, {
+            ok: false,
+            message: `读不到暂停闸：${e?.message || e}（框架没连上？）`,
+            now: Date.now(), mine: 0, silence: [],
+          });
+        }
+        const list = (Array.isArray(snap?.silence) ? snap.silence : [])
+          .map((x) => ({ chatId: String(x?.chatId || ''), until: Number(x?.until) || 0 }))
+          .filter((x) => x.chatId && x.until > 0);
+        const hit = chatId ? list.find((x) => x.chatId === chatId) : null;
+        return send(res, 200, {
+          ok: true,
+          /** 服务端时间：前端拿它算剩余，避免本机时钟偏了几分钟就显示成负数 */
+          now: Date.now(),
+          /** 这个会话的静默到期时间；0 = 没静默 */
+          mine: hit ? hit.until : 0,
+          /** 全部在静默的会话，面板用它给群列表打标 */
+          silence: list,
+          /**
+           * 闸的另外两级顺手带出来：静默没生效时，先看看是不是别的闸在拦
+           * （全局暂停 / 这只鸟暂停），省得来回猜。
+           */
+          paused: { global: snap?.global?.paused === true, bot: snap?.bot?.paused === true },
+        });
+      }),
+
+      route('/gate/silence', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        /**
+         * 用 `bodyOf` 而不是 `readBody`：宿主（DSH 的 webServer）可能已经把
+         * 请求体读完挂在 `req.body` 上，这时再读流拿到的是空串——表现就是
+         * 「点了安静，面板却回『先选一个群』」。`bodyOf` 两种形态都认。
+         */
+        const body = await bodyOf(req);
+        const chatId = String(body?.chatId || '').trim();
+        /**
+         * 上限 30 天，和 `<<silence>>` 那条路一致（框架 `setSilence` 也夹，
+         * 这里再夹一次是为了让面板的报错说清楚「你想设多久」而不是静默截断）。
+         */
+        const minutes = Math.max(0, Math.min(30 * 24 * 60, Number(body?.minutes) || 0));
+        if (!chatId) return send(res, 200, { ok: false, message: '先选一个群' });
+        try {
+          /**
+           * 走 `gate.set` 而不是 `gate.silence`：后者对 `ms <= 0` 直接抛，
+           * 而「解除」正是 ms=0（框架 `setSilence` 里 `if (ms > 0)` 才写，
+           * 否则删表）。一个接口既能设也能解，少一条路。
+           */
+          const r = await roost.rpc('gate.set', {
+            scope: 'silence', chatId, ms: Math.round(minutes * 60_000),
+          });
+          return send(res, 200, { ok: true, chatId, minutes, until: Number(r?.until) || 0 });
+        } catch (e) {
+          return send(res, 200, { ok: false, message: `没设上：${e?.message || e}` });
+        }
+      }),
+
       /** 4.5：物理键统一还原成逻辑 chatId 再去重，面板不该看到 `::p:` */
       route('/chats', (req, res) => {
         const raw = sessions.list?.() || [];
