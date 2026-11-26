@@ -37,16 +37,21 @@ export const MAX_TOTAL_CHARS = 6000;
 export const MAX_NAME_CHARS = 40;
 
 /**
- * @param {{log?:(m:string)=>void}} [deps]
+ * @param {object} [deps]
+ * @param {(m:string)=>void} [deps.log]
+ * @param {(extId:string)=>boolean} [deps.isEnabled]
+ *   「这个扩展现在还算数吗」。宿主接的是 `api-clients.json` 里的 `enabled`。
+ *   不传 = 一律算数（测试与单独用这个模块时不必关心鉴权文件）。
  */
-export function createExtPromptContexts({ log = () => {} } = {}) {
+export function createExtPromptContexts({ log = () => {}, isEnabled = () => true } = {}) {
   /** @type {Map<string, Map<string, {text:string, chatId:string, at:number}>>} */
   const byExt = new Map();
 
   const totalOf = (skip = null) => {
     let n = 0;
     for (const [extId, m] of byExt) {
-      if (extId === skip) continue;
+      /** 停用的不算额度：否则一个被停用的扩展会把别人的预算一直占着 */
+      if (extId === skip || isEnabled(extId) === false) continue;
       for (const e of m.values()) n += e.text.length;
     }
     return n;
@@ -123,6 +128,19 @@ export function createExtPromptContexts({ log = () => {} } = {}) {
       const want = String(chatId ?? '');
       const blocks = [];
       for (const [extId, m] of [...byExt.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+        /**
+         * **停用 / 卸载的扩展不再顶嘴**（2026-11-26 主人指出）。
+         *
+         * 面板上的「停用」只让令牌失效——`verify()` 之后它调不了 `/v1`，
+         * 可**已经注册进内存的段每轮照旧拼进 system prompt**。表现是
+         * 「我明明停用了，她还知道那些事、还带着那套规则」，而面板说已经停了。
+         *
+         * 段内容**不删**：停用是临时的，重新启用后下一轮就该立刻恢复，
+         * 不该逼扩展重启一次。所以每次 render 现问，不搞「停用时清理」——
+         * 直接改 `api-clients.json`、卸载扩展这些路径没有统一的停用事件，
+         * 在渲染那一刻判断才覆盖得到全部。
+         */
+        if (isEnabled(extId) === false) continue;
         for (const [, e] of [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
           if (e.chatId && e.chatId !== want) continue;
           blocks.push(e.text.trim());

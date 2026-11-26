@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -138,6 +138,15 @@ test('guard 真的挂到 systemPrompt.context：name / order / text 都是运行
     assert.ok(extCtx, '扩展上下文段没挂上');
     assert.equal(extCtx.order, 895, '必须排在人格（905）与所有规则之前');
     assert.equal(extCtx.text(), '', '没有扩展注册时返回空串（别注入空段占 token）');
+    /**
+     * `isEnabled` 必须真的连到客户端记录。
+     *
+     * 漏接是**静默的**：`ext-prompt` 的默认值是 `() => true`，永远放行，
+     * 于是「面板上停用了，她还带着那套规则说话」。store 自己的单测测不出这一根线
+     * （和上面 895 段、`sender.id`、`quoteRef` 同一类），只能查源码。
+     */
+    const hostSrc = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+    assert.match(hostSrc, /isEnabled:\s*extEnabledOf\(extClientStore\)/, '停用的扩展必须立刻不注入');
   } finally {
     for (const c of cleanups) { try { c(); } catch {} }
     if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;

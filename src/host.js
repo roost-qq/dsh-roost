@@ -66,7 +66,7 @@ import { createGroupChatProfiles } from './group-chat-profile.js';
 import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS, DEFAULT_IMPRESSION_DAYS } from './gist-impression.js';
 import { sourceStats } from './source-stats.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
-import { createClientStore, createExtSecrets, createExtRegistry } from './ext-registry.js';
+import { createClientStore, createExtSecrets, createExtRegistry, extEnabledOf } from './ext-registry.js';
 import { guardQuickCall, PANEL_MARK } from './ext-quick-guard.js';
 import { injectShim } from './ext-page-shim.js';
 import { mountUsageSections, mountToolOutputBudget } from './ext-usage.js';
@@ -3314,7 +3314,18 @@ export function apply(ctx) {
    * 内存态：扩展由宿主拉起，重启后会重新注册；落盘要额外处理「卸载了但文件
    * 还在」的清理，不划算（详见 `ext-prompt.js` 头注释）。
    */
-  const extPromptContexts = createExtPromptContexts({ log: (m) => log.info(m) });
+  const extPromptContexts = createExtPromptContexts({
+    log: (m) => log.info(m),
+    /**
+     * 停用 / 卸载的扩展不再注入（2026-11-26 主人指出）。
+     *
+     * 面板「停用」只让令牌失效，已注册进内存的段落原本仍每轮拼进 system prompt
+     * ——「停用了可她还知道那些事」。判据与 `verify()` 共用 `extEnabledOf`：
+     * 现读 `api-clients.json`（那边本来就没有缓存），面板停用、直接改文件、
+     * 卸载三条路径都覆盖得到。
+     */
+    isEnabled: extEnabledOf(extClientStore),
+  });
 
   const extApiHooks = createExtApiHooks({
     cfgOf: () => cfg,

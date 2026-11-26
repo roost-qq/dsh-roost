@@ -105,3 +105,41 @@ test('没有 extId 一律拒绝（来源不能自报）', () => {
   assert.equal(s.set('', { text: 'x' }).ok, false);
   assert.equal(s.set(null, { text: 'x' }).ok, false);
 });
+
+/**
+ * 「停用」的语义必须是「不再影响她」，而不是「调不了接口但话还留在 prompt 里」。
+ *
+ * 面板停用只让令牌失效（`verify()` 跳过 `enabled:false`），段原本每轮照旧注入；
+ * 用户看到的是「我停了它，她还在提那件事」。这组用例钉三件事：停用即不注入、
+ * 重新启用立刻恢复（不逼扩展重启）、停用的段不占别人的预算。
+ */
+test('停用的扩展不再注入；重新启用立刻恢复，不用重注册', () => {
+  let alive = true;
+  const s = createExtPromptContexts({ log: () => {}, isEnabled: () => alive });
+  s.set('ext-a', { name: 'x', text: '只有 A 知道的事' });
+
+  assert.match(s.render('g1'), /只有 A 知道的事/);
+
+  alive = false;
+  assert.equal(s.render('g1'), '', '停用后不能再出现在 system prompt 里');
+  assert.equal(s.size, 0, '停用的段不占预算');
+  /** 段本身不能丢：停用是临时的 */
+  assert.equal(s.list('ext-a').length, 1, '停用不等于删除，重新启用要能立刻恢复');
+
+  alive = true;
+  assert.match(s.render('g1'), /只有 A 知道的事/, '重新启用后下一轮就该回来');
+});
+
+test('停用的扩展不占别人的额度，新扩展塞得进去', () => {
+  const off = new Set();
+  const s = createExtPromptContexts({ log: () => {}, isEnabled: (id) => !off.has(id) });
+
+  const chunk = 'b'.repeat(MAX_CONTEXT_CHARS);
+  let n = 0;
+  while (s.set('ext-old', { name: `o${n}`, text: chunk }).ok) n++;
+  assert.ok(s.size > 0);
+
+  off.add('ext-old');
+  assert.equal(s.size, 0, '停用后额度归还');
+  assert.equal(s.set('ext-new', { name: 'n', text: chunk }).ok, true, '额度应该真的让出来了');
+});
