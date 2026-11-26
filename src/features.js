@@ -275,8 +275,60 @@ export const FEATURES = [
     source: 'config',
     path: ['qqTools', 'enabled'],
     requires: NONE,
-    affects: ['qq_send', 'qq_close', 'qq_send_file'],
+    affects: ['qq_send', 'qq_close', 'qq_send_file', 'qq_retract'],
     offHint: '退回老行为：一整段发出去，不能分段、不能退场、不能 @ 人。',
+  },
+  {
+    id: 'qqRetract',
+    label: '说错了能自己撤回',
+    desc: '给她一个 `qq_retract`：能撤自己刚发的消息（官方限 2 分钟内）。'
+      + '说错、发重、话说得不对时她自己收回，不用等人提醒',
+    source: 'config',
+    path: ['qqTools', 'retract'],
+    requires: NONE,
+    /**
+     * 关掉 = 工具不注册，提示词也自动闭嘴（`forcedDenyTools` 收走）。
+     *
+     * 这不是「多给一个权力」，是**说错话的补救手段**：官机只给 2 分钟，
+     * 关掉之后她只能眼睁睁看着错话留在群里，再补一句更正。
+     * 工具本身只认「自己刚发的消息」——参数里没有消息号，撤不到别人的。
+     */
+    affects: ['qq_retract'],
+    offHint: '说错了也撤不回来，只能再补一句更正。',
+  },
+  {
+    id: 'quoteReply',
+    label: '引用回复',
+    desc: '回复时挂上「回复某某」的引用块，多人同时说话时看得出在接谁的话',
+    source: 'config',
+    path: ['qqTools', 'quote', 'enabled'],
+    /**
+     * 这是**发消息的样式**，不是「关掉就没这个工具」——所以 `affects` 留空。
+     * 写进去的后果是：关掉时把 `qq_send` 之类的工具一起收走，那是另一个功能。
+     */
+    requires: NONE,
+    affects: NONE,
+    offHint: '不再自动挂引用，只在她自己写 `<<quote:>>` 时才引用。',
+  },
+  {
+    id: 'quotePercent',
+    label: '引用概率',
+    desc: '每轮掷一次骰子，命中就只给这一轮的第一条消息挂引用（不是每条都挂）。'
+      + '上面「引用回复」关掉时这个值不起作用',
+    source: 'config',
+    path: ['qqTools', 'quote', 'percent'],
+    kind: 'number',
+    min: 0,
+    max: 100,
+    default: 40,
+    /**
+     * 不写 `requires`：`readFeatures()` 的依赖连带**只对 toggle 有意义**，
+     * 给数值项写进去只会在 `on` 里多一个 `quotePercent:false` 的假开关。
+     * 「引用回复关掉时这个值不生效」由 `quote-auto.js` 的 `isOff(enabled)` 保证。
+     */
+    requires: NONE,
+    affects: NONE,
+    offHint: '',
   },
   {
     id: 'sendFile',
@@ -720,7 +772,7 @@ export function cannotEnable(cfg = {}, store = {}, id) {
 export const FEATURE_GROUPS = [
   /** 运行态排最前：它决定后面所有开关生效不生效 */
   { id: 'run', label: '运行', ids: ['botEnabled', 'dryRun'] },
-  { id: 'talk', label: '怎么说话', ids: ['qqTools', 'stickers', 'voice'] },
+  { id: 'talk', label: '怎么说话', ids: ['qqTools', 'qqRetract', 'quoteReply', 'quotePercent', 'stickers', 'voice'] },
   { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact'] },
   { id: 'queue', label: '消息来不及回的时候（高级）', ids: ['steerInGroup', 'queueMax', 'queueMinBudgetSec'] },
   { id: 'proactive', label: '会不会主动找你', ids: ['speakUp', 'awake'] },

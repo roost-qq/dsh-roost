@@ -95,6 +95,14 @@ export const CHAT_ONLY = [
   'memory_note',
   'qq_send',
   'qq_close',
+  /**
+   * `qq_retract` 属于「说话」这一档，不属于「干活」。
+   *
+   * 它只能撤**自己刚发的**消息（工具参数里没有消息号，见 `qq-tools.js` 那段
+   * 注释），既读不到别人的东西、也不改变任何人的权限。把它挡在「只能聊天」
+   * 之外，只会让机器人在公开群里说错话之后连收回来的手段都没有。
+   */
+  'qq_retract',
   'sticker_pick',
 ];
 
@@ -157,11 +165,11 @@ export function defaultStore() {
        * 只能搜自己、且只限当前会话（见 `search-scope.js`）。所以「允许调用」
        * 不等于「能看别人的消息」，权限边界在工具里，不在这张名单里。
        */
-      admin: { allow: ['memory_search', 'memory_note', 'qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who', 'qq_search'] },
+      admin: { allow: ['memory_search', 'memory_note', 'qq_send', 'qq_retract', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who', 'qq_search'] },
       manager: {},
       helper: {},
-      member: { allow: ['memory_search', 'qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who', 'qq_search'] },
-      unknown: { allow: ['qq_send', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who', 'qq_search'] },
+      member: { allow: ['memory_search', 'qq_send', 'qq_retract', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who', 'qq_search'] },
+      unknown: { allow: ['qq_send', 'qq_retract', 'sticker_pick', 'read_image', 'qq_group_info', 'qq_who', 'qq_search'] },
     },
     /** 分组只用于展示与批量开关；解析时按 match 展开成工具名 */
     groups: {

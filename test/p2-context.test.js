@@ -171,3 +171,140 @@ test('parseOutboundActions 把 quote 单独摘出，不被通用兜底吃掉', (
   assert.doesNotMatch(text, /<</);
   assert.deepEqual(actions.map((a) => a.type), ['pick', 'quote']);
 });
+
+/* ---------------- 3b. 自动引用（宿主掷骰子给的 quoteRef） ---------------- */
+
+test('自动引用：顶层 quoteRef 会挂到 messageReference 上', async () => {
+  /**
+   * **顶层，不是 `extra.quoteRef`。** 2026-11-26 这里写成 `extra.quoteRef`，
+   * 宿主却在顶层传 `quoteRef` → 这个参数被解构丢掉，概率设 100% 也一条都不引用，
+   * 而且不报错、不写日志（主人就是这么发现的）。这条测试锁住真实契约。
+   */
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: '普通回复', target: 'c1', quoteRef: 'REFIDX_AUTO' });
+  assert.deepEqual(ch.calls[0].messageReference, { message_id: 'REFIDX_AUTO' });
+});
+
+test('自动引用：塞进 extra 不生效（位置写错要能被这条抓到）', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: '普通回复', target: 'c1', extra: { quoteRef: 'REFIDX_AUTO' } });
+  assert.equal(ch.calls[0].messageReference, null);
+});
+
+test('显式 <<quote:>> 优先于自动引用（模型明确要求不该被概率覆盖）', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: '回你 <<quote: REFIDX_7>>', target: 'c1', quoteRef: 'REFIDX_AUTO' });
+  assert.deepEqual(ch.calls[0].messageReference, { message_id: 'REFIDX_7' });
+});
+
+test('自动引用为空串时和以前完全一样（null）', async () => {
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: '普通回复', target: 'c1', quoteRef: '' });
+  assert.equal(ch.calls[0].messageReference, null);
+});
+
+test('135 字符的 REFIDX 原样进 messageReference，自动和显式两条路都不许截断', async () => {
+  /**
+   * 真机 `msg_idx` 是 135 字符。出站层以前也 `.slice(0, 128)`，和
+   * `quote-auto.js` 犯的是同一个错——两处都修了，这里把两条路一起钉住。
+   */
+  const real = 'REFIDX_86oJDKVht5SLXUzGblNw4MCtHZUdvB90T97HRccvq2g9OK8tEVTk5s3R+L0vnHaF3dvEja3HLV5Kw2IJTgE3zODnij5vA1LMd0kadewsdY/uqu98iBBiEdnGC8JkBQQN';
+  assert.equal(real.length, 135);
+
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: '自动', target: 'c1', quoteRef: real });
+  assert.deepEqual(ch.calls[0].messageReference, { message_id: real });
+
+  ch.calls.length = 0;
+  await run({ text: `显式 <<quote: ${real}>>`, target: 'c1' });
+  assert.deepEqual(ch.calls[0].messageReference, { message_id: real });
+});
+
+test('自动引用**不改** markdown：真机验证过两者可以共存', async () => {
+  /**
+   * 2026-11-26 真机对照（`plugins/quotetest` 四条）：`msg_type=2` 与
+   * `message_reference` 能同时出现，引用块正常、markdown 照常渲染。
+   * 所以这里锁住「挂引用不降级」——将来谁想加「引用就转纯文本」，
+   * 得先推翻这条测试并说明为什么。
+   */
+  const ch = fakeChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: '**粗体** 回复', target: 'c1', quoteRef: 'REFIDX_AUTO' });
+  assert.equal(ch.calls[0].markdown, true);
+  assert.equal(ch.calls[0].text, '**粗体** 回复', '正文不该被改成纯文本');
+  assert.deepEqual(ch.calls[0].messageReference, { message_id: 'REFIDX_AUTO' });
+});
+
+/* ---------------- 3c. 撤回用的「最近发过的消息」环形 ---------------- */
+
+/** 每次返回不同 id 的通道：`recentSentOf` 要按顺序分辨是哪条 */
+function seqChannel() {
+  const calls = [];
+  let n = 0;
+  return {
+    calls,
+    async send(p) {
+      calls.push(p);
+      n += 1;
+      return { ok: true, id: `m${n}` };
+    },
+  };
+}
+
+test('recentSentOf：最新在前，各条 id 不串', async () => {
+  const ch = seqChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: '第一句', target: 'c1' });
+  await run({ text: '第二句', target: 'c1' });
+  const list = run.recentSentOf('c1');
+  assert.equal(list.length, 2);
+  assert.equal(list[0].id, 'm2', '最新的排最前');
+  assert.equal(list[1].id, 'm1');
+  assert.equal(list[0].kind, 'c2c', 'kind 要记下来，撤回频道消息靠它选端点');
+  assert.ok(list[0].at > 0, 'at 要记下来，2 分钟预检靠它');
+});
+
+test('recentSentOf：按会话分开记，互不串味', async () => {
+  const ch = seqChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: 'a', target: 'c1' });
+  await run({ text: 'b', target: 'c2' });
+  assert.equal(run.recentSentOf('c1').length, 1);
+  assert.equal(run.recentSentOf('c2').length, 1);
+  assert.equal(run.recentSentOf('c2')[0].id, 'm2');
+  assert.deepEqual(run.recentSentOf('nobody'), []);
+});
+
+test('recentSentOf：最多留 8 条，老的自然挤掉', async () => {
+  const ch = seqChannel();
+  const run = createActionRunner({ channel: () => ch });
+  for (let i = 0; i < 12; i += 1) await run({ text: `第${i}句`, target: 'c1' });
+  const list = run.recentSentOf('c1');
+  assert.equal(list.length, 8);
+  assert.equal(list[0].id, 'm12');
+  assert.equal(list[7].id, 'm5', '最老的应该是第 5 条（m5）');
+});
+
+test('recentSentOf：返回的是副本，调用方 reverse 不会把内部顺序搞反', async () => {
+  const ch = seqChannel();
+  const run = createActionRunner({ channel: () => ch });
+  await run({ text: 'a', target: 'c1' });
+  await run({ text: 'b', target: 'c1' });
+  const first = run.recentSentOf('c1');
+  first.reverse();
+  first.push({ id: 'fake' });
+  const again = run.recentSentOf('c1');
+  assert.equal(again[0].id, 'm2', '内部顺序不能被外部改动影响');
+  assert.equal(again.length, 2, '外部 push 不能污染内部');
+});
+
+test('recentSentOf：没拿到消息号的发送不记（主动消息 / 试运行）', async () => {
+  const run = createActionRunner({ channel: () => ({ async send() { return { ok: true, id: '' }; } }) });
+  await run({ text: 'x', target: 'c1' });
+  assert.deepEqual(run.recentSentOf('c1'), [], '没有 id 就撤不了，不该记进去');
+});

@@ -264,3 +264,49 @@ test('等待：挂载 Promise 失败时不把整轮带崩', async () => {
     await assert.doesNotReject(() => state.waitFor(agent));
   } finally { cleanup(); }
 });
+
+/* ---------------- 907 段：撤回（`qq_retract`） ---------------- */
+
+/**
+ * 撤回这条提示词的措辞是**安全边界**，不是文案：教错一句就会让模型
+ * 答应撤别人的消息、或者在超时后无限重试。所以按四问逐条钉住。
+ */
+const withRetract = (extra = {}) => buildOutputPrompt({
+  mounted: { ok: true, names: ['qq_send', 'qq_close', 'qq_retract'] },
+  denied: [],
+  registeredNames: null,
+  ...extra,
+});
+
+test('撤回提示：工具挂上就教，教的是「撤自己的」', () => {
+  const p = withRetract();
+  assert.match(p, /qq_retract/);
+  assert.match(p, /你自己刚发的/, '必须限定「自己的」');
+});
+
+test('撤回提示：绝不出现「可以撤别人的」', () => {
+  const p = withRetract();
+  assert.match(p, /撤不了别人的/);
+  assert.doesNotMatch(p, /可以撤别人|也能撤别人的|帮别人撤/, '教了它就会答应做不到的事');
+});
+
+test('撤回提示：写明 2 分钟，并说超时别重试', () => {
+  const p = withRetract();
+  assert.match(p, /2 分钟/);
+  assert.match(p, /别再试|别重试/);
+});
+
+test('撤回提示：说明「撤了不代表没说过」', () => {
+  const p = withRetract();
+  assert.match(p, /看过的人已经看过/, '不写这句它会把撤回当成可以随便说的许可');
+});
+
+test('撤回提示：工具被 deny 时整句不出现', () => {
+  const p = withRetract({ denied: ['qq_retract'] });
+  assert.doesNotMatch(p, /qq_retract/);
+});
+
+test('撤回提示：注册清单里没有它时也不教（跨版本兜底）', () => {
+  const p = withRetract({ registeredNames: new Set(['qq_send', 'qq_close']) });
+  assert.doesNotMatch(p, /qq_retract/);
+});
