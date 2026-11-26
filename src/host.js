@@ -10491,7 +10491,20 @@ export function apply(ctx) {
         return ctx.webServer.register({
           kind: 'exact',
           path: API + path,
-          handler: (req, res) => {
+          /**
+           * **宿主路由鉴权声明**（DSH 0.2.3-alpha.1 起生效，旧宿主忽略）。
+           *
+           * 0.2.3 起 `webServer.register` 的 `auth` 默认是 `required`，宿主会在
+           * 调用 handler **之前**完成鉴权，并把准入 Peer 作为 handler 第三个
+           * 参数传进来（`docs/upgrade-guide/v0.2.2-rc.2/connection-page-peer`）。
+           * 旧宿主（0.2.2-rc.1 及之前）的 `register` 只做 `table.set(path, route)`，
+           * 不认识这个字段也不会报错，所以两代宿主可以共用同一份声明。
+           *
+           * `anonymous` 只给扩展静态页：iframe 导航带不了凭据，宿主对匿名路由
+           * 仍会做 Host/Origin 来源检查（不是完全不判）。
+           */
+          auth: skipFence ? 'anonymous' : 'required',
+          handler: (req, res, peer) => {
             /**
              * 先过栅栏再进 handler。
              *
@@ -10515,16 +10528,41 @@ export function apply(ctx) {
                 message: '这个请求来自一个沙箱页面，面板接口不接受（扩展页面请通过面板转发）',
               });
             }
-            let bad = null;
             if (!skipFence) {
-              try {
-                bad = fence(req);
-              } catch (e) {
-                bad = { status: 403, why: `请求栅栏异常：${e?.message ?? e}` };
-              }
-              if (bad) {
-                log.warn(`面板 API 拒绝 ${path}：${bad.why}`);
-                return send(res, bad.status, { ok: false, message: bad.why });
+              /**
+               * **新宿主：Peer 由宿主交回，直接用，别再二次鉴权。**
+               *
+               * 0.2.3 起 webServer 已经按 `auth` 做完准入，handler 第三参数就是
+               * 那个 Peer。以前这里会再调一次 `fence(req)` → `connection.admit()`，
+               * 等于对同一个请求鉴权两次；新版 `admit()` 要求
+               * `ConnectionTrustRequest` 形状，与裸 `IncomingMessage` 不完全一致，
+               * 会误判成未授权 → 面板所有接口 403，前端只看到「读不到宿主状态」。
+               */
+              if (peer) {
+                req[PEER] = peer;
+                const kind = peer?.principal?.kind;
+                if (kind !== undefined && kind !== 'owner') {
+                  log.warn(`面板 API 拒绝 ${path}：调用方不是本机所有者`);
+                  return send(res, 403, { ok: false, message: '调用方不是本机所有者' });
+                }
+              } else {
+                /**
+                 * **旧宿主：没有 Peer 参数，走原来的栅栏。**
+                 *
+                 * 0.2.2-rc.1 及之前 `handler` 只收 `(req, res)`，第三参数恒为
+                 * `undefined`；这条路必须原样保留，否则旧版 DSH 上的面板会
+                 * 失去唯一一道鉴权。
+                 */
+                let bad = null;
+                try {
+                  bad = fence(req);
+                } catch (e) {
+                  bad = { status: 403, why: `请求栅栏异常：${e?.message ?? e}` };
+                }
+                if (bad) {
+                  log.warn(`面板 API 拒绝 ${path}：${bad.why}`);
+                  return send(res, bad.status, { ok: false, message: bad.why });
+                }
               }
             }
             return Promise.resolve(handler(req, res)).catch((e) => send(res, 500, { ok: false, message: e.message }));
