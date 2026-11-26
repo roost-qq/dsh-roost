@@ -11153,7 +11153,7 @@ export function apply(ctx) {
     const offs = [
       /** 扩展作者引导那四条（在上面注册，见 authorOffs 的注释） */
       ...authorOffs,
-      /** 问题反馈那四条（同上，必须注销） */
+      /** 问题反馈那五条（同上，必须注销） */
       ...supportOffs,
       /**
        * 用量汇总：按天 + 按会话。
