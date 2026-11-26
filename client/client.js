@@ -20324,6 +20324,61 @@ window.__ModuleLoader__.load({
           setRevokeAsk(null)
         }
       }
+      /**
+       * 「复制一份来改」（2026-11-27）。
+       *
+       * 为什么要有：用户想改的是「某个已装扩展的某个行为」，从零开始写要先读一遍
+       * 别人的实现。复制成一个新 id 再改，比对着看快得多。
+       *
+       * 新 id 让用户自己填并**当场校验**（和后端同一条正则）：只自动加 `-copy`
+       * 的话，复制第二次就撞名，用户还得自己猜该叫什么。
+       */
+      const [forkFor, setForkFor] = useState('')
+      const [forkId, setForkId] = useState('')
+      const [forkName, setForkName] = useState('')
+      const [forkBusy, setForkBusy] = useState(false)
+
+      const doFork = async () => {
+        setForkBusy(true)
+        try {
+          const r = await post('/extensions/fork', {
+            id: forkFor, newId: forkId.trim(), name: forkName.trim() || undefined,
+          })
+          if (r?.ok === false) { toast(r.message || '复制失败'); return }
+          toast(r.message || '复制好了')
+          setForkFor(''); setForkId(''); setForkName('')
+          /** 复制完下一步就是让 AI 改它：话术直接进剪贴板，省一次点击 */
+          if (r?.prompt) {
+            try { await navigator.clipboard.writeText(r.prompt) } catch { /* 剪贴板不可用就算了 */ }
+          }
+          await load()
+          if (reloadExtPages) reloadExtPages()
+        } finally { setForkBusy(false) }
+      }
+
+      /** 打开扩展目录（宿主侧 spawn 文件管理器，前端拿不到本地路径） */
+      const [openBusy, setOpenBusy] = useState('')
+      const openExtDir = async (id) => {
+        setOpenBusy(id || '@root')
+        try {
+          const r = await post('/extensions/open', id ? { id } : {})
+          if (!r?.ok) { toast(r.message || '打开失败'); return }
+          toast(r.message || '已打开')
+        } finally { setOpenBusy('') }
+      }
+
+      /** 「复制给 DSH 的话」：路径与文档地址由宿主拼，前端只管进剪贴板 */
+      const copyExtPrompt = async (id) => {
+        const r = await get('/extensions/prompt' + (id ? `?id=${encodeURIComponent(id)}` : ''))
+        if (!r?.ok) { toast(r.message || '拿不到话术'); return }
+        try {
+          await navigator.clipboard.writeText(r.prompt)
+          toast(id ? '复制好了，粘给 DSH 让它改这个扩展' : '复制好了，粘给 DSH')
+        } catch {
+          toast('复制失败，手动选一下吧')
+        }
+      }
+
       const load = async () => {
         const r = await EXT_POST('extensions.get')
         setData(r)
@@ -20823,13 +20878,39 @@ window.__ModuleLoader__.load({
                   h('button', {
                     type: 'button', className: 'roost-btn',
                     disabled: saving === x.id || x.foreign, onClick: () => save(x.id),
-                  }, x.foreign ? '用户手写 · 只读' : '保存 usage'),
-                  x.hasConfig && !x.foreign
+                    /** 只读的只是「能力说明」（要写回 plugin.json）；设置和目录都是可改的 */
+                    title: x.foreign ? '手写扩展的能力说明写在它的 plugin.json 里，面板不改你的文件' : '',
+                  }, x.foreign ? '说明只读' : '保存 usage'),
+                  /**
+                   * 2026-11-27：手写扩展也画「设置」。
+                   *
+                   * 原来看 `!x.foreign` 挡掉，等于「自己写的扩展在面板里连自己的设置都改不了」——
+                   * 而配置存在宿主这边，改它不动用户目录（见 ext-panel.saveConfig 的注释）。
+                   */
+                  x.hasConfig
                     ? h('button', {
                         type: 'button', className: 'roost-btn',
                         disabled: cfgBusy, onClick: () => openCfg(x.id),
                       }, cfgFor === x.id ? '收起设置' : '设置')
                     : null,
+                  /** 写扩展时最常用的三个动作：看文件、让 AI 改、基于它改一份 */
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    disabled: openBusy === x.id, onClick: () => openExtDir(x.id),
+                  }, '打开文件夹'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    onClick: () => copyExtPrompt(x.id),
+                  }, '复制给 DSH 的话'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn',
+                    title: '整目录复制成一个新 id，清单里的 id 一起改好，改它不影响原来那个',
+                    onClick: () => {
+                      setForkFor(x.id)
+                      setForkId(`${x.id}-copy`.slice(0, 32))
+                      setForkName(`${x.name} 副本`)
+                    },
+                  }, '复制一份来改'),
                   h('button', {
                     type: 'button', className: 'roost-btn',
                     disabled: marketBusy === x.id || !!scopeAsk || !!revokeAsk,
@@ -20871,7 +20952,9 @@ window.__ModuleLoader__.load({
                   : null,
               )),
             )
-          : h('div', { className: 'roost-empty' }, '还没装扩展。去「扩展 → 市场」装一个，装好后会列在这里并出现在左侧导航；这里只列它们进提示词的说明。'),
+          : h('div', { className: 'roost-empty' },
+              '还没装扩展。可以去「扩展 → 市场」装一个，也可以自己写一个——上面「想自己写一个扩展？」那张卡里有话术和教程。',
+              '装好后会列在这里并出现在左侧导航；这里只列它们进提示词的说明。'),
         h('div', {
           className: 'roost-note',
           /** 合计预算 2048 字节（与 `ext-usage.js` 的 USAGE_TOTAL_BYTE_LIMIT 对齐）。超了进提示词会被截，必须当场说。 */
@@ -20933,6 +21016,46 @@ window.__ModuleLoader__.load({
               onClose: () => { if (marketBusy !== revokeAsk) setRevokeAsk(null) },
               onConfirm: () => revokeMarket(revokeAsk),
             })
+          : null,
+        /**
+         * 「复制一份来改」的输入框。
+         *
+         * 用弹窗而不是 `window.prompt`：桌面端 prompt 会被宿主拦掉（返回 null），
+         * 用户点一下什么都不发生；而且新 id 要当场校验，原生 prompt 做不了。
+         */
+        forkFor
+          ? h(PageModal, {
+              title: `复制「${forkFor}」`,
+              onClose: () => { if (!forkBusy) setForkFor('') },
+            },
+              h('div', { className: 'roost-note' },
+                '整目录复制成新的一份，清单里的 id / serverName 一起改好，原扩展不动。',
+                'node_modules、deps 和 .source.json 不复制——前两个白占空间，最后一个会让新副本被当成市场资产（更新时拒绝覆盖）。'),
+              h('label', { style: { display: 'block', marginTop: 10, fontSize: 11.5 } }, '新 id（小写英文，如 weather-copy）',
+                h('input', {
+                  className: 'roost-input', value: forkId, spellCheck: false, placeholder: 'weather-copy',
+                  onChange: (e) => setForkId(e.target.value.toLowerCase()),
+                })),
+              h('label', { style: { display: 'block', marginTop: 8, fontSize: 11.5 } }, '显示名',
+                h('input', {
+                  className: 'roost-input', value: forkName,
+                  onChange: (e) => setForkName(e.target.value),
+                })),
+              !/^[a-z][a-z0-9-]{1,31}$/.test(forkId.trim()) && forkId.trim()
+                ? h('div', { style: { marginTop: 6, fontSize: 11.5, color: 'var(--bad)' } },
+                    'id 只能用小写字母开头，小写字母 / 数字 / 横线，2–32 位')
+                : null,
+              h('div', { style: { display: 'flex', gap: 8, marginTop: 12 } },
+                h('button', {
+                  type: 'button', className: 'roost-btn roost-btn-primary',
+                  disabled: forkBusy || !/^[a-z][a-z0-9-]{1,31}$/.test(forkId.trim()),
+                  onClick: doFork,
+                }, forkBusy ? '复制中…' : '复制'),
+                h('button', {
+                  type: 'button', className: 'roost-btn', disabled: forkBusy,
+                  onClick: () => setForkFor(''),
+                }, '取消')),
+            )
           : null,
       )
     }
@@ -23498,6 +23621,99 @@ window.__ModuleLoader__.load({
      * 装一个扩展要滚三次。拆完每页只回答一个问题。
      */
     /**
+     * 写扩展教程（2026-11-27，对照 aurabot 的 ModuleTutorial）。
+     *
+     * 懒加载：展开才读文档，不展开不占首屏。文档随包走（`docs/写一个扩展.md`），
+     * 断网也能看；GitHub 链接只是补充——用户装的是本地包，不能默认他连得上 GitHub。
+     */
+    function ExtGuideBlock({ toast }) {
+      const [text, setText] = useState('')
+      const [url, setUrl] = useState('')
+      const [err, setErr] = useState('')
+      const [busy, setBusy] = useState(false)
+      const load = async () => {
+        if (text || busy) return
+        setBusy(true)
+        try {
+          const r = await get('/extensions/guide')
+          if (r?.ok) { setText(r.text || ''); setUrl(r.url || '') }
+          else { setErr(r?.message || '读不到教程'); setUrl(r?.url || '') }
+        } finally { setBusy(false) }
+      }
+      const copyAll = async () => {
+        try { await navigator.clipboard.writeText(text); toast('教程复制好了') }
+        catch { toast('复制失败，手动选一下吧') }
+      }
+      return h('details', {
+        className: 'roost-note',
+        style: { marginTop: 8 },
+        onToggle: (e) => { if (e.target.open) load() },
+      },
+        h('summary', { style: { cursor: 'pointer', fontWeight: 620 } }, '写扩展教程（从清单到能跑，含最小示例）'),
+        h('div', { style: { display: 'flex', gap: 8, margin: '8px 0', flexWrap: 'wrap', alignItems: 'center' } },
+          h('button', { type: 'button', className: 'roost-btn roost-btn-primary', disabled: !text, onClick: copyAll }, '一键复制全文'),
+          url ? h('a', { href: url, target: '_blank', rel: 'noreferrer', style: { fontSize: 11.5 } }, '在 GitHub 上看 ↗') : null,
+          busy ? h('span', { className: 'roost-faint' }, '读着…') : null),
+        err ? h('div', { style: { color: 'var(--bad)', fontSize: 11.5 } }, err) : null,
+        text ? h('pre', {
+          style: {
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 420, overflow: 'auto',
+            margin: 0, fontFamily: 'ui-monospace,monospace', fontSize: 11.5, lineHeight: 1.6,
+          },
+        }, text) : null,
+      )
+    }
+
+    /**
+     * 「想自己写一个扩展？」（2026-11-27）。
+     *
+     * 对照 aurabot 的「已安装」卡补的是**引导层**：能力（骨架、市场、权限分级）
+     * 本来就有，缺的是入口说明——用户打开这一页只看到一串已装清单，不知道
+     * 这些本事可以自己加、写不动可以让 AI 写、写完放哪。
+     *
+     * 三个动作都走宿主：话术要带真实目录（前端拼会拼错），目录要在文件管理器里
+     * 打开（浏览器拿不到本地路径），教程要能在断网时看。
+     */
+    function ExtAuthoringCard({ toast }) {
+      const [busy, setBusy] = useState('')
+      const copyPrompt = async () => {
+        setBusy('prompt')
+        try {
+          const r = await get('/extensions/prompt')
+          if (!r?.ok) { toast(r?.message || '拿不到话术'); return }
+          await navigator.clipboard.writeText(r.prompt)
+          toast('复制好了，粘给 DSH，把【】里那句换成你想要的')
+        } catch {
+          toast('复制失败，手动选一下吧')
+        } finally { setBusy('') }
+      }
+      const openDir = async () => {
+        setBusy('open')
+        try {
+          const r = await post('/extensions/open', {})
+          toast(r?.message || (r?.ok ? '已打开' : '打开失败'))
+        } finally { setBusy('') }
+      }
+      return h(Sec, { title: '想自己写一个扩展？' },
+        h('div', { className: 'roost-note' },
+          '她会的每件额外本事都可以是一个扩展：一个目录 + 一份 plugin.json + 一个 MCP server。',
+          '能单独停用、能复制一份来改、插件升级不会覆盖。不会写代码也可以——',
+          '把「复制给 DSH 的话」粘给 DSH，说清你想要什么，剩下的交给它。'),
+        h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' } },
+          h('button', {
+            type: 'button', className: 'roost-btn roost-btn-primary',
+            disabled: busy === 'prompt', onClick: copyPrompt,
+          }, busy === 'prompt' ? '拿话术中…' : '复制给 DSH 的话'),
+          h('button', {
+            type: 'button', className: 'roost-btn',
+            disabled: busy === 'open', onClick: openDir,
+          }, '打开扩展文件夹'),
+          h('span', { className: 'roost-faint' }, '改完代码要重启 DSH 或重连 MCP 才生效')),
+        h(ExtGuideBlock, { toast }),
+      )
+    }
+
+    /**
      * 5.9 新建扩展向导：填几个字段，生成一份能直接跑的骨架。
      *
      * 默认收起——绝大多数人打开「已安装」是来看/改已装的东西，不是要写扩展。
@@ -23537,7 +23753,20 @@ window.__ModuleLoader__.load({
         })
         setBusy(false)
         setRes(r)
-        toast(r.ok === false ? (r.message || '生成失败') : (r.message || '已生成'))
+        if (r.ok === false) return toast(r.message || '生成失败')
+        toast(r.message || '已生成')
+        /**
+         * 生成完就把「复制给 DSH 的话」放进剪贴板（2026-11-27）。
+         *
+         * 用户接下来必然要做的事就是「让 AI 接着写」，而骨架里只有 TODO。
+         * 少一次点击就少一个「生成了然后不知道下一步干嘛」的岔路。
+         */
+        if (r.prompt) {
+          try {
+            await navigator.clipboard.writeText(r.prompt)
+            toast('骨架好了，「复制给 DSH 的话」也放进剪贴板了')
+          } catch { /* 剪贴板不可用：只提示生成成功 */ }
+        }
       }
 
       return h(Sec, {
@@ -23648,10 +23877,15 @@ window.__ModuleLoader__.load({
 
     function ExtTab({ quick, toast, extPages, setTab, reloadExtPages, feat, reloadCaps, busy }) {
       return h('div', null,
+        /**
+         * 2026-11-27：引导放在最前。原来第一张卡直接是「已装扩展」的清单，
+         * 用户看不到「这里的东西可以自己加」——能力都在，只是没说。
+         */
+        h(ExtAuthoringCard, { toast }),
+        h(ExtWizardBlock, { toast }),
         h(ExtSettingsBlock, { toast, part: 'installed', reloadExtPages }),
         h(ExtPagesIndexCard, { extPages, setTab }),
         h(ExtCapsBlock, { quick, toast }),
-        h(ExtWizardBlock, { toast }),
         /**
          * 2026-11-26：`bridge`（对外联动）与 `extensions`（用户扩展）从权限页搬来。
          * 两者都是「扩展这一层要不要开」，放已安装页末尾，紧挨着它们影响的列表。
@@ -23664,7 +23898,20 @@ window.__ModuleLoader__.load({
 
     /** 市场：能装什么、装 / 更新 / 停用 */
     function ExtMarketTab({ toast, reloadExtPages }) {
-      return h(ExtSettingsBlock, { toast, part: 'market', reloadExtPages })
+      return h('div', null,
+        /**
+         * 逛市场的人也是「可能想写一个」的人：装了一圈发现没有想要的，
+         * 下一步就是自己写。教程放这里，不用回已安装页找。
+         *
+         * 卡前面必须有这一句：只挂一张折叠卡，用户看到的是一个陌生的
+         * 「写扩展教程」，不知道跟自己有什么关系（2026-11-27 实看出来的）。
+         */
+        h(ExtSettingsBlock, { toast, part: 'market', reloadExtPages }),
+        h('div', { className: 'roost-note', style: { marginTop: 12 } },
+          '逛了一圈没有想要的？扩展就是「一个目录 + 一份 plugin.json + 一个 MCP server」，',
+          '下面这份教程带你从零写一个。写完想给别人用，教程里「想发到市场」那一节讲了怎么发。'),
+        h(ExtGuideBlock, { toast }),
+      )
     }
 
     /** 接口：给独立会话发 /v1 客户端令牌 */

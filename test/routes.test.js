@@ -876,7 +876,12 @@ test('对齐：前端调用的每个路径后端都存在', async () => {
   const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
 
-  const routes = new Set([...host.matchAll(/route\('(\/[a-z/-]+)'/g)].map((m) => m[1]));
+  /**
+   * `regAuthor` 是 `route` 的包装（注册 + 收进 authorOffs 供清理）。
+   * 只认 `route(` 的话，用它注册的路由会被当成「后端不存在」——正是这条
+   * 测试要抓的那类漂移，反过来误报一次。
+   */
+  const routes = new Set([...host.matchAll(/(?:route|regAuthor)\('(\/[a-z/-]+)'/g)].map((m) => m[1]));
   const called = new Set([
     ...[...client.matchAll(/(?:get|post)\('(\/[a-z/-]+)/g)].map((m) => m[1]),
     ...[...client.matchAll(/run\('(\/[a-z/-]+)/g)].map((m) => m[1]),

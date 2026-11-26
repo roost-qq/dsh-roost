@@ -14,6 +14,7 @@
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
 import { basename, join, resolve, extname, relative, sep } from 'node:path';
+import { spawn } from 'node:child_process';
 import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, createWriteStream, readFileSync, rmSync, realpathSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets, restoreMaskedSecrets } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
@@ -66,7 +67,7 @@ import { createGroupChatProfiles } from './group-chat-profile.js';
 import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS, DEFAULT_IMPRESSION_DAYS } from './gist-impression.js';
 import { sourceStats } from './source-stats.js';
 import { offpeakState, shouldDeferHeavy } from './offpeak.js';
-import { createClientStore, createExtSecrets, createExtRegistry, extEnabledOf } from './ext-registry.js';
+import { createClientStore, createExtSecrets, createExtRegistry, extEnabledOf, MANIFEST_FILE, SOURCE_FILE } from './ext-registry.js';
 import { guardQuickCall, PANEL_MARK } from './ext-quick-guard.js';
 import { injectShim } from './ext-page-shim.js';
 import { mountUsageSections, mountToolOutputBudget } from './ext-usage.js';
@@ -293,6 +294,9 @@ import { workspaceTitleFor } from './workspace-title.js';
 import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-sections.js';
 import { simulate, SIM_PERSONAS } from './simulate.js';
 import { buildExtension, formatScaffold } from './ext-wizard.js';
+import {
+  plantAuthorDocs, authorPrompt, forkExtension, AUTHOR_GUIDE, GUIDE_URL,
+} from './ext-author.js';
 import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
 import { polishText, POLISH_PRESETS } from './persona-polish.js';
 import { createAutotelic, TUNABLE } from './autotelic.js';
@@ -10681,7 +10685,166 @@ export function apply(ctx) {
         : (cfg.tts || {});
     };
 
+    /**
+     * 扩展作者引导（2026-11-27）。
+     *
+     * 对照 aurabot 的「模块」页补的是**引导层**，不是能力层——骨架生成、市场、
+     * 权限分级本来就有，缺的是「用户不知道从哪进、写不动时不知道丢给 AI、
+     * 写完不知道去哪装」。四件事：
+     *   1. 文档随包走：`docs/API.md` + `extension.d.ts` 投放到扩展根目录，
+     *      用户打开文件夹就能看见，prompt 里也能给绝对路径；
+     *   2. 「复制给 DSH 的话」由宿主生成：目录和文档路径只有宿主知道，
+     *      前端拼容易拼错，改路径时还要改两处；
+     *   3. 「打开文件夹」只认扩展根目录和已装扩展目录，**不接受任意路径**——
+     *      否则面板就成了一个「以宿主权限打开任意目录」的口子；
+     *   4. 「复制一份来改」复制目录时排除 node_modules / .git / deps：
+     *      前者几百 MB，后者是宿主共享依赖，复制过去会白占空间且版本分叉。
+     */
+    /**
+     * 这四条路由**必须进 offs**（清理函数要挨个注销）。
+     *
+     * 它们是在 `offs` 数组外面注册的（数组里塞不了 `const` 声明），一开始漏收，
+     * `激活: 清理函数要把每条路由都注销掉` 立刻红——重载后同一路径注册两次，
+     * DSH 会直接拒绝激活（duplicate exact route）。所以用 regAuthor 收口。
+     */
+    const authorOffs = []
+    const regAuthor = (path, handler) => {
+      const off = route(path, handler)
+      authorOffs.push(off)
+      return off
+    }
+
+    /** 文档投放与话术都在 `ext-author.js`（纯文件/字符串操作，单独可测） */
+    const EXT_DOCS_SRC = join(import.meta.dirname, '..', 'docs')
+    const plantExtDocs = () => plantAuthorDocs({
+      extRoot: extRegistry.root, docsSrc: EXT_DOCS_SRC, log,
+    })
+
+    /**
+     * 扩展目录：空 id = 根目录；有 id 必须是**已装**的那个。
+     * 用 `list()` 查而不是直接拼路径，路径穿越和 `../` 天然被挡掉。
+     */
+    const extDirOf = (id) => {
+      const want = String(id || '').trim()
+      if (!want) return extRegistry.root
+      const hit = extRegistry.list().find((x) => x.id === want)
+      return hit ? hit.dir : ''
+    }
+
+    /** 话术里的目录必须真实存在：先投放文档，再生成 */
+    const extAuthorPrompt = (id) => {
+      plantExtDocs()
+      return authorPrompt({
+        dir: extDirOf(id) || extRegistry.root,
+        doc: join(extRegistry.root, 'API.md'),
+      })
+    }
+
+    /** 写扩展的教程：随包发布，面板里直接看 / 复制，连不上 GitHub 也能用。 */
+    regAuthor('/extensions/guide', (req, res) => {
+      try {
+        const text = readFileSync(join(import.meta.dirname, '..', 'docs', AUTHOR_GUIDE), 'utf8')
+        return send(res, 200, { ok: true, text, url: GUIDE_URL })
+      } catch (e) {
+        return send(res, 200, {
+          ok: false,
+          message: `读不到教程文件（docs/${AUTHOR_GUIDE}）：${e?.message ?? e}`,
+          url: GUIDE_URL,
+        })
+      }
+    })
+
+    /** 「复制给 DSH 的话」：不带 id = 整页（新建一个），带 id = 改某一个。 */
+    regAuthor('/extensions/prompt', (req, res) => {
+      const q = new URL(req.url || '/', 'http://x').searchParams
+      const id = String(q.get('id') || '').trim()
+      if (id && !extDirOf(id)) {
+        return send(res, 404, { ok: false, message: `没有「${id}」这个扩展` })
+      }
+      return send(res, 200, { ok: true, id, prompt: extAuthorPrompt(id) })
+    })
+
+    /** 在系统文件管理器里打开扩展目录。只认根目录 / 已装扩展目录。 */
+    regAuthor('/extensions/open', async (req, res) => {
+      const body = await readBody(req).catch(() => ({}))
+      const id = String(body?.id || '').trim()
+        const dir = extDirOf(id)
+        if (!dir) return send(res, 404, { ok: false, message: `没有「${id}」这个扩展` })
+        /** 根目录可能还没建（一个扩展都没装过）：先建再开，别让用户点出一句「目录不在了」 */
+        if (!existsSync(dir)) {
+          if (id) return send(res, 400, { ok: false, message: `目录不在了：${dir}` })
+          try { mkdirSync(dir, { recursive: true }) } catch (e) {
+            return send(res, 500, { ok: false, message: `建不了扩展目录：${e?.message ?? e}` })
+          }
+        }
+      const cmd = process.platform === 'win32' ? 'explorer'
+        : process.platform === 'darwin' ? 'open' : 'xdg-open'
+      try {
+        /**
+         * `detached` + `unref`：文件管理器是独立进程，宿主不该等它。
+         * Windows 上 `explorer` 打开成功也常返回非 0，所以**只看 error 事件**，
+         * 不看退出码——按退出码判会把「已经打开了」报成失败。
+         */
+        const child = spawn(cmd, [dir], { detached: true, stdio: 'ignore' })
+        child.on('error', (e) => log.warn(`打开扩展目录失败：${e.message}`))
+        child.unref()
+      } catch (e) {
+        return send(res, 500, { ok: false, message: `打开失败：${e?.message ?? e}`, dir })
+      }
+      return send(res, 200, { ok: true, dir, message: `已打开 ${dir}` })
+    })
+
+    /**
+     * 复制一份来改：整目录复制成新 id，清单里的 id / serverName 跟着改。
+     *
+     * 与 aurabot 的「复制内置模块」不同——我们没有「内置扩展」，这里的用途是
+     * 「在市场装的基础上改一份自己的」或「拿自己的旧扩展改个变体」。所以必须
+     * 删掉 `.source.json`：留着的话新目录会被当成市场资产，更新时会拒绝覆盖，
+     * 而它其实已经是用户自己的东西了。
+     */
+    regAuthor('/extensions/fork', async (req, res) => {
+      const body = await readBody(req).catch(() => ({}))
+      const from = extDirOf(body?.id)
+      if (!from) return send(res, 404, { ok: false, message: `没有「${String(body?.id ?? '')}」这个扩展` })
+      const newId = String(body?.newId || '').trim()
+      if (!/^[a-z][a-z0-9-]{1,31}$/.test(newId)) {
+        return send(res, 400, {
+          ok: false,
+          message: '新 id 只能用小写字母开头，小写字母 / 数字 / 横线，2–32 位（比如 weather-copy）',
+        })
+      }
+      const dest = extRegistry.pathOf(newId)
+      if (existsSync(dest)) {
+        return send(res, 409, { ok: false, message: `已经有「${newId}」这个扩展了，换个 id` })
+      }
+      /** 复制本身在 `ext-author.js`：纯文件操作，排除规则与清单改名都能单测 */
+      let forked
+      try {
+        forked = forkExtension({ from, to: dest, newId, name: body?.name })
+      } catch (e) {
+        return send(res, 500, { ok: false, message: `复制失败：${e?.message ?? e}（${from}）` })
+      }
+      const saved = extRegistry.read(newId)
+      if (!saved) {
+        return send(res, 500, {
+          ok: false,
+          message: `复制好了但清单没过校验，检查 ${join(dest, MANIFEST_FILE)}`,
+        })
+      }
+      plantExtDocs()
+      log.info(`扩展复制：${from} → ${dest}（${forked.files} 个文件）`);
+      return send(res, 200, {
+        ok: true, id: newId, dir: dest,
+        name: String(saved.name ?? newId),
+        files: forked.files,
+        message: `已复制成「${newId}」（${forked.files} 个文件），清单里的 id 也改好了`,
+        prompt: extAuthorPrompt(newId),
+      })
+    })
+
     const offs = [
+      /** 扩展作者引导那四条（在上面注册，见 authorOffs 的注释） */
+      ...authorOffs,
       /**
        * 用量汇总：按天 + 按会话。
        *
@@ -16272,18 +16435,27 @@ export function apply(ctx) {
         }
 
         log.info(`扩展向导：生成 ${built.id}（${built.transport}，${built.files.length} 个文件）→ ${dest}`);
+        /** 文档跟着骨架一起到位：用户点「打开文件夹」就能看见 API.md */
+        const planted = plantExtDocs();
         return send(res, 200, {
           ok: true,
           id: built.id,
           dir: dest,
           transport: built.transport,
           files: built.files.map((f) => f.path),
+          docs: planted,
           warnings: built.warnings,
           message: formatScaffold(built),
-          /** 下一步给具体动作，别只说「重启试试」 */
+          /** 生成完直接把「复制给 DSH 的话」给前端：下一步就该让 AI 来改它 */
+          prompt: extAuthorPrompt(built.id),
+          /**
+           * 下一步给具体动作，别只说「重启试试」。
+           * 注意**没有**「点重载」这个按钮：加载 / 重连归 DSH，宿主没有单扩展
+           * 重载通道，写上去等于让用户去找一个不存在的东西。
+           */
           next: built.transport === 'stdio'
-            ? ['去「已安装」页点重载 / 重启 DSH，宿主会拉起 server.mjs', '改 server.mjs 里 tools/call 的 TODO 换成真实现']
-            : [`自己起服务：node ${join(dest, 'server.mjs')}`, '确认端口没被占用，再回「已安装」页重载'],
+            ? ['去 DSH 侧重连这个 MCP server，或重启 DSH，让宿主拉起 server.mjs', '改 server.mjs 里 tools/call 的 TODO 换成真实现']
+            : [`自己起服务：node ${join(dest, 'server.mjs')}`, '确认端口没被占用，再回 DSH 侧重连'],
         });
       }),
 

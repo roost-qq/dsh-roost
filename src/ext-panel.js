@@ -192,6 +192,8 @@ export function createExtPanel({
       const locallyModified = Boolean(src?.locallyModified || e.manifest?.locallyModified);
       return {
         id: e.id,
+        /** 目录给「打开文件夹」用；只展示，不让前端拿它拼任意路径请求 */
+        dir: e.dir,
         name: String(e.manifest?.name ?? e.id),
         usage,
         bytes,
@@ -357,10 +359,12 @@ export function createExtPanel({
       /** `{fieldKey: true}` —— 前端只用来显示「已设置 / 未设置」。 */
       secretSet: Object.fromEntries(spec.filter((f) => f.secret).map((f) => [f.key, secretsSet.has(f.key)])),
       /**
-       * 用户手写目录只读：install/remove/saveUsage 都守这条，配置口也得守。
-       * 否则面板能改一份「用户自己写的」扩展的行为，而卸载时又拒绝碰它。
+       * 设置可写（2026-11-27 起对手写扩展也放开）。
+       *
+       * 判据不再看 `foreign`：手写扩展的配置存在宿主这边，改它不动用户目录。
+       * 仍然只读的是 `plugin.json`（usage 编辑），那才是用户文件。
        */
-      canEdit: !registry.isForeign(key),
+      canEdit: true,
       message: spec.length ? '' : '这个扩展没有声明设置项',
     };
   }
@@ -394,9 +398,17 @@ export function createExtPanel({
   function saveConfig(id, values, secretPatch = {}) {
     const key = String(id ?? '');
     if (!EXT_ID_RE.test(key)) return { ok: false, reason: 'bad_id', message: '扩展 id 不合法' };
-    if (registry.isForeign(key)) {
-      return { ok: false, reason: 'foreign_readonly', message: '用户手写的扩展只读，面板不改它的配置' };
-    }
+    /**
+     * 用户手写扩展**可以**改设置（2026-11-27 起）。
+     *
+     * 原来的理由是「install / remove / saveUsage 都守只读，配置口也得守」——
+     * 但那三个改的是**用户目录里的文件**（清单、目录），这里写的是宿主配置
+     * （`cfg.ext[<id>]`），不碰用户一个字节。把两者绑在一起，结果是用户自己
+     * 写的扩展在面板里连自己的设置都改不了，只能回去手改文件——而「写完能调」
+     * 正是自己写扩展的一部分。
+     *
+     * 仍然守的边界：`saveUsage` 会写回 `plugin.json`，对手写扩展继续只读。
+     */
     const spec = registry.configSpecOf(key);
     if (!spec.length) return { ok: false, reason: 'no_config', message: '这个扩展没有声明设置项' };
 
