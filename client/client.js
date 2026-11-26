@@ -12584,6 +12584,20 @@ window.__ModuleLoader__.load({
        */
       const [quiet, setQuiet] = useState(null)
       const [quietBusy, setQuietBusy] = useState(false)
+      /**
+       * 静默剩余分钟要在面板开着不动时自己往下走。
+       *
+       * 到期时间是不变的，能变的是「还剩几分钟」——所以每 30 秒戳一下
+       * 重渲染，由下面的 `quietLeftMin` 现算。只在仍静默时才挂表：
+       * 到点后 `quietActive` 转 false，effect 自己清掉，不会空转。
+       */
+      const quietActive = Number(quiet?.mine) > Date.now()
+      const [, setQuietTick] = useState(0)
+      useEffect(() => {
+        if (!quietActive) return undefined
+        const t = setInterval(() => setQuietTick((n) => n + 1), 30_000)
+        return () => clearInterval(t)
+      }, [quietActive])
 
       /** 换群要丢掉上一个群的草稿，别把它写到新群头上 */
       useEffect(() => { setOvDraft(null) }, [ovGid])
@@ -12631,10 +12645,10 @@ window.__ModuleLoader__.load({
 
       const ov = ovDraft !== null ? ovDraft : { ...(overrides[pickOv] || {}) }
       /**
-       * 静默剩余分钟**现算**，不用服务端回的 `now`：面板开着不动时数字得自己
-       * 往下走，否则会一直显示「还剩 120 分钟」直到用户手动刷新。
+       * 静默剩余分钟**现算**，不用服务端回的 `now`：本机时钟偏几分钟不至于
+       * 显示成负数。数字自己往下走靠上面那个 30 秒 tick 触发重渲染。
        */
-      const quietLeftMin = Number(quiet?.mine) > Date.now()
+      const quietLeftMin = quietActive
         ? Math.ceil((Number(quiet.mine) - Date.now()) / 60000)
         : 0
       const setOv = (k, v) => {
