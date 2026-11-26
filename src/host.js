@@ -5379,9 +5379,14 @@ export function apply(ctx) {
     groupMaxSec: () => Number(cfg.roostHost?.merge?.groupMaxSec) || 15,
     /**
      * 照 aurabot：她正忙时不再逐条回「上一条还在想」，而是攒着等这一轮
-     * 结束（handleTurn 的 finally 调 release），私聊则直接 steer 插话。
+     * 结束（handleTurn 的 finally 调 release）；私聊 steer 插话，群聊
+     * 2026-11-26 起默认也 steer（steerInGroup，面板可关，真机不好可回退）。
      */
     trackBusy: true,
+    steerInGroup: () => !isOff(cfg.roostHost?.merge?.steerInGroup),
+    /** 一轮最多插 8 次、最多插 60s，防高频群把一轮吊到看门狗才强放 */
+    steerMaxPerTurn: 8,
+    steerMaxMs: 60_000,
     busyMaxMs: () => (Number(cfg.chat?.turnTimeoutSec) || 150) * 1000 + 60_000,
     onSteer: async (chatId, batch) => {
       /** 会话的活 agent。拿不到（会话还没建/已销毁）就退回攒批，不硬建 */
@@ -5394,15 +5399,21 @@ export function apply(ctx) {
         return false;
       }
       /**
-       * steer 的文本用合成后的正文（batch.text 已带「谁说的：」标签）。
-       * 图片不在插话里带：steer 走的是纯文本增补，原图已经在当前轮里。
+       * 图片不在插话里带：steer 走纯文本增补，原图已经在当前轮里。
+       *
+       * 群聊用 `steerText`（每条都带「名字(QQ/openid)：」）——群里多人插话时
+       * 模型得知道是谁说的；`batch.text` 单条时不带名字，只日记/检索用。
+       * 私聊沿用 `text`（本来就是一对一，套名字反而啰嗦）。
        */
+      const kind = String(batch?.msg?.chat?.kind ?? '');
+      const privateChat = kind === 'c2c' || kind === 'dm';
+      const text = privateChat ? batch.text : (batch.steerText || batch.text);
       /**
        * waitReadyMs：merger 置 busy 早于 waiters.set（投递链要走几步），
        * 突发第二条消息常常先到。给 2 秒轮询窗口等这一轮真正在跑再插话，
        * 远小于一轮生成耗时，也不会让「攒批」无谓降级。
        */
-      return turns.steer(agent, batch.text, {
+      return turns.steer(agent, text, {
         chatId,
         source: { kind: 'roost', chatId },
         waitReadyMs: 2000,
@@ -8491,6 +8502,8 @@ export function apply(ctx) {
             /** 注册清单只作跨版本兜底；本轮能不能用由 denied 决定 */
             registeredNames: registeredToolNames(agent),
             ttsEnabled: cfg.tts?.enabled === true,
+            /** 想久了先用 qq_send 说一句：跟群聊插话同一个开关，热读；走 isOff 认字符串 "false" */
+            longThinkHint: !isOff(cfg.roostHost?.merge?.steerInGroup),
           }),
         }),
       );
@@ -9610,18 +9623,27 @@ export function apply(ctx) {
        * 其余才报具体错。**不要把内部 JSON 原文糊到群里**——
        * 用户看不懂「{"kind":"error","error":{...}}」，只会觉得机器人坏了。
        */
-      const friendly =
-        e?.kind === 'busy'
-          ? '上一条还在想，稍等一下。'
-          : e?.kind === 'timeout'
+      /**
+       * `busy`（同一会话撞上正在跑的轮）2026-11-26 起静默：只记日志不回话。
+       * 这是排队/忙类提示，和入站壳那两句一起下线；真错误（超时/归档/上游）
+       * 仍照常回一句，别把「模型挂了」也静默掉。
+       */
+      if (e?.kind === 'busy') {
+        log.warn(
+          `处理 ${chat.chatId.slice(0, 8)} 时撞上同一会话的 busy 锁，静默跳过（不回提示）`,
+        );
+      } else {
+        const friendly =
+          e?.kind === 'timeout'
             ? '想太久了，先算了。'
             : e?.kind === 'blocked'
               ? '这条对话在 DSH 里被归档了，我开个新的——再说一遍就行。'
               : e?.kind === 'upstream'
                 ? '模型服务那边暂时抽风了，等会儿再问我一次。'
                 : `这边出了点问题：${e?.message ?? e}`;
-      await postReply(payload, friendly, true, { requestId: `${payload.id}:err` })
-        .catch((err) => notePathError('回话', err));
+        await postReply(payload, friendly, true, { requestId: `${payload.id}:err` })
+          .catch((err) => notePathError('回话', err));
+      }
     } finally {
       // 工具权限和「谁在说话」都要还原，别串到下一轮
       try {

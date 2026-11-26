@@ -83,14 +83,18 @@ test('薄壳：忙时入队，不吭声；轮到就跑', async () => {
   assert.deepEqual(replies, []);
 });
 
-test('薄壳：队列满 → 回旧文案，且不进 handleTurn', async () => {
+test('薄壳：队列超软上限 → 仍入队、静默、轮到就跑（不回「还在想」）', async () => {
   let release;
   const gate = new Promise((r) => {
     release = r;
   });
   const handled = [];
   const replies = [];
-  const q = createTurnQueue({ now: () => 1_000_000, unref: false, maxPending: 1 });
+  const logs = [];
+  const q = createTurnQueue({
+    now: () => 1_000_000, unref: false, maxPending: 1,
+    log: (m) => logs.push(m),
+  });
   const shell = createInboundShell({
     q,
     chatIdOf: (p) => p.chat.chatId,
@@ -100,25 +104,32 @@ test('薄壳：队列满 → 回旧文案，且不进 handleTurn', async () => {
       if (p.id === 'm1') await gate;
     },
     postReply: async (_p, text) => replies.push(text),
+    log: (m) => logs.push(m),
   });
 
   shell.onInbound(payload('m1'));
   shell.onInbound(payload('m2'));
-  shell.onInbound(payload('m3')); // 队列只有 1 个位，这条被拒
+  shell.onInbound(payload('m3')); // 超过软上限 1，仍要入队
   await flush();
-  assert.deepEqual(handled, ['m1']);
-  assert.equal(replies.length, 1);
-  assert.match(replies[0], /上一条还在想/);
+  assert.deepEqual(handled, ['m1'], '只有第一条在跑');
+  assert.deepEqual(replies, [], '排队类提示一律不回用户');
+  assert.ok(logs.some((m) => /超出软上限/.test(m)), '超限要进日志，方便排障');
+
   release();
+  await flush();
+  await flush();
+  await flush();
+  assert.deepEqual(handled, ['m1', 'm2', 'm3'], '超软上限的消息不丢');
 });
 
-test('薄壳：预算不够 → 回「没赶上」，且不进 handleTurn', async () => {
+test('薄壳：预算不够 → 静默丢弃，不回「没赶上」', async () => {
   let release;
   const gate = new Promise((r) => {
     release = r;
   });
   const handled = [];
   const replies = [];
+  const logs = [];
   const q = createTurnQueue({ now: () => 1_000_000, unref: false });
   const shell = createInboundShell({
     q,
@@ -129,6 +140,7 @@ test('薄壳：预算不够 → 回「没赶上」，且不进 handleTurn', asyn
       if (p.id === 'm1') await gate;
     },
     postReply: async (_p, text) => replies.push(text),
+    log: (m) => logs.push(m),
   });
 
   shell.onInbound(payload('m1'));
@@ -136,7 +148,8 @@ test('薄壳：预算不够 → 回「没赶上」，且不进 handleTurn', asyn
   shell.onInbound(payload('m2', 'g1', { reply: { expiresAt: 1_000_000 + 5_000 } }));
   await flush();
   assert.deepEqual(handled, ['m1']);
-  assert.match(replies[0] ?? '', /没赶上/);
+  assert.deepEqual(replies, [], '「没赶上」也静默，只进日志');
+  assert.ok(logs.some((m) => /expired/.test(m)), '丢弃原因要留痕');
   release();
 });
 

@@ -219,7 +219,7 @@ export const FEATURES = [
   {
     id: 'queueMax',
     label: '同一会话的串行缓冲',
-    desc: '正常情况用不到：她正忙时的消息先在合并层攒着，等这一轮结束合成一批，不再逐条回「还在想」；这里只兜底极端并发。设 0 = 不缓冲。',
+    desc: '软上限，超出不拒绝也不回提示，只记日志继续排队；0 = 不记日志、无限排队。真正丢弃只发生在剩余预算不够时（静默）。',
     source: 'config',
     path: ['chat', 'queueMax'],
     /**
@@ -233,6 +233,16 @@ export const FEATURES = [
     requires: NONE,
     affects: NONE,
     offHint: '',
+  },
+  {
+    id: 'steerInGroup',
+    label: '群聊忙时插话',
+    desc: '群聊里她正忙时的新消息直接插进当前轮（像私聊那样），模型可以边想边用 qq_send 分段回；关掉则攒着等本轮结束合成一批。同时控制「想久了先说一句」的提示。',
+    source: 'config',
+    path: ['roostHost', 'merge', 'steerInGroup'],
+    requires: NONE,
+    affects: NONE,
+    offHint: '关掉后群聊忙时消息攒批等本轮结束，不会逐条回提示；两个成熟项目都是这个行为，真机插话效果不好可以用它回退。',
   },
   {
     id: 'queueMinBudgetSec',
@@ -764,7 +774,7 @@ export const FEATURE_GROUPS = [
   { id: 'run', label: '运行', ids: ['botEnabled', 'dryRun'] },
   { id: 'talk', label: '怎么说话', ids: ['qqTools', 'qqRetract', 'quoteReply', 'quotePercent', 'stickers', 'voice'] },
   { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact'] },
-  { id: 'queue', label: '消息来不及回的时候（高级）', ids: ['queueMax', 'queueMinBudgetSec'] },
+  { id: 'queue', label: '消息来不及回的时候（高级）', ids: ['steerInGroup', 'queueMax', 'queueMinBudgetSec'] },
   { id: 'proactive', label: '会不会主动找你', ids: ['speakUp', 'awake'] },
   { id: 'work', label: '干不干活', ids: ['sendFile', 'personaCommand'] },
   {

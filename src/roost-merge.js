@@ -25,6 +25,15 @@ function batchOf(items) {
     /** 回复挂到最后一条：它的 msgId 最新，被动窗口最稳 */
     msg: last,
     text: items.length === 1 ? textOf(items[0]) : items.map(lineOf).join('\n'),
+    /**
+     * 插话专用文本：无论几条都带发言人名。
+     *
+     * `text` 单条时不带名字（日记/检索用，避免 openid 进 FTS 变噪音），
+     * 但群聊 steer 插进正在跑的轮时，模型必须知道「谁刚说的」——
+     * 否则多人群里插一句「好的」，模型不知道是谁在应。私聊的 `lineOf()`
+     * 也会带名字，但 onSteer 会按 kind 决定用不用它。
+     */
+    steerText: items.map(lineOf).join('\n'),
     count: items.length,
     /** 多条就算「批次」。上层据此不再在外面套统一的发送者标签 */
     multi: items.length > 1,
@@ -95,6 +104,9 @@ function lineOf(evt) {
  * @param {number|(()=>number)} [o.groupWaitSec]  群聊停顿窗口（缺省同 waitSec）
  * @param {number|(()=>number)} [o.groupMaxSec]   群聊最长窗口（缺省同 maxSec）
  * @param {boolean} [o.trackBusy]                 是否启用 busy 攒批（host 打开）
+ * @param {boolean|(()=>boolean)} [o.steerInGroup] 群聊忙时是否也 steer（默认 false，host 打开）
+ * @param {number|(()=>number)} [o.steerMaxPerTurn] 一轮最多插话几次，防吊死（默认 8）
+ * @param {number|(()=>number)} [o.steerMaxMs]    一轮多久不再插话，防吊死（默认 60s）
  * @param {number|(()=>number)} [o.busyMaxMs]     一轮多久没 release 就强放
  * @param {(chatId:string)=>boolean} [o.busyOf]   额外的 busy 来源（可选）
  * @param {(chatId:string, batch:object)=>Promise<boolean>|boolean} [o.onSteer]
@@ -109,6 +121,9 @@ export function createMerger({
   groupWaitSec = null,
   groupMaxSec = null,
   trackBusy = false,
+  steerInGroup = false,
+  steerMaxPerTurn = 8,
+  steerMaxMs = 60_000,
   busyMaxMs = 210_000,
   busyOf = () => false,
   onSteer = null,
@@ -118,18 +133,47 @@ export function createMerger({
 } = {}) {
   /** chatId → { items, waitTimer, maxTimer, firstAt, notBefore, waiting } */
   const pending = new Map();
-  /** chatId → { at, timer }：flush 置上、release 清掉的一轮锁 */
+  /** chatId → { at, timer, steers }：flush 置上、release 清掉的一轮锁 */
   const busy = new Map();
 
   const busyMax = () => {
     const n = Number(typeof busyMaxMs === 'function' ? busyMaxMs() : busyMaxMs);
     return Number.isFinite(n) && n > 0 ? n : 210_000;
   };
+  /** 配置项允许传函数：面板改完下一轮生效，不用重启 DSH */
+  const cfgVal = (v, dflt) => {
+    const n = Number(typeof v === 'function' ? v() : v);
+    return Number.isFinite(n) && n > 0 ? n : dflt;
+  };
+  const steerCap = () => cfgVal(steerMaxPerTurn, 8);
+  const steerWindow = () => cfgVal(steerMaxMs, 60_000);
+  const allowGroupSteer = () => typeof steerInGroup === 'function' ? steerInGroup() === true : steerInGroup === true;
   const isBusy = (chatId) => busy.has(chatId) || (trackBusy && busyOf(chatId));
+
+  /**
+   * 插话次数 / 时长护栏。
+   *
+   * 为什么必须有：DSH 的 `steer()` 把消息塞进正在跑的轮，但不改 turn/end 的
+   * 到达时间。高频群如果每条都 steer，一轮可能被不断插话吊到看门狗 210s
+   * 才强放，期间所有人都在等——比逐条回「还在想」更糟。
+   * 触顶就退回攒批，release 后合成下一批，既不吊死也不丢。
+   */
+  const canSteer = (chatId, entry) => {
+    if (!entry) return false;
+    if (entry.steers >= steerCap()) {
+      log(`${chatId.slice(0, 8)}：这一轮已插话 ${entry.steers} 次，达上限，改攒批`);
+      return false;
+    }
+    if (now() - entry.at > steerWindow()) {
+      log(`${chatId.slice(0, 8)}：这一轮已跑 ${Math.round((now() - entry.at) / 1000)}s，插话超时，改攒批`);
+      return false;
+    }
+    return true;
+  };
 
   function markBusy(chatId) {
     if (!trackBusy) return;
-    const entry = { at: now(), timer: null };
+    const entry = { at: now(), timer: null, steers: 0 };
     busy.set(chatId, entry);
     /**
      * 看门狗：batch 没走到 handleTurn（quiet.skip / 没 chatId），或这一轮
@@ -188,30 +232,44 @@ export function createMerger({
     /** 她还在回上一条：不另开一轮。能插话就插话，否则继续攒着等 release */
     if (!bypassBusy && isBusy(chatId)) {
       /**
-       * 只有私聊才插话（aurabot：`p.chat.kind === 'private'`）。
-       * 群里一插话等于又刷一条，且多人 MixedSenders 语义乱——群里攒批等 release。
+       * 私聊一律插话（aurabot：`p.chat.kind === 'private'`）。
+       * 群聊 2026-11-26 起也插话（主人定，`steerInGroup` 默认开）：
+       * 多人语义靠 `lineOf()` 的「名字(QQ/openid)：」前缀兜，不再攒批等 release。
+       * 关掉开关或护栏触顶时退回攒批——这是真机效果不好时的回退路径。
        */
       const kind = String(items[items.length - 1]?.chat?.kind ?? '');
       const privateChat = kind === 'c2c' || kind === 'dm';
-      if (onSteer && privateChat) {
+      const entry = busy.get(chatId);
+      const canSteerHere = privateChat || allowGroupSteer();
+      if (onSteer && canSteerHere && canSteer(chatId, entry)) {
         /**
          * 先摘掉 pending 再试：steer 成功 = 这条已被当前轮接走；
          * 失败要原样放回去（连同期间新攒的），等这一轮结束再交。
+         *
+         * 计数在**发起前**加：steer 是异步的，并发的几条都进来时若等成功再
+         * 计数，会一起通过护栏（同一 tick 内 entry.steers 都还是 0）。
+         * 失败的那条把计数退回，避免失败也占额度。
          */
+        if (entry) entry.steers += 1;
+        /** 存下发起时的序号：异步回调里再读 entry.steers 已是最终值，日志会全写「第 N 次」 */
+        const seq = entry?.steers ?? '?';
         pending.delete(chatId);
         Promise.resolve()
           .then(() => onSteer(chatId, batchOf(items)))
           .then((ok) => {
-            if (!ok) restoreWaiting(chatId, items);
-            else log(`${chatId.slice(0, 8)}：${items.length} 条消息已插进当前轮`);
+            if (!ok) {
+              if (entry) entry.steers = Math.max(0, entry.steers - 1);
+              restoreWaiting(chatId, items);
+            } else log(`${chatId.slice(0, 8)}：${items.length} 条消息已插进当前轮（第 ${seq} 次）`);
           })
           .catch((e) => {
+            if (entry) entry.steers = Math.max(0, entry.steers - 1);
             log(`${chatId.slice(0, 8)}：插话失败，改攒着等这轮结束（${e?.message ?? e}）`);
             restoreWaiting(chatId, items);
           });
         return false;
       }
-      /** 攒着等 release——不回「还在想」，这是这次要去掉的刷屏根源 */
+      /** 攒着等 release——忙类提示一律静默，只走日志（见 canSteer 的触顶日志） */
       b.waiting = true;
       pending.set(chatId, b);
       return false;

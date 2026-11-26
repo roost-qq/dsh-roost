@@ -56,6 +56,7 @@ export function registeredToolNames(agent) {
  * @param {Set<string>|string[]|null} [opts.denied] 本轮实际被收走的工具名
  * @param {Set<string>|null} [opts.registeredNames] schemas() 报的注册清单
  * @param {boolean} [opts.ttsEnabled] 语音是否开启
+ * @param {boolean} [opts.longThinkHint] 是否注入「想久了先用 qq_send 说一句」
  * @returns {string}
  */
 export function buildOutputPrompt({
@@ -63,6 +64,7 @@ export function buildOutputPrompt({
   denied,
   registeredNames = null,
   ttsEnabled = false,
+  longThinkHint = false,
 } = {}) {
   if (!mounted?.ok) return '';
   /** 报「挂上了」却没挂 qq_send 时也不能注入，否则又是教模型调不存在的工具 */
@@ -87,6 +89,28 @@ export function buildOutputPrompt({
         : '。'),
     '· 想说话就调 `qq_send`，一次发一段，按需要可以分多次。**别把要发的话写进正文**。',
     '· 调过 `qq_send` 之后，你回复的正文**不会**再发出去——正文只当思考用。',
+    ...(longThinkHint
+      ? [
+          /**
+           * 2026-11-26 主人要的「思考久就用 qq_send 中间回话」引导。
+           *
+           * 措辞要点（按提示词专项验证的四问）：
+           *   · 用「如果 / 可以」不命令——不能压正常短回复，简单问题还是一句答完；
+           *   · 明确「这是同一轮」，不要写成「等下一条消息」，免得模型以为要等用户；
+           *   · 放在 910 安全段之前、907 工具段内，指代「上面」不会圈进权限规则；
+           *   · **绝不能出现「正文」二字**：同段 :91 已写「调过 qq_send 正文不会发出去」，
+           *     说「把正文说出来」会诱导模型把答案写进正文 → 用户只收到空话。
+           *   · **不说「我想想哈」之类的拖延话术**（2026-11-26 主人二次定稿）：
+           *     先发的必须是**已经想到的内容**，不是「我在想」这种空话。
+           *     空话既占一次被动回话额度，又让人觉得机器人只会敷衍。
+           *   · 不写「轮次中间收到新消息就应一句」：高频群这是常态，会逼出刷屏；
+           *     只说「确实要回应时」并且仍然走 qq_send 分段，交给模型判断。
+           *   · 只是软引导：真边界是 qq_send 的权限与轮次护栏，不靠这段话兜底。
+           */
+          '· 如果这件事要想比较久（比如要翻记忆、查资料、算东西），可以先把已经想到的部分调一次 `qq_send` 发出去，再接着想——这还是同一轮，不用等对方回话。想好了再调一次 `qq_send` 把剩下的说出来。',
+          '· 轮次中间确实收到需要回应的新消息时，也可以先用 `qq_send` 把能答的部分先答了，再接着想完——仍然是同一轮。',
+        ]
+      : []),
     '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
     '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**——那样只发工具那条，正文会被丢掉。',
     /**

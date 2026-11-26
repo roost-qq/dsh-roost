@@ -67,6 +67,38 @@ test('提示词：正常轮讲全三个工具，分段说明与语音开关都�
   assert.doesNotMatch(text, /<<say/, '不再教旧的 say 格式');
 });
 
+test('提示词：想久了先发已想到的部分——默认不注入，开关开才注入', () => {
+  const args = { mounted: MOUNTED, denied: null, registeredNames: ALL };
+  const off = buildOutputPrompt(args);
+  assert.doesNotMatch(off, /想比较久/, '默认不注入新引导，保持原有语气');
+  const on = buildOutputPrompt({ ...args, longThinkHint: true });
+  assert.ok(on.includes('想比较久'), '开关开时注入');
+  assert.ok(on.includes('这还是同一轮'), '必须说清是同一轮，别让模型以为要等对方');
+});
+
+test('提示词：长时间思考引导是软建议，不压正常短回复', () => {
+  const text = buildOutputPrompt({
+    mounted: MOUNTED, denied: null, registeredNames: ALL, longThinkHint: true,
+  });
+  assert.ok(text.includes('可以先把已经想到的部分') && text.includes('如果'), '用「如果/可以」不命令');
+  assert.doesNotMatch(text, /每次都先|必须先|一定要先说/, '不许压正常一句话就答完的短回复');
+  assert.doesNotMatch(text, /以上|上面/, '这段不引用「上面」，避免把权限/工具协议圈进去');
+  /**
+   * 两轮对抗测试钉死的三条：
+   *   · 不许提「正文」：同段 :91 已写「调过 qq_send 正文不会再发出去」，
+   *     说「把正文说出来」会诱导模型把答案写进正文 → 用户只收到空话。
+   *   · 不许出现「我想想哈」之类拖延话术（主人二次定稿）：先发的必须是
+   *     已经想到的内容，空话既占回话额度又显得敷衍。
+   *   · 想好后那句同样走 qq_send（「把剩下的说出来」）。
+   */
+  const added = text.split('· 如果这件事要想比较久')[1]?.split('· 聊到自然结束')[0] ?? '';
+  assert.ok(added.length > 0, '引导句必须注入');
+  assert.doesNotMatch(added, /正文/, '引导句不许提「正文」，否则和同段规则打架');
+  assert.doesNotMatch(added, /我想想|等我|稍等|正在想|让我想/, '不许引导拖延话术，先发的必须是已想到的内容');
+  assert.ok(added.includes('把剩下的说出来'), '想好后的那句也要走 qq_send');
+  assert.ok(added.includes('能答的部分先答'), '新消息插话时也先答已想到的部分');
+});
+
 test('提示词：收走任一输出通道就整块闭嘴', () => {
   for (const denied of [['qq_send'], ['qq_close'], ['qq_send', 'qq_close']]) {
     assert.equal(buildOutputPrompt({ mounted: MOUNTED, denied, registeredNames: ALL }), '');
