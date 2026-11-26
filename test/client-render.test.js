@@ -1060,6 +1060,49 @@ test('前端渲染：组件版本块查不到时不报错，只写「查不到�
   assert.ok(txt.includes('不影响使用'), '要说明不影响使用')
 })
 
+test('前端渲染：组件版本块带框架自更新开关（默认关）与手动按钮', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+
+  const txt = textOf(
+    expand(
+      h(mod.DepsBlock, {
+        busy: false, onCheck: () => {}, running: true,
+        info: { framework: { installed: '1.2.0', latest: '1.2.1', hasUpdate: true } },
+        autoUpdate: false,
+        fw: { ok: true, current: '1.2.0', latest: '1.2.1', hasUpdate: true, needsRestart: false },
+      }),
+      rt,
+    ),
+  )
+  assert.ok(txt.includes('框架自更新'), '要有独立的自更新区')
+  assert.ok(txt.includes('检测到新版自动更新（默认关）'), '开关要写明默认关')
+  assert.ok(txt.includes('立即更新框架'), '手动触发按钮要在')
+  assert.ok(txt.includes('检测到新版 v1.2.1'), '要把框架快照的版本说出来')
+  assert.ok(txt.includes('装完不会自动重启'), '要说清不自动重启')
+})
+
+test('前端渲染：框架已更新待重启时只提示重启，不说已是最新', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+
+  const txt = textOf(
+    expand(
+      h(mod.DepsBlock, {
+        busy: false, onCheck: () => {}, running: true,
+        info: { framework: { installed: '1.2.1', latest: '1.2.1', hasUpdate: false } },
+        autoUpdate: true,
+        fw: { ok: true, current: '1.2.1', latest: '1.2.1', hasUpdate: false, needsRestart: true },
+      }),
+      rt,
+    ),
+  )
+  assert.ok(txt.includes('需手动重启框架才生效'), 'needsRestart 要常驻提示')
+  assert.ok(!txt.includes('当前 v1.2.1 · 已是最新'), '待重启时不能说成"已是最新"')
+})
+
 test('前端渲染：接入页有「探活身份校验」开关，没配过时显示关闭', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
