@@ -396,7 +396,13 @@ test('接线：投递结案补日记要认 cleared 标记', () => {
 test('接线：面板 API 拒绝 Origin: null，/ext-pages 豁免', () => {
   const at = SRC.indexOf("const route = (path, handler");
   assert.ok(at > 0, '找不到 route()');
-  const block = SRC.slice(at, at + 1600);
+  /**
+   * 切到 `route()` **函数结尾**，别写死长度：函数里注释一多，1600 字窗口
+   * 就够不到 `fence(req)`（2026-11 加宿主 auth 声明时踩过，`indexOf` 返回 -1
+   * 导致顺序断言恒假）。
+   */
+  const end = SRC.indexOf('log.warn(`路由 ${path} 没注册上', at);
+  const block = SRC.slice(at, end > at ? end : at + 6000);
 
   assert.match(block, /req\.headers\?\.origin === 'null'/, '要判 Origin: null');
   assert.match(block, /if \(!skipFence && req\.headers\?\.origin === 'null'\)/, '只在走栅栏的路由上拦');
