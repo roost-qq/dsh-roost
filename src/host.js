@@ -18,6 +18,11 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, createWriteStream, readFileSync, rmSync, realpathSync } from 'node:fs';
 import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets, restoreMaskedSecrets } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
+import {
+  GROUP_ID, LINKS, PANEL_LOG_MAX, FAQ_HEADING,
+  faqSlice, dshLogInfo, frameworkLogInfo, readTail, openCmd, diagnosticsText,
+  pickRecent, bundleName, bundleText, sizeText, frameworkWebUrl,
+} from './support.js';
 import { createSessions, chatSessionKey } from './sessions.js';
 import { refreshLiveChat } from './live-chat.js';
 import { createTurnRunner } from './turn.js';
@@ -10847,9 +10852,309 @@ export function apply(ctx) {
       })
     })
 
+    /* ---------------- 问题反馈（2026-11-27） ---------------- */
+
+    /**
+     * 页头「问题反馈」弹窗的四个只读入口：环境信息、常见问题、日志尾部、打开目录。
+     *
+     * **与 `authorOffs` 同一条纪律**：注册返回的注销函数必须收进数组，最后由
+     * `offs` 统一交给宿主。漏了就会在重载时同一路径注册两次，DSH 直接拒绝
+     * 激活（duplicate exact route），而症状是「重载后面板没了」，很难联想到路由。
+     */
+    const supportOffs = []
+    const regSupport = (path, handler) => {
+      const off = route(path, handler)
+      supportOffs.push(off)
+      return off
+    }
+
+    /** 本包版本：和 `update.js` 读同一份 package.json，不另存常量 */
+    const ownVersion = () => {
+      try {
+        return JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')).version || ''
+      } catch {
+        return ''
+      }
+    }
+
+    const activateLogPath = () => join(dataDir(), 'activate-error.log')
+
+    /**
+     * 弹窗打开时一次拿全：版本、平台、日志在哪、链接、群号。
+     *
+     * 为什么要一个聚合接口而不是让前端各处拼：`process.platform`、数据目录、
+     * 框架安装目录都只有后端知道；前端自己拼路径迟早拼错，而且 Windows 与
+     * macOS 的分隔符还不一样。
+     *
+     * **抽成函数是为 `/support/bundle` 复用**：诊断包里的环境和弹窗里显示的
+     * 必须逐字一致，否则「弹窗说没装框架、文件里说装了」这种自相矛盾的东西
+     * 会一起贴进群里。
+     */
+    const buildSupportInfo = async () => {
+      /**
+       * 框架状态走 `setup.detect()`：它已经处理了「没装 / 装在哪 / 在不在跑」。
+       * 失败不挡弹窗——这时用户恰恰最需要看到版本和日志路径。
+       */
+      let fw = {}
+      try { fw = await setup.detect() } catch (e) { log.warn(`读框架状态失败：${e?.message ?? e}`) }
+
+      const framework = frameworkLogInfo(fw.dir)
+      const actPath = activateLogPath()
+      let activate = { path: actPath, exists: false, size: 0 }
+      try {
+        const s = statSync(actPath)
+        activate = { path: actPath, exists: s.isFile(), size: s.size }
+      } catch { /* 从没激活失败过：正常状态，不是错误 */ }
+
+      const dsh = dshLogInfo()
+      const base = {
+        version: ownVersion(),
+        frameworkVersion: fw.version || '',
+        frameworkRunning: Boolean(fw.running),
+        platform: process.platform,
+        arch: process.arch,
+        node: process.version.replace(/^v/, ''),
+        dataDir: dataDir(),
+        panelCount: logs.length,
+        group: GROUP_ID,
+        links: LINKS,
+        logs: {
+          /** 面板日志只在内存里：文案必须说清，否则用户会去找一个不存在的文件 */
+          panel: { kind: 'memory', max: PANEL_LOG_MAX, count: logs.length },
+          activate,
+          dsh: { dir: dsh.dir, exists: dsh.exists, files: dsh.files, latest: dsh.latest },
+          framework,
+        },
+        /**
+         * 最近 3 条 error 直接给出去：弹窗里要能当场看见「刚才报了什么」。
+         * 只放 3 条——再多就该去排障页或看诊断包了，弹窗不该变成日志查看器。
+         */
+        recentErrors: pickRecent(logs, 'error', 3),
+        errorCount: logs.filter((e) => e.level === 'error').length,
+        warnCount: logs.filter((e) => e.level === 'warn').length,
+      };
+      return {
+        ...base,
+        /** 现成的「贴群里的一段话」：前端只负责复制，不再自己拼 */
+        diagnostics: diagnosticsText({ ...base, activate, dsh, framework }),
+      };
+    }
+
+    regSupport('/support/info', async (req, res) => {
+      try {
+        return send(res, 200, { ok: true, ...(await buildSupportInfo()) });
+      } catch (e) {
+        /** 环境信息读挂了也要回 ok:false 带原因，而不是让面板看到一个 500 */
+        return send(res, 500, { ok: false, message: `读环境信息失败：${e?.message ?? e}` });
+      }
+    })
+
+    /**
+     * 导出诊断包：把上面那份信息 + 全部内存日志写成一个 `.txt`。
+     *
+     * 为什么不提供「一键上传到某处」：那需要一个我们控制的接收端，等于把
+     * 用户的机器信息送到第三方；文件让用户自己决定发给谁（群里 / issue）。
+     *
+     * 写入位置固定在 `dataDir()`，文件名由 `bundleName()` 生成（全数字，
+     * Windows 上也能存）。**不接受前端传路径**：这是导出，不是文件写入 API。
+     */
+    regSupport('/support/bundle', async (req, res) => {
+      try {
+        const info = await buildSupportInfo()
+        /** 整体再过一次脱敏：`addLog` 已经脱过，但这份文件是要发出去的，双保险 */
+        /**
+         * `bundleText` 只吃 `diagnostics` 与 `entries`：`info` 是聚合后的对象，
+         * 传进去也没人读，反而会让后来者以为它能从这里取环境信息。
+         */
+        const text = redactText(bundleText({ diagnostics: info.diagnostics, entries: logs }))
+        const dir = dataDir()
+        mkdirSync(dir, { recursive: true })
+
+        /**
+         * 同一秒点两次会撞名：加序号，实在不行用毫秒兜底。
+         * `base` 只取一次——取两次的话，万一跨秒，后面那轮检查的是一个
+         * 跟 `file` 无关的名字，撞名判断直接失效。
+         */
+        const base = bundleName()
+        let file = join(dir, base)
+        if (existsSync(file)) {
+          let i = 2
+          do { file = join(dir, base.replace(/\.txt$/, `-${i}.txt`)); i += 1 } while (existsSync(file) && i < 50)
+          if (existsSync(file)) file = join(dir, base.replace(/\.txt$/, `-${Date.now()}.txt`))
+        }
+
+        writeFileSync(file, text, 'utf8')
+        const size = statSync(file).size
+        addLog('info', 'support', `导出诊断包：${basename(file)}（${sizeText(size)}）`)
+        return send(res, 200, {
+          ok: true, path: file, dir, name: basename(file), size,
+          message: `已导出 ${basename(file)}`,
+        })
+      } catch (e) {
+        return send(res, 500, { ok: false, message: `导出失败：${e?.message ?? e}` });
+      }
+    })
+
+    /** 常见问题：直接读随包的 README 并切片，断网也能看 */
+    regSupport('/support/faq', (req, res) => {
+      try {
+        const md = readFileSync(join(import.meta.dirname, '..', 'README.md'), 'utf8')
+        const r = faqSlice(md)
+        return send(res, r.ok ? 200 : 500, {
+          ok: r.ok,
+          text: r.text,
+          items: r.items,
+          message: r.ok ? '' : `README.md 里没找到「${FAQ_HEADING}」这一节`,
+        })
+      } catch (e) {
+        return send(res, 500, {
+          ok: false, text: '', items: [],
+          message: `读不到 README.md：${e?.message ?? e}`,
+        })
+      }
+    })
+
+    /**
+     * 日志尾部。只认两个来源：
+     *   - `activate`：面板激活失败时的落盘记录（数据目录下）；
+     *   - `dsh`：DSH 本体最近一条崩溃日志。
+     *
+     * **框架日志不在里面**：那是另一个进程的大文件，面板读它会卡；只给路径 +
+     * 打开目录。返回前统一过 `redactText`——这份文本是要贴到群里的。
+     */
+    regSupport('/support/log-tail', (req, res) => {
+      const which = String(new URL(req.url || '/', 'http://x').searchParams.get('which') || '')
+      const reply = (o) => send(res, 200, { ok: true, which, ...o })
+
+      if (which === 'activate') {
+        const file = activateLogPath()
+        if (!existsSync(file)) {
+          /** 文件不存在 = 从来没激活失败过，是**好消息**，不该报错 */
+          return reply({ exists: false, text: '', name: 'activate-error.log', message: '没有出错记录' })
+        }
+        const t = readTail(file, { maxBytes: 32 * 1024, maxLines: 120 })
+        return reply({
+          exists: t.ok, text: redactText(t.text), truncated: t.truncated,
+          size: t.size, name: 'activate-error.log', path: file,
+        })
+      }
+
+      if (which === 'dsh') {
+        const info = dshLogInfo()
+        if (!info.latest) {
+          return reply({
+            exists: false, text: '', name: '', dir: info.dir,
+            message: info.exists ? 'DSH 没有崩溃记录（这一项只在它崩过之后才有内容）' : '没找到 DSH 的日志目录',
+          })
+        }
+        const file = join(info.dir, info.latest.name)
+        const t = readTail(file, { maxBytes: 32 * 1024, maxLines: 120 })
+        return reply({
+          exists: t.ok, text: redactText(t.text), truncated: t.truncated,
+          size: t.size, name: info.latest.name, dir: info.dir, path: file,
+        })
+      }
+
+      return send(res, 400, { ok: false, message: 'which 只能是 activate 或 dsh' })
+    })
+
+    /**
+      * 在文件管理器里打开目录 / 在浏览器里打开框架网页面板。
+     *
+     * 只认几个枚举值，**不接受任意路径或 URL**：这是给用户点的按钮，
+     * 不是文件浏览 API，更不能变成「让宿主拿你的密钥去打开任意网址」。
+     * 与 `/extensions/open` 不合并——那个要查扩展注册表，权限语义也不同。
+     */
+    regSupport('/support/open', async (req, res) => {
+      const body = await readBody(req).catch(() => ({}))
+      const which = String(body?.which || '')
+      let target = ''
+      let note = ''
+      /** 打开的是网址而不是目录：跳过「目录还在不在」那套检查 */
+      let isUrl = false
+
+      if (which === 'data') {
+        target = dataDir()
+      } else if (which === 'framework-logs') {
+        let fw = {}
+        try { fw = await setup.detect() } catch (e) { log.warn(`读框架状态失败：${e?.message ?? e}`) }
+        if (!fw.dir) return send(res, 400, { ok: false, message: '还没装框架，没有框架日志可看' })
+        const f = frameworkLogInfo(fw.dir)
+        if (!f.installed) {
+          /** 配了路径但不是一份 Roost：打开它只会让人更迷惑，直接说清楚 */
+          return send(res, 400, {
+            ok: false,
+            message: `配的框架目录里没有 src/main.js，不是一份 Roost：${fw.dir}`,
+          })
+        }
+        /** 框架没启动过时 logs 目录还不存在：退到框架根目录，别让用户点出一句「目录不在了」 */
+        target = f.exists ? f.logsDir : f.dir
+        if (!f.exists) note = '日志目录还没生成（框架还没启动过），已打开框架目录'
+      } else if (which === 'framework-web') {
+        let fw = {}
+        try { fw = await setup.detect() } catch (e) { log.warn(`读框架状态失败：${e?.message ?? e}`) }
+        if (!fw.installed) return send(res, 400, { ok: false, message: '还没装框架，没有网页版面板可看' })
+        if (!fw.running) {
+          /**
+           * 不在跑时地址还能拼出来，但打开是一片「无法访问」——那是更差的提示，
+           * 用户会以为插件坏了。直接说清楚，并指向能解决问题的那一页。
+           */
+          return send(res, 400, {
+            ok: false,
+            message: '框架没在运行，网页版打不开——先去「首次接入」把它启动起来',
+          })
+        }
+        target = frameworkWebUrl(fw.webui)
+        if (!target) return send(res, 400, { ok: false, message: '读不到框架面板地址（配置里没有 webui.port）' })
+        isUrl = true
+      } else if (which === 'dsh-logs') {
+        const d = dshLogInfo()
+        if (!d.exists) {
+          return send(res, 404, { ok: false, message: '没找到 DSH 的日志目录：它只在崩溃时才写文件' })
+        }
+        target = d.dir
+      } else {
+        return send(res, 400, { ok: false, message: 'which 只能是 data / framework-logs / framework-web / dsh-logs' })
+      }
+
+      if (!isUrl && !existsSync(target)) {
+        if (which === 'data') {
+          try { mkdirSync(target, { recursive: true }) } catch (e) {
+            return send(res, 500, { ok: false, message: `建不了数据目录：${e?.message ?? e}` })
+          }
+        } else {
+          return send(res, 404, { ok: false, message: `目录不在了：${target}` })
+        }
+      }
+
+      try {
+        /**
+         * `detached` + `unref`：文件管理器 / 浏览器都是独立进程，宿主不该等它。
+         * Windows 上 `explorer` 成功也常返回非 0，所以只看 `error` 事件，不看退出码。
+         * 传网址时 `explorer` 会转给默认浏览器（三个平台都吃 URL，不用分支）。
+         */
+        const child = spawn(openCmd(), [target], { detached: true, stdio: 'ignore' })
+        child.on('error', (e) => log.warn(`打开失败：${e.message}`))
+        child.unref()
+      } catch (e) {
+        return send(res, 500, { ok: false, message: `打开失败：${e?.message ?? e}`, target })
+      }
+      /**
+       * 网址里带着框架的访问密钥：**不往回传给前端**。
+       * 前端只需要知道成不成，把密钥复制到面板 DOM 里是没必要的暴露。
+       */
+      return send(res, 200, {
+        ok: true,
+        ...(isUrl ? {} : { target }),
+        message: note || (isUrl ? '已在浏览器里打开框架日志页' : `已打开 ${target}`),
+      })
+    })
+
     const offs = [
       /** 扩展作者引导那四条（在上面注册，见 authorOffs 的注释） */
       ...authorOffs,
+      /** 问题反馈那五条（同上，必须注销） */
+      ...supportOffs,
       /**
        * 用量汇总：按天 + 按会话。
        *

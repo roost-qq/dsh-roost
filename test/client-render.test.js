@@ -3983,3 +3983,144 @@ test('三级跳转：goTab 能带子页签，且提示只对刚跳到的那一�
   assert.ok(src.includes("if (subHint && PAGE_TABS.some(([id]) => id === subHint)) setPageTab(subHint)"),
     '群聊策略页要接住三级跳转')
 })
+
+/* ---------------- 问题反馈（2026-11-27） ---------------- */
+
+/**
+ * 页头按钮：「问题反馈」要能在任何一页看到，且落在标题行里。
+ *
+ * 渲染替身不跑 `useEffect`，`featOn` 永远是 null——正好是「开关还没读回来」
+ * 那种状态。按钮必须仍然在：面板半死不活的时候正是它该出现的时候。
+ */
+test('前端渲染：页头有「问题反馈」按钮，且不依赖开关数据', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'overview'
+  rt.reset()
+  const tree = expand(mod.RoostPage(), rt)
+
+  const head = tree.props.children
+    .find((n) => ((n && n.props && n.props.className) || '').includes('roost-head'))
+  assert.ok(head, '缺页头')
+
+  const btn = findByClass(head, 'roost-head-help')
+  assert.ok(btn, '页头没有「问题反馈」按钮（读不到 featOn 时也必须渲染）')
+  assert.ok(textOf(btn).includes('问题反馈'))
+  assert.equal(typeof btn.props.onClick, 'function', '按钮要真的能点开弹窗')
+
+  /** 位置：标题行内、总开关之前（方案 A：竖线左侧） */
+  const row = findByClass(head, 'roost-head-row')
+  const iBtn = row.props.children.findIndex((n) => ((n?.props?.className) || '').includes('roost-head-right'))
+  assert.ok(iBtn > 0, '按钮该在标题行右侧那组里')
+});
+
+/** 按 class 找节点（含子树）；展开后的树是普通对象，够用 */
+function findByClass(node, needle) {
+  if (node == null || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      const hit = findByClass(n, needle)
+      if (hit) return hit
+    }
+    return null
+  }
+  if (String(node.props?.className || '').includes(needle)) return node
+  return findByClass(node.props?.children, needle)
+}
+
+test('前端渲染：反馈弹窗在「环境信息还没回来」时不炸，四段齐全', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  rt.reset()
+
+  /** `useEffect` 不跑 = info 永远是 null：新装/接口挂了都是这个状态 */
+  let tree
+  assert.doesNotThrow(() => {
+    tree = expand(mod.SupportModal({ toast: () => {}, onClose: () => {}, onGo: () => {} }), rt)
+  }, '空数据渲染抛异常——用户最需要它的时候正好会白屏')
+
+  const txt = textOf(tree)
+  for (const must of ['01', '02', '03', '04', '先看一眼', '看日志', '找我们', '把这段一起带上']) {
+    assert.ok(txt.includes(must), `弹窗缺「${must}」`)
+  }
+  for (const must of ['常见问题', '面板日志', 'dsh-roost 出错记录', 'DSH 本体日志', '框架日志',
+    'GitHub', '反馈群', '复 制 诊 断 信 息'.replace(/ /g, '')]) {
+    assert.ok(txt.includes(must), `弹窗缺「${must}」`)
+  }
+  /** 群号在信息没回来时也要显示：它是常量，不该等接口 */
+  assert.ok(txt.includes('1130901545'), '群号不该等接口回来才显示');
+  assert.ok(txt.includes('去排障页'), '面板日志要能跳排障页')
+  /** 反馈群要能去「关于」页扫码：群号是进不了群的 */
+  assert.ok(txt.includes('去关于页扫码'), '反馈群缺去「关于」页扫二维码的按钮')
+  /** issue 只收 GitHub：Gitee 是只读镜像，给入口等于把反馈扔进没人看的桶 */
+  assert.ok(!txt.includes('gitee.com/tdcq9594/dsh-roost/issues'), '弹窗还留着 Gitee 的 issue 入口')
+});
+
+/**
+ * 页头按钮的点击处理必须能安全调用。
+ *
+ * **这里验不到「点了之后弹窗出现」**：渲染替身的 `reset()` 会清空 hooks 数组
+ * （见 `makeReact`），state 不跨次渲染存活——这是替身的边界，不是代码的问题。
+ * 「点了会挂上弹窗」由 `test/support.test.js` 的源码断言盯住
+ * （`setSupportOpen(true)` + `supportOpen ? h(SupportModal)`），
+ * 弹窗本身的渲染由上面那条盯住。真机点击是最后一道。
+ */
+test('交互：页头「问题反馈」的 onClick 可以安全调用', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'overview'
+  rt.reset()
+
+  const tree = expand(mod.RoostPage(), rt)
+  const head = tree.props.children
+    .find((n) => ((n && n.props && n.props.className) || '').includes('roost-head'))
+  const btn = findByClass(head, 'roost-head-help')
+  assert.equal(typeof btn?.props?.onClick, 'function')
+  assert.doesNotThrow(() => btn.props.onClick(), '点击处理里不该有未定义引用')
+});
+
+/* ---------------- 第二批：最近 error / 导出诊断包（2026-11-27） ---------------- */
+
+/**
+ * 「最近 error」为什么要单独测渲染：弹窗的数据要等 `useEffect` + 接口回来才填，
+ * 而渲染替身不跑 effect——混在弹窗里只能验「不崩」，验不到「真有 error 时
+ * 确实列出几条、最新的在前」。所以它是独立组件。
+ */
+test('前端渲染：最近 error——加载中 / 没有 / 有几条，三种状态都有话可说', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+
+  rt.reset()
+  assert.equal(textOf(expand(mod.RecentErrors({ info: null }), rt)), '',
+    '加载期什么都不画：上面「面板日志」那行已经在说「读着…」，再来一行就是重复')
+
+  rt.reset()
+  const none = textOf(expand(mod.RecentErrors({ info: { recentErrors: [], warnCount: 2 } }), rt))
+  assert.ok(none.includes('没有 error'))
+  assert.ok(none.includes('2 条 warn'), '有 warn 要说出来，否则用户以为一片太平')
+
+  rt.reset()
+  const some = textOf(expand(mod.RecentErrors({
+    info: {
+      errorCount: 7, warnCount: 3,
+      recentErrors: [
+        { time: '03:00:02', area: 'inbound', text: 'onInbound is not defined' },
+        { time: '03:00:01', area: 'reply', text: 'run is not a function' },
+      ],
+    },
+  }), rt))
+  assert.ok(some.includes('最近 2 条 error'), '标题要让用户知道这不是全部');
+  assert.ok(some.includes('共 7 条'), '总数也要给，方便判断是不是「刚刚才炸」');
+  assert.ok(some.indexOf('onInbound') < some.indexOf('run is not a function'), '最新的排在最前');
+  assert.ok(some.includes('inbound') && some.includes('reply'), '要标出是哪个阶段出的错');
+});
+
+test('前端渲染：04 段有「导出诊断包」，并说清和「复制」的区别', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  rt.reset()
+  const txt = textOf(expand(mod.SupportModal({ toast: () => {}, onClose: () => {}, onGo: () => {} }), rt))
+  assert.ok(txt.includes('复制诊断信息'), '原来的复制按钮不能被顶掉');
+  assert.ok(txt.includes('导出诊断包'), '导出按钮没渲染出来');
+  assert.ok(txt.includes('拖进群'), '不说用途，用户不知道它和「复制」有什么区别');
+});

@@ -44,6 +44,31 @@ window.__ModuleLoader__.load({
     const THUMB_MIN = 700 * 1024
     /** 首次创建工作区的默认名字；只影响「还叫目录名」的那些，用户改过的不动 */
     const DEFAULT_WORKSPACE_TITLE = 'Roost·QQ'
+    /**
+     * 交流反馈群。后端 `src/support.js` 的 `GROUP_ID` 是同一份事实——
+     * 以前这个号在「更新」页和「关于」页各写一遍，改群时必漏一处。测试钉住两边一致。
+     */
+    const FEEDBACK_GROUP = '1130901545'
+    /**
+     * 提 issue / 看 FAQ 的地址：后端 `LINKS` 兜一份，这里再兜一份。
+     *
+     * 为什么要重复：弹窗打开时 `/support/info` 可能还没回来，甚至**永远回不来**
+     * （面板半死不活正是用户来点这个按钮的时刻）。那时外链必须仍然在——
+     * 「等接口」等于在最需要求助的时候把求助入口也一起关掉。
+     *
+     * **issue 只有 GitHub**：Gitee 是只读镜像，维护者不那边看 issue，
+     * 给第二个入口只会让人以为提过了。FAQ 两站都给——国内打不开 GitHub 时
+     * 至少还能看文档。
+     */
+    const SUPPORT_LINKS = {
+      github: {
+        issues: 'https://github.com/roost-qq/dsh-roost/issues/new',
+        faq: 'https://github.com/roost-qq/dsh-roost/blob/main/README.md#%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98',
+      },
+      gitee: {
+        faq: 'https://gitee.com/tdcq9594/dsh-roost/blob/main/README.md#%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98',
+      },
+    }
 
     /**
      * QR SVG 是宿主给的，不是用户输入，但面板用 `dangerouslySetInnerHTML`
@@ -361,6 +386,16 @@ window.__ModuleLoader__.load({
 .roost-primary:hover:not(:disabled){filter:brightness(1.08);transform:translateY(-1px)}
 .roost-primary:active:not(:disabled){transform:scale(.97)}
 .roost-primary:disabled{opacity:.55;cursor:not-allowed}
+/* 强调按钮：class 里带 roost-btn-primary 的按钮在面板里用了十几处，
+   但这条样式规则一直是缺的——那些「主要操作」全都跟次要按钮长得一模一样。
+   只补配色，尺寸留给 roost-btn（roost-primary 的 padding 更大，混排会参差）。 */
+.roost-btn.roost-btn-primary{
+  background:var(--dsw-alias-button-primary-fill,var(--accent));
+  border-color:transparent;color:var(--dsw-alias-label-primary-foreground,#fff);font-weight:600;
+}
+.roost-btn.roost-btn-primary:hover:not(:disabled){
+  background:var(--dsw-alias-button-primary-fill,var(--accent));filter:brightness(1.08);
+}
 .roost-input{
   width:100%;box-sizing:border-box;padding:8px 12px;border-radius:8px;
   border:1px solid var(--line);background:var(--field);color:inherit;font:inherit;font-size:13px;
@@ -1123,12 +1158,60 @@ window.__ModuleLoader__.load({
    正常宽度下永远是一行 */
 .roost-head-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .roost-head-quick{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+/* 问题反馈入口（2026-11-27）：与两个总开关同一组、竖线分隔。
+   它是「求助」，不是设置项——混在开关中间会被当成第三个开关。 */
+.roost-head-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-left:auto}
+.roost-head-help{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;
+  border:1px solid var(--line-soft);border-radius:7px;background:transparent;color:inherit;
+  font:inherit;font-size:11.5px;line-height:1;cursor:pointer;opacity:.78;white-space:nowrap}
+.roost-head-help:hover{opacity:1;background:color-mix(in srgb,currentColor 7%,transparent)}
+.roost-head-help:focus-visible{outline:2px solid #4d6bfe;outline-offset:2px}
+.roost-head-sep{width:1px;height:16px;flex:0 0 auto;background:var(--line-soft)}
+/* 开关还没读回来时不渲染，但竖线在外面——它会成为最后一个子元素。
+   不加这条，面板刚打开的头几百毫秒会看到「问题反馈 │」后面空着一块。 */
+.roost-head-sep:last-child{display:none}
+/* 反馈弹窗：编号 + 粗标题 + 行，一屏扫完；四张卡会让弹窗变成一个小页面 */
+.roost-help-sec{margin-top:16px}
+.roost-help-sec:first-child{margin-top:0}
+.roost-help-h{display:flex;align-items:baseline;gap:8px;font-size:12.5px;font-weight:640;
+  padding-bottom:6px;border-bottom:1px solid var(--line-soft)}
+.roost-help-h .n{font-size:10.5px;font-weight:700;letter-spacing:.08em;
+  color:var(--dsw-alias-label-tertiary,inherit);font-variant-numeric:tabular-nums}
+.roost-help-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:8px 0;border-bottom:1px dashed var(--line-soft);font-size:12px}
+.roost-help-row:last-child{border-bottom:0}
+.roost-help-row .l{flex:1 1 210px;min-width:0}
+.roost-help-row .v{font-size:11.5px;color:var(--dsw-alias-label-tertiary,inherit);
+  word-break:break-all;line-height:1.5}
+.roost-help-pre{margin:4px 0 8px;padding:9px 11px;border-radius:8px;max-height:220px;overflow:auto;
+  white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.6;
+  font-family:ui-monospace,monospace;
+  background:var(--dsw-alias-fill-secondary,rgba(128,128,128,.12))}
+.roost-help-q{border-bottom:1px dashed var(--line-soft);padding:7px 0}
+.roost-help-q>summary{cursor:pointer;font-weight:600;font-size:12px;line-height:1.5}
+.roost-help-q>div{padding:6px 0 2px;font-size:11.8px;line-height:1.65;
+  color:var(--dsw-alias-label-secondary,inherit);white-space:pre-wrap}
+/* 最近 error：弹窗里直接看结论，不用为了三个字跳一趟排障页。
+   用 grid 而不是 flex：flex 里 auto 列的宽度随内容变，三条消息左边缘会错开；
+   grid 的 max-content 取该列最宽那条，所有行对齐。
+   消息单行截断 + title 看全文——同一段 stack 原样铺开会把弹窗撑成两屏。 */
+.roost-help-errs{margin:0 0 6px}
+.roost-help-err{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:0 8px;
+  font-size:11.5px;line-height:1.6;padding:2px 0}
+.roost-help-err .t{font-family:ui-monospace,monospace;
+  font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary,inherit)}
+.roost-help-err .m{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 只有一行文字的（标题、加载中、没有 error）不占两列，否则会被挤到右边 */
+.roost-help-err .m:only-child{grid-column:1 / -1}
 .roost-head-q{display:flex;align-items:center;gap:6px;font-size:11.5px;line-height:1;
   color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;white-space:nowrap}
 /* 窄栏里只留开关本身：三组「文字+开关」会把页签条挤到第二屏 */
 @container (max-width:620px){
   .roost-head-q span{display:none}
   .roost-head-quick{gap:10px}
+  /* 反馈按钮只留问号图标：带文字会把页签条挤到第二屏 */
+  .roost-head-help span{display:none}
+  .roost-head-help{padding:0 7px}
 }
 /* 面板在窄侧栏里：统计卡回到两列，页头与页签一起收紧 */
 @container (max-width:620px){
@@ -10975,10 +11058,16 @@ window.__ModuleLoader__.load({
     }
 
     /** 整页弹窗：把低频但很长的页（接入向导）从页签栏里挪出来。 */
-    function PageModal({ title, onClose, children }) {
+    /**
+     * 整页弹窗。
+     *
+     * `width` 可覆盖：正文类弹窗（接入、聊天记录）要 920px 才够排两列，
+     * 而「问题反馈」是一段段清单，760px 更紧凑、一屏能扫完。
+     */
+    function PageModal({ title, onClose, children, width = 'min(920px,100%)' }) {
       return h('div', { className: 'cap-modal', onClick: onClose },
         h('div', {
-          className: 'cap-modal-b', style: { width: 'min(920px,100%)' },
+          className: 'cap-modal-b', style: { width },
           onClick: (e) => e.stopPropagation(),
         },
           h('div', { className: 'cap-modal-h' },
@@ -17194,9 +17283,363 @@ window.__ModuleLoader__.load({
           }, data?.notes || '这一版没写说明。')))
     }
 
+    /**
+     * 问题反馈弹窗（2026-11-27）。
+     *
+     * 四段：先自查（常见问题）→ 看日志 → 找我们 → 带走一段诊断信息。
+     * **每条日志给的动作都不一样，不能合并**：
+     *   - 面板日志在内存里（不落盘）→ 跳排障页，那边能筛级别、能自动刷新；
+     *   - dsh-roost 出错记录 → 看尾部（面板起不来时这是唯一线索）；
+     *   - DSH 本体 → 看最近的崩溃记录 / 打开目录；
+     *   - 框架日志 → 只给路径 + 打开（另一个进程的大文件，面板硬读会卡）。
+     */
+    function SupportModal({ toast, onClose, onGo }) {
+      const [info, setInfo] = useState(null)
+      const [err, setErr] = useState('')
+      const [faq, setFaq] = useState(null)
+      const [faqBusy, setFaqBusy] = useState(false)
+      const [faqOpen, setFaqOpen] = useState(false)
+      const [tail, setTail] = useState(null)
+      const [tailBusy, setTailBusy] = useState('')
+      const [opening, setOpening] = useState('')
+      /** 导出诊断包的结果：成功后才显示文件名（失败的提示走 toast，不占版面） */
+      const [bundle, setBundle] = useState(null)
+      const [bundleBusy, setBundleBusy] = useState(false)
+
+      useEffect(() => {
+        let alive = true
+        ;(async () => {
+          const r = await get('/support/info')
+          if (!alive) return
+          if (r?.ok === false) setErr(r?.message || '读不到环境信息')
+          else setInfo(r)
+        })()
+        return () => { alive = false }
+      }, [])
+
+      /** FAQ 懒加载：不展开不去读 README（弹窗第一屏要快） */
+      const toggleFaq = async () => {
+        if (faqOpen) { setFaqOpen(false); return }
+        setFaqOpen(true)
+        if (faq || faqBusy) return
+        setFaqBusy(true)
+        try {
+          const r = await get('/support/faq')
+          setFaq(r?.ok === false
+            ? { ok: false, items: [], message: r?.message || '读不到常见问题' }
+            : r)
+        } finally { setFaqBusy(false) }
+      }
+
+      const showTail = async (which) => {
+        if (tail?.which === which) { setTail(null); return }
+        setTailBusy(which)
+        try {
+          /** 拼字符串不用模板：`test/routes.test.js` 靠 `'/路径` 前缀核对前端入口 */
+          const r = await get('/support/log-tail?which=' + encodeURIComponent(which))
+          if (r?.ok === false) toast(r?.message || '读不到日志')
+          else setTail({ which, ...r })
+        } finally { setTailBusy('') }
+      }
+
+      const openDir = async (which) => {
+        setOpening(which)
+        try {
+          const r = await post('/support/open', { which })
+          toast(r?.message || (r?.ok ? '已打开' : '打开失败'))
+        } finally { setOpening('') }
+      }
+
+      const copy = async (text, okText) => {
+        try { await navigator.clipboard.writeText(text); toast(okText) }
+        catch { toast('复制失败，手动选一下吧') }
+      }
+
+      /**
+       * 导出诊断包：后端写文件到数据目录，返回路径。
+       *
+       * 为什么不是前端拼文本再下载：面板跑在 webview 里，`<a download>` 的落点
+       * 由宿主决定（常常直接进下载夹，用户找不着）；写成文件才好在群里说
+       * 「在数据目录下，叫 support-xxx.txt」。
+       */
+      const exportBundle = async () => {
+        setBundleBusy(true)
+        try {
+          const r = await post('/support/bundle', {})
+          if (r?.ok) { setBundle(r); toast(r.message || '已导出') }
+          else toast(r?.message || '导出失败')
+        } finally { setBundleBusy(false) }
+      }
+
+      const logs = info?.logs || {}
+      /** 接口没回来（甚至挂了）也要有外链：见 `SUPPORT_LINKS` 上的说明 */
+      const links = info?.links || SUPPORT_LINKS
+      const act = logs.activate || {}
+      const dsh = logs.dsh || {}
+      const fw = logs.framework || {}
+      const items = faq?.items || []
+
+      /**
+       * README 里的 `**粗体**` 与 `[文字](链接)` 要变成元素：原样塞进 `<pre>`
+       * 用户看到的是 `**` 和 `](…)`，而那些链接正是最该点的。
+       * 只放行 http(s)、锚点、相对路径——README 虽然是自带的，也不让
+       * `javascript:` 从 markdown 链接里溜进来。
+       */
+      const inline = (s) => {
+        const out = []
+        const re = /\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*/g
+        let last = 0
+        let m
+        let k = 0
+        while ((m = re.exec(s))) {
+          if (m.index > last) out.push(s.slice(last, m.index))
+          if (m[1]) {
+            const href = m[2]
+            if (/^(https?:|#|\.{0,2}\/)/i.test(href)) {
+              out.push(h('a', { key: 'a' + (k++), href, target: '_blank', rel: 'noreferrer' }, m[1]))
+            } else out.push(m[1])
+          } else out.push(h('strong', { key: 'b' + (k++) }, m[3]))
+          last = m.index + m[0].length
+        }
+        if (last < s.length) out.push(s.slice(last))
+        return out
+      }
+
+      /**
+       * 外链按钮：用 `.roost-link` 而不是裸 `<a>`。
+       * 裸 a 会落到浏览器默认的紫色/蓝色，在深色主题里既突兀又不跟强调色走。
+       */
+      const link = (href, label) => (href
+        ? h('a', {
+            href, target: '_blank', rel: 'noreferrer',
+            className: 'roost-link', style: { marginRight: 10 },
+            onClick: (e) => e.stopPropagation(),
+          }, `${label} ↗`)
+        : null)
+
+      const btn = (key, label, onClick, opts = {}) => h('button', {
+        key, type: 'button',
+        className: 'roost-btn' + (opts.primary ? ' roost-btn-primary' : ''),
+        disabled: Boolean(opts.busy),
+        onClick,
+      }, label)
+
+      /** `actions` 允许传单个按钮或数组：调用点一半只有一个动作，硬套数组反而容易漏方括号 */
+      const row = (key, label, value, actions) => h('div', { className: 'roost-help-row', key },
+        h('div', { className: 'l' },
+          h('div', null, label),
+          value ? h('div', { className: 'v' }, value) : null),
+        ...[].concat(actions || []))
+
+      return h(PageModal, { title: '遇到问题了？', onClose, width: 'min(760px,100%)' },
+        h('div', { className: 'roost-note', style: { marginBottom: 4 } },
+          '先自查，再找人。多数问题在第一步就有答案。'),
+        err ? h('div', { style: { color: 'var(--bad)', fontSize: 11.5, marginTop: 6 } }, err) : null,
+
+        /* 01 先看一眼 */
+        h('div', { className: 'roost-help-sec' },
+          h('div', { className: 'roost-help-h' }, h('span', { className: 'n' }, '01'), '先看一眼（不用问人）'),
+          h('div', { className: 'roost-help-row' },
+            h('div', { className: 'l' },
+              h('div', null,
+                '常见问题',
+                items.length ? `（${items.length} 条）` : faqBusy ? '（读着…）' : ''),
+              h('div', { className: 'v' },
+                '装好了不回 / 全部 401 / 502 / 表情包不对 / 不绑定有没有影响 …')),
+            btn('faq', faqOpen ? '收起' : '展开', toggleFaq, { busy: faqBusy && !faqOpen }),
+          ),
+          faqOpen
+            ? h('div', null,
+                faq === null
+                  ? h('div', { className: 'roost-note', style: { padding: '8px 0' } }, '读着…')
+                  : faq.ok === false
+                    ? h('div', { className: 'roost-note', style: { padding: '8px 0' } }, faq.message || '读不到常见问题')
+                    : items.map((it, i) => h('details', {
+                        key: 'q' + i, className: 'roost-help-q', open: i === 0,
+                      },
+                        h('summary', null, it.q),
+                        h('div', null, ...inline(it.a)),
+                      )),
+                h('div', { style: { marginTop: 8 } },
+                  link(links.github?.faq, '在 GitHub 看'),
+                  link(links.gitee?.faq, '在 Gitee 看'),
+                  h('span', { className: 'roost-faint', style: { fontSize: 11 } },
+                    '这一节直接读随包的 README，断网也能看')))
+            : null,
+        ),
+
+        /* 02 看日志 */
+        h('div', { className: 'roost-help-sec' },
+          h('div', { className: 'roost-help-h' }, h('span', { className: 'n' }, '02'), '看日志'),
+          row('panel', '面板日志',
+            !info
+              ? '读着…'
+              : `内存里最近 ${info.panelCount ?? 0}/${logs.panel?.max ?? 400} 条，不落盘——重启就没了`,
+            btn('go-logs', '去排障页', () => onGo('logs'))),
+
+          /**
+           * 最近 3 条 error 就地显示。
+           *
+           * 「去排障页」是给想深挖的人的；多数人只想知道「刚才是不是报错了」，
+           * 让他为三个字跳一趟、再回来，等于把答案藏起来。
+           */
+          h(RecentErrors, { info }),
+
+          row('act', 'dsh-roost 出错记录',
+            /**
+             * 还没拿到环境信息时显示「读着…」，**不能**直接显示「没有」：
+             * 弹窗打开的头几十毫秒会先闪一句诊断结论，看起来像真的查过了。
+             */
+            !info
+              ? '读着…'
+              : act.exists
+                ? `${act.path}（${Math.max(1, Math.round((act.size || 0) / 1024))} KB）`
+                : '没有（面板从没激活失败过，这是正常的）',
+            [
+              act.exists ? btn('act-tail', tail?.which === 'activate' ? '收起' : '看尾部', () => showTail('activate'), { busy: tailBusy === 'activate' }) : null,
+              btn('act-open', '打开目录', () => openDir('data'), { busy: opening === 'data' }),
+            ]),
+
+          row('dsh', 'DSH 本体日志',
+            !info
+              ? '读着…'
+              : dsh.latest
+                ? `${dsh.latest.name}（${dsh.dir}）`
+                : dsh.dir
+                  ? `没有崩溃记录（${dsh.dir}）`
+                  : '没找到日志目录',
+            [
+              dsh.latest ? btn('dsh-tail', tail?.which === 'dsh' ? '收起' : '看最新', () => showTail('dsh'), { busy: tailBusy === 'dsh' }) : null,
+              dsh.exists ? btn('dsh-open', '打开目录', () => openDir('dsh-logs'), { busy: opening === 'dsh-logs' }) : null,
+            ]),
+
+          row('fw', '框架日志',
+            !info
+              ? '读着…'
+              : fw.installed
+                ? `${fw.path}${fw.exists ? '' : '（还没生成）'}`
+                : '还没装框架，这一项不需要看',
+            /**
+             * 两个入口各有各的用处：网页版能筛级别、能搜、能自动刷新（框架自己的
+             * 面板），文件版是网页都打不开时的兜底（框架没启动时只剩这个）。
+             */
+            fw.installed
+              ? [
+                  btn('fw-web', '看网页日志', () => openDir('framework-web'), { busy: opening === 'framework-web' }),
+                  btn('fw-open', '打开文件夹', () => openDir('framework-logs'), { busy: opening === 'framework-logs' }),
+                ]
+              : null),
+
+          tail
+            ? (tail.exists
+                ? h('div', { key: 'tailbox' },
+                    h('div', { className: 'roost-note', style: { marginTop: 8 } },
+                      `${tail.name || '日志'}${tail.truncated ? '（只显示末尾一段）' : ''}`),
+                    h('pre', { className: 'roost-help-pre' }, tail.text || '（空）'))
+                : h('div', { key: 'tailbox', className: 'roost-note', style: { marginTop: 8 } },
+                    tail.message || '这里没有内容'))
+            : null,
+        ),
+
+        /* 03 找我们 */
+        h('div', { className: 'roost-help-sec' },
+          h('div', { className: 'roost-help-h' }, h('span', { className: 'n' }, '03'), '找我们'),
+          h('div', { className: 'roost-help-row' },
+            h('div', { className: 'l' },
+              h('div', null, '提 issue'),
+              h('div', { className: 'v' },
+                '贴上报错、版本和诊断信息，比只发一句「用不了」快得多；'
+                + '打不开 GitHub 就往下进群，把诊断信息贴群里')),
+            link(links.github?.issues, 'GitHub'),
+          ),
+          h('div', { className: 'roost-help-row' },
+            h('div', { className: 'l' },
+              h('div', null, `反馈群 ${info?.group || FEEDBACK_GROUP}`),
+              /**
+               * 这里放不下二维码（弹窗本来就长），只给群号又进不去群——
+               * 所以指到「关于」页：二维码图在那儿，随包发布、白底能扫。
+               */
+              h('div', { className: 'v' }, '群二维码在下面的「关于」页；群里也建议先贴诊断信息')),
+            btn('go-about', '去关于页扫码', () => onGo('about')),
+            btn('copy-group', '复制群号', () => copy(info?.group || FEEDBACK_GROUP, '群号已复制')),
+          ),
+        ),
+
+        /* 04 带走诊断信息 */
+        h('div', { className: 'roost-help-sec' },
+          h('div', { className: 'roost-help-h' }, h('span', { className: 'n' }, '04'), '贴给别人时，把这段一起带上'),
+          info
+            ? h('pre', { className: 'roost-help-pre', style: { marginTop: 8 } }, info.diagnostics || '')
+            : h('div', { className: 'roost-note', style: { padding: '8px 0' } }, '读着…'),
+          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+            btn('copy-diag', '复制诊断信息', () => copy(info?.diagnostics || '', '诊断信息已复制'), { primary: true, busy: !info }),
+            /**
+             * 导出不依赖 `info`：它只调 `/support/bundle`，后端自己会聚合。
+             * 用 `!info` 拦住的话，`/support/info` 一挂（正是插件半死、用户最需要
+             * 诊断包的时候），这个按钮就永久灰着，连试都试不了。
+             * 「复制诊断信息」仍然等 `info`——没有内容时复制出来是空的，更误导。
+             */
+            btn('export-bundle', bundleBusy ? '导出中…' : '导出诊断包', exportBundle, { busy: bundleBusy }),
+            h('span', { className: 'roost-faint', style: { fontSize: 11 } },
+              '里面含本机路径（有用户名），发到群里前看一眼')),
+          h('div', { className: 'roost-note', style: { marginTop: 6, fontSize: 11.5 } },
+            '「复制」适合说明情况时贴一段；「导出诊断包」会把环境信息和最近 400 条日志写成'
+            + '一个 txt，直接拖进群里，不用一段段贴。'),
+          bundle
+            ? h('div', {
+                key: 'bundle',
+                className: 'roost-help-row',
+                style: { paddingTop: 6 },
+              },
+                h('div', { className: 'l' },
+                  h('div', null, `已导出 ${bundle.name}`),
+                  h('div', { className: 'v' },
+                    `${Math.max(1, Math.round((bundle.size || 0) / 1024))} KB · ${bundle.dir || ''}`)),
+                btn('open-bundle-dir', '打开目录', () => openDir('data'), { busy: opening === 'data' }),
+              )
+            : null,
+        ),
+      )
+    }
+
+    /**
+     * 弹窗 02 段里的「最近 error」。
+     *
+     * 单独成组件是为了能直接渲染测试：弹窗的数据要等 `useEffect` + 接口回来
+     * 才填得上，而渲染替身不跑 effect——混在弹窗里就只能验「不崩」，
+     * 验不到「真有 error 时确实列出三条、最新在前」。
+     */
+    function RecentErrors({ info }) {
+      /**
+       * 接口还没回来时**什么都不渲染**：上面「面板日志」那行的值已经是「读着…」，
+       * 这里再来一行同样的字，看起来像说了两遍。
+       */
+      if (!info) return null
+      const errs = Array.isArray(info.recentErrors) ? info.recentErrors : []
+      if (!errs.length) {
+        return h('div', { className: 'roost-help-errs' },
+          h('div', { className: 'roost-help-err' },
+            h('span', { className: 'm', style: { color: 'var(--dsw-alias-label-tertiary,inherit)' } },
+              `没有 error${info.warnCount ? `（${info.warnCount} 条 warn）` : ''}——多半不是面板这边报的错`)))
+      }
+      return h('div', { className: 'roost-help-errs' },
+        h('div', { className: 'roost-help-err' },
+          h('span', { className: 'm', style: { color: 'var(--dsw-alias-label-tertiary,inherit)' } },
+            `最近 ${errs.length} 条 error（共 ${info.errorCount ?? errs.length} 条 error / ${info.warnCount ?? 0} 条 warn）`)),
+        ...errs.map((e, i) => h('div', {
+          key: 'e' + i, className: 'roost-help-err',
+          /** 单行截断，全文放 title：一段 stack 原样铺开会把弹窗撑成两屏 */
+          title: `${e.time || ''} ${e.area || ''} ${e.text || ''}`.trim(),
+        },
+          h('span', { className: 't' }, `${e.time || ''}${e.area ? ' ' + e.area : ''}`),
+          h('span', { className: 'm' }, e.text || ''),
+        )))
+    }
+
     function FeedbackCard({ toast }) {
       const [copied, setCopied] = useState(false)
-      const group = '1130901545'
+      /** 群号只有一份（见 `FEEDBACK_GROUP`）：以前这里和「关于」页各写了一遍 */
+      const group = FEEDBACK_GROUP
 
       return h(Sec, { n: '03', title: '交流反馈群' },
         h('div', { className: 'roost-note', style: { marginTop: 2 } },
@@ -23170,8 +23613,8 @@ window.__ModuleLoader__.load({
             }),
             h('div', { style: { minWidth: 200 } },
               h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-                h('span', null, 'QQ 群 1130901545'),
-                h('button', { type: 'button', className: 'roost-btn', onClick: () => copy('1130901545') }, '复制群号'),
+                h('span', null, `QQ 群 ${FEEDBACK_GROUP}`),
+                h('button', { type: 'button', className: 'roost-btn', onClick: () => copy(FEEDBACK_GROUP) }, '复制群号'),
               ),
               h('div', { className: 'roost-note' }, '手机扫码进群；出问题先看「排障」页的日志，再来群里问。'),
             ),
@@ -25471,6 +25914,8 @@ window.__ModuleLoader__.load({
       const [pageModal, setPageModal] = useState(null)
       /** 打开试运行的二次确认：用面板同款 Modal，原生 confirm 在 webview 里常受限 */
       const [dryRunConfirm, setDryRunConfirm] = useState(false)
+      /** 问题反馈弹窗：页头常驻按钮，任何页面都能打开（面板异常时最需要它） */
+      const [supportOpen, setSupportOpen] = useState(false)
       /** Alt+K 全局查找（5.1） */
       const [palette, setPalette] = useState({ open: false, q: '', idx: 0 })
       const setTab = useCallback((id) => {
@@ -26275,31 +26720,54 @@ window.__ModuleLoader__.load({
           h('div', { className: 'roost-head-row' },
             h('div', { className: 'roost-title-lg' }, 'Roost'),
             /**
-             * 快速开关：页头改了**立刻生效**（不走「保存设置」）。
-             * `featOn` 为 null 时整块不渲染——宁可晚半秒出现，也不要先显示
-             * 一个默认开着、实际关着的开关。
+             * 右侧一组：问题反馈 + 竖线 + 两个总开关（2026-11-27）。
+             *
+             * 按钮**不依赖 `featOn`**：读不到开关状态时（`featOn` 为 null）
+             * 恰恰最可能需要求助——面板半死不活时正是它该在的时候。
              */
-            featOn ? h('div', { className: 'roost-head-quick' },
-              [
-                ['botEnabled', '总开关', '关掉后一条消息都不接，定时行为全停'],
-                ['dryRun', '试运行', '照常回、照常记，只是不真的发到 QQ'],
-              ].map(([id, label, hint]) => h('label', {
-                key: id, className: 'roost-head-q', title: `${hint}（改完立刻生效）`,
+            h('div', { className: 'roost-head-right' },
+              h('button', {
+                type: 'button', className: 'roost-head-help',
+                title: '常见问题、日志在哪、提 issue、反馈群',
+                onClick: () => setSupportOpen(true),
               },
-                h('span', null, label),
-                h('button', {
-                  type: 'button', className: 'roost-switch', role: 'switch',
-                  'aria-checked': featOn[id] ? 'true' : 'false',
-                  'aria-label': label,
-                  'data-on': featOn[id] ? '1' : '0',
-                  title: hint,
-                  onClick: () => {
-                    if (id === 'dryRun' && !featOn[id]) setDryRunConfirm(true)
-                    else toggleHeadFeat(id, !featOn[id])
-                  },
-                }),
-              )),
-            ) : null,
+                h('svg', {
+                  width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none',
+                  stroke: 'currentColor', 'stroke-width': 2, 'stroke-linecap': 'round',
+                  'aria-hidden': 'true',
+                },
+                  h('circle', { cx: 12, cy: 12, r: 9 }),
+                  h('path', { d: 'M9.4 9a2.6 2.6 0 1 1 3.7 2.4c-.7.4-1.1 1-1.1 1.8v.3' }),
+                  h('path', { d: 'M12 17h.01' })),
+                h('span', null, '问题反馈')),
+              h('span', { className: 'roost-head-sep', 'aria-hidden': 'true' }),
+              /**
+               * 快速开关：页头改了**立刻生效**（不走「保存设置」）。
+               * `featOn` 为 null 时整块不渲染——宁可晚半秒出现，也不要先显示
+               * 一个默认开着、实际关着的开关。
+               */
+              featOn ? h('div', { className: 'roost-head-quick' },
+                [
+                  ['botEnabled', '总开关', '关掉后一条消息都不接，定时行为全停'],
+                  ['dryRun', '试运行', '照常回、照常记，只是不真的发到 QQ'],
+                ].map(([id, label, hint]) => h('label', {
+                  key: id, className: 'roost-head-q', title: `${hint}（改完立刻生效）`,
+                },
+                  h('span', null, label),
+                  h('button', {
+                    type: 'button', className: 'roost-switch', role: 'switch',
+                    'aria-checked': featOn[id] ? 'true' : 'false',
+                    'aria-label': label,
+                    'data-on': featOn[id] ? '1' : '0',
+                    title: hint,
+                    onClick: () => {
+                      if (id === 'dryRun' && !featOn[id]) setDryRunConfirm(true)
+                      else toggleHeadFeat(id, !featOn[id])
+                    },
+                  }),
+                )),
+              ) : null,
+            ),
           ),
           h('div', { className: 'roost-note roost-sub' }, 'QQ 消息从这里交给 DSH 会话回答。'),
           /** 关着时给一句提示：否则下面所有开关都「改了没反应」，看不出为什么 */
@@ -26648,6 +27116,20 @@ window.__ModuleLoader__.load({
               h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }))
           : null,
 
+        /**
+         * 问题反馈（2026-11-27）。
+         *
+         * 跳转（去排障页）要**先关弹窗再跳**：遮罩留着会盖住新页面，
+         * 看起来就像「点了没反应」。
+         */
+        supportOpen
+          ? h(SupportModal, {
+              toast,
+              onClose: () => setSupportOpen(false),
+              onGo: (id) => { setSupportOpen(false); goTab(id) },
+            })
+          : null,
+
         dryRunConfirm
           ? h(ConfirmModal, {
               title: '打开试运行？',
@@ -26830,6 +27312,9 @@ window.__ModuleLoader__.load({
     exports.Dropdown = Dropdown
     exports.dropdownPos = dropdownPos
     exports.ConfirmModal = ConfirmModal
+    /** 问题反馈弹窗：渲染测试要盯住「空数据不炸 + 四段齐全」 */
+    exports.SupportModal = SupportModal
+    exports.RecentErrors = RecentErrors
     return module.exports
   },
 })

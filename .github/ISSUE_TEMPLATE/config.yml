@@ -1,0 +1,15 @@
+# 新建 issue 页的配置。
+#
+# 为什么保留「空白 issue」（blank_issues_enabled: true）：
+#   这个仓不只有 bug，还有「想加个功能」「文档写错了」这类不需要版本和日志的
+#   反馈。把空白入口关掉，等于把他们逼进 bug 模板、再随便糊两行——比不放模板更差。
+#   模板只负责让**愿意填的人**一次填齐，不负责拦人。
+#
+# 为什么不放 Gitee 的链接：Gitee 是只读镜像，维护者只在 GitHub 看 issue。
+# 在镜像上给入口，反馈会沉在那儿没人看，用户还以为提过了。
+blank_issues_enabled: true
+
+contact_links:
+  - name: 常见问题（多数问题这里就有答案）
+    url: https://github.com/roost-qq/dsh-roost/blob/main/README.md#%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98
+    about: 装好了不回、全部 401、502、表情包不对、不绑定有没有影响

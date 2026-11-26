@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 const sqlite = process.getBuiltinModule?.('node:sqlite');
 
@@ -877,11 +877,11 @@ test('对齐：前端调用的每个路径后端都存在', async () => {
   const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8');
 
   /**
-   * `regAuthor` 是 `route` 的包装（注册 + 收进 authorOffs 供清理）。
-   * 只认 `route(` 的话，用它注册的路由会被当成「后端不存在」——正是这条
-   * 测试要抓的那类漂移，反过来误报一次。
+   * `regAuthor` / `regSupport` 都是 `route` 的包装（注册 + 收进各自的注销数组）。
+   * 只认 `route(` 的话，用它们注册的路由会被当成「后端不存在」——正是这条
+   * 测试要抓的那类漂移，反过来误报一次。**新增包装函数时必须加进来。**
    */
-  const routes = new Set([...host.matchAll(/(?:route|regAuthor)\('(\/[a-z/-]+)'/g)].map((m) => m[1]));
+  const routes = new Set([...host.matchAll(/(?:route|regAuthor|regSupport)\('(\/[a-z/-]+)'/g)].map((m) => m[1]));
   const called = new Set([
     ...[...client.matchAll(/(?:get|post)\('(\/[a-z/-]+)/g)].map((m) => m[1]),
     ...[...client.matchAll(/run\('(\/[a-z/-]+)/g)].map((m) => m[1]),
@@ -3314,4 +3314,153 @@ test('路由：/setup/owner/bind 保留「最后一人不能解绑」与 404 降
   assert.match(host, /OWNERS_API_UNSUPPORTED/, '旧框架要有明确降级码');
   assert.match(host, /setup\.bindOwner\(openid, remove\)/, '绑定要委托给 setup 层写框架 config');
   assert.doesNotMatch(host, /patchConfig\(\{ owners:/, '不得把框架 owners 写进 dsh config');
+});
+
+/* ---------------- 问题反馈（2026-11-27） ---------------- */
+
+/**
+ * 这组测试真打路由，不看源码字符串。
+ *
+ * 弹窗最怕的失败方式是「看着有、点开是错的」：版本号读成空、数据目录指到
+ * 别处、日志尾部把 token 一起贴进群里。纯函数测试覆盖不到「host 里到底
+ * 传了哪个值进来」，只有在这里真跑一遍才看得出来。
+ */
+test('路由：/support/info 给出真实版本、数据目录与日志信息', async () => {
+  /** 指一个不存在的框架目录：断言「没装框架」这条分支，别让开发机上真装的那份干扰 */
+  const h = await bootHost({ setup: { roostDir: join(tmpdir(), 'no-such-roost-support-xyz') } });
+  try {
+    const r = await h.call('/support/info');
+    assert.equal(r.status, 200);
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    assert.equal(r.json.version, pkg.version, '版本必须是包里那一份，不能自己拼');
+    assert.equal(r.json.dataDir, h.dir, 'dataDir 必须是宿主真正在用的那个目录');
+    assert.equal(r.json.platform, process.platform);
+    assert.equal(r.json.group, '1130901545');
+    assert.equal(r.json.logs.panel.kind, 'memory');
+    assert.equal(r.json.logs.panel.max, 400);
+    assert.match(r.json.logs.activate.path, /activate-error\.log$/);
+    assert.equal(r.json.logs.framework.installed, false, '临时目录里没装框架，不该报成错误');
+    assert.ok(r.json.diagnostics.includes(pkg.version), '诊断信息里要有版本');
+    assert.ok(r.json.diagnostics.includes(h.dir), '诊断信息里要有数据目录');
+    const raw = JSON.stringify(r.json);
+    assert.ok(!/sk-[A-Za-z0-9]{16,}|access_token/i.test(raw), '这个接口不该带任何凭据');
+  } finally { h.off?.(); }
+});
+
+test('路由：/support/faq 直接读随包 README（断网也能看）', async () => {
+  const h = await bootHost();
+  try {
+    const r = await h.call('/support/faq');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, true);
+    assert.equal(r.json.items.length, 8);
+    assert.match(r.json.items[0].q, /401|不回/);
+    assert.ok(r.json.items.every((x) => x.a.length > 10), '答案不能是空的');
+  } finally { h.off?.(); }
+});
+
+test('路由：/support/log-tail 没有出错记录是正常状态，不是 404', async () => {
+  const h = await bootHost();
+  try {
+    const r = await h.call('/support/log-tail?which=activate');
+    assert.equal(r.status, 200, '「没有出错记录」是好消息，不该用错误码表示');
+    assert.equal(r.json.ok, true);
+    assert.equal(r.json.exists, false);
+    assert.equal(r.json.text, '');
+  } finally { h.off?.(); }
+});
+
+test('路由：/support/log-tail 读尾部并脱敏（这段要贴到群里）', async () => {
+  const h = await bootHost();
+  try {
+    writeFileSync(join(h.dir, 'activate-error.log'), 'Error: token=abcdef123456\nstack line\n');
+    const r = await h.call('/support/log-tail?which=activate');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.exists, true);
+    assert.ok(r.json.text.includes('stack line'));
+    assert.ok(!r.json.text.includes('abcdef123456'), '日志尾部必须过 redactText');
+  } finally { h.off?.(); }
+});
+
+test('路由：/support/log-tail 不认框架日志与任意 which', async () => {
+  const h = await bootHost();
+  try {
+    /** 框架日志是另一个进程的大文件，接口层面直接不提供读取 */
+    for (const w of ['framework', 'bot', '', '../config.json']) {
+      const r = await h.call('/support/log-tail?which=' + encodeURIComponent(w));
+      assert.equal(r.status, 400, `which=${w} 不该被接受`);
+    }
+  } finally { h.off?.(); }
+});
+
+test('路由：/support/open 只认枚举，未知目标直接 400（不执行打开）', async () => {
+  const h = await bootHost();
+  try {
+    for (const w of ['/etc/passwd', '..', 'C://Windows', '']) {
+      const r = await h.call('/support/open', { method: 'POST', body: { which: w } });
+      assert.equal(r.status, 400, `which=${w} 不该被接受`);
+    }
+  } finally { h.off?.(); }
+});
+
+/* ---------------- 第二批：诊断包与最近 error（2026-11-27） ---------------- */
+
+test('路由：/support/info 带最近 error 的槽位（没有时是空数组，不是 undefined）', async () => {
+  const h = await bootHost();
+  try {
+    const r = await h.call('/support/info');
+    assert.equal(r.status, 200);
+    assert.ok(Array.isArray(r.json.recentErrors), '前端直接 map 它，undefined 会让弹窗白屏');
+    assert.deepEqual(r.json.recentErrors, [], '临时环境里没跑过消息，不该凭空造 error');
+    /**
+     * 计数不钉死 0：宿主启动期自己会记 warn（框架目录没配之类），
+     * 那是真实发生的，跟这条测试要验的东西无关。
+     */
+    assert.equal(typeof r.json.errorCount, 'number', 'errorCount 要给数字，前端拿来显示「共 N 条」');
+    assert.equal(typeof r.json.warnCount, 'number');
+    assert.ok(r.json.errorCount >= r.json.recentErrors.length, '最近 3 条不能比总数还多');
+  } finally { h.off?.(); }
+});
+
+test('路由：/support/bundle 真写出文件，落在数据目录，且把日志也写进去', async () => {
+  const h = await bootHost();
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const a = await h.call('/support/bundle', { method: 'POST', body: {} });
+    assert.equal(a.status, 200, JSON.stringify(a.json));
+    assert.equal(a.json.ok, true);
+    assert.equal(dirname(a.json.path), h.dir, '文件必须落在数据目录——用户要去那里找');
+    assert.match(a.json.name, /^support-\d{8}-\d{6}(-\d+)?\.txt$/);
+    assert.ok(a.json.size > 0);
+
+    const text = readFileSync(a.json.path, 'utf8');
+    assert.ok(text.includes(pkg.version), '诊断包第一屏要有版本');
+    assert.ok(text.includes(h.dir), '诊断包要有数据目录');
+    assert.ok(text.includes('[面板日志]'), '要有一段日志，哪怕它是空的');
+    assert.ok(text.includes('含本机路径'), '要提醒用户发出去之前看一眼');
+
+    /**
+     * 连点两次：同名文件不能互相覆盖，且第二个文件里要看得到第一次留下的日志。
+     * 后半句才是重点——它顺带证明了「日志真的被写进文件」，不用去 host 里塞假数据。
+     */
+    const b = await h.call('/support/bundle', { method: 'POST', body: {} });
+    assert.equal(b.json.ok, true);
+    assert.notEqual(b.json.path, a.json.path, '同一秒连点两次会覆盖前一个文件，用户会以为导出丢了');
+    assert.ok(existsSync(a.json.path), '前一个文件不能被删');
+    const text2 = readFileSync(b.json.path, 'utf8');
+    assert.ok(text2.includes(a.json.name), '「导出诊断包」这个动作本身该记进面板日志');
+  } finally { h.off?.(); }
+});
+
+test('路由：/support/open 的 framework-web 在没装框架时拒绝，并说清下一步', async () => {
+  /** 指向一个不存在的框架目录：正好是「还没装」那种干净状态，不会误开浏览器 */
+  const h = await bootHost({ setup: { roostDir: join(tmpdir(), 'no-such-roost-fwweb-' + Date.now()) } });
+  try {
+    const r = await h.call('/support/open', { method: 'POST', body: { which: 'framework-web' } });
+    assert.equal(r.status, 400, '没装框架就不该去打开它的网页');
+    assert.match(r.json.message, /框架/);
+    /** 只说「打开失败」等于没说：用户要知道自己该先干什么 */
+    assert.match(r.json.message, /装|启动|运行/);
+    assert.equal(r.json.target, undefined, '失败时不该把拼到一半的地址回传');
+  } finally { h.off?.(); }
 });

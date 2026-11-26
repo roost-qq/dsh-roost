@@ -1,0 +1,77 @@
+name: 报告一个 bug
+description: 面板不对、机器人不回话、装不上——贴上报错再发，比「用不了」快得多
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **先看 [常见问题](https://github.com/roost-qq/dsh-roost/blob/main/README.md#%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98)**：
+        「装好了不回」「全部 401」「表情包不对」这类问题那里已经有答案。
+
+        面板页头的 **问题反馈** 按钮能一键复制诊断信息、也能导出带日志的诊断包，
+        填下面第 4 项时直接粘过来即可。
+
+  - type: input
+    id: version
+    attributes:
+      label: dsh-roost 版本
+      description: 面板「关于」页可以看到；「问题反馈」里复制的诊断信息第一行也有。
+      placeholder: 例如 0.0.42
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 期望是什么、实际是什么。有报错原文请原样贴在下面的代码块里，不要只发截图。
+      placeholder: |
+        我做了什么：
+        期望：
+        实际：
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断信息
+      description: |
+        面板 → 页头「问题反馈」→「复制诊断信息」，整段粘贴到这里。
+        如果日志比较长，用「导出诊断包」生成 txt，把关键的几十行贴过来。
+        里面含本机路径，介意可以打码用户名，但**请保留版本、平台、日志路径**——
+        少了这三样，多半还要再问一轮。
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志（可选）
+      description: 排障页里的 error，或框架 logs/bot.log 中相关的那一段。
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我看过「常见问题」，不是上面列出的已知情况
+          required: true
+        - label: 我搜过已有 issue，没有重复
+          required: true
