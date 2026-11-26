@@ -4,8 +4,10 @@
  * THIRD-PARTY-NOTICES.md。函数体口径与对方一致，只把 readJson/writeJson 指向
  * 本仓语义等价的 autotelic-store.js。
  *
- * 每条提醒是她自己在私聊里设的一次性闹钟；到点只负责把她叫醒（会话注入一轮），
- * **不直接替她发消息**。纯函数 + 注入式依赖，可单测。
+ * 每条提醒带 `chatId`（在哪个私聊设的，到点就往那个私聊说）；老记录没有这个
+ * 字段时回落主人。到点先注入一轮真会话让她自己决定说不说，再把她真说的话
+ * 经 `sendOut` 投递到 QQ——DSH 会话本身到不了 QQ（见 host.js fireReminder）。
+ * 纯函数 + 注入式依赖，可单测。
  */
 
 import { readJson, writeJson } from './autotelic-store.js';
@@ -22,10 +24,61 @@ export function reminderText(at) {
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
 }
 
-/** 严格解析 `yyyy-mm-dd HH:MM`（或 T 分隔），拒绝 2 月 30 日这类溢出日期 */
-export function parseReminderTime(value) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/.exec(String(value || '').trim());
+/** 中文数字/阿拉伯数字 → 数值；认不出来返回 NaN */
+function cnNum(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return NaN;
+  if (/^\d+$/.test(s)) return Number(s);
+  const digits = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (digits[s] !== undefined) return digits[s];
+  const teen = /^十([一二三四五六七八九])$/.exec(s);
+  if (teen) return 10 + digits[teen[1]];
+  const tens = /^([一二三四五六七八九])十([一二三四五六七八九])?$/.exec(s);
+  if (tens) return digits[tens[1]] * 10 + (tens[2] ? digits[tens[2]] : 0);
+  return NaN;
+}
+
+/**
+ * 相对时间：`一分钟后 / 半小时后 / 两小时 / 30秒后` 这类。
+ * 返回绝对毫秒（保留秒精度），认不出来返回 0。
+ */
+function parseRelativeTime(value, base) {
+  const s = String(value || '').trim().replace(/\s+/g, '');
+  if (!s) return 0;
+  const body = s.replace(/(?:以后|之后|后)$/, '');
+
+  /** 半小时 / 半个小时 / 半分钟 */
+  let m = /^半(?:个)?(小时|钟头)$/.exec(body);
+  if (m) return base + 30 * 60_000;
+  m = /^半(?:分钟|分)$/.exec(body);
+  if (m) return base + 30_000;
+
+  /** N + 单位（单位可带「个」） */
+  m = /^(.+?)(?:个)?(小时|钟头|分钟|分|秒钟|秒)$/.exec(body);
   if (!m) return 0;
+  const n = cnNum(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  const unit = m[2];
+  const ms = /小时|钟头/.test(unit) ? 3_600_000 : /秒/.test(unit) ? 1_000 : 60_000;
+  return base + n * ms;
+}
+
+/**
+ * 解析闹钟时间。
+ *
+ * 既认严格的 `yyyy-mm-dd HH:MM`（拒绝 2 月 30 日这类溢出日期），也认
+ * 「一分钟后 / 半小时后 / 2小时」这类相对时间——后者以前完全交给模型心算，
+ * 实测它会算错（把 0:51 的「一分钟后」写成了 00:53）。
+ *
+ * @param {string} value
+ * @param {number} [base] 相对时间的基准（默认现在；测试可注入）
+ */
+export function parseReminderTime(value, base = Date.now()) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/.exec(String(value || '').trim());
+  if (!m) {
+    const rel = parseRelativeTime(value, Number(base));
+    return Number.isFinite(rel) && rel > 0 ? Math.round(rel) : 0;
+  }
   const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0);
   if (d.getFullYear() !== Number(m[1]) || d.getMonth() !== Number(m[2]) - 1 || d.getDate() !== Number(m[3])
     || d.getHours() !== Number(m[4]) || d.getMinutes() !== Number(m[5])) return 0;
@@ -43,6 +96,11 @@ export function normalizeReminder(raw) {
     id,
     at,
     atText: String(raw.atText || '').trim() || reminderText(at),
+    /**
+     * 在哪个私聊设的。老记录没有这个字段 → 空串，到点回落主人
+     * （见 host.js fireReminder 的 `r.chatId || owner`）。
+     */
+    chatId: String(raw.chatId || '').trim(),
     note,
     createdAt: Number(raw.createdAt) || at,
     attempts: Math.max(0, Math.round(Number(raw.attempts) || 0)),
@@ -83,11 +141,12 @@ export function createReminderStore({ file = '', legacyFile = '', now = () => Da
 
   /**
    * 设一条闹钟。校验口径与对方一致：总闸/上限由调用方判，这里只判时间格式、将来、note 非空。
+   * `chatId` 记下「在哪个私聊设的」，到点就往那个私聊说；空着 → 回落主人。
    * @returns {{ok:boolean, id?:string, at?:string, message:string}}
    */
-  const add = (value, noteText, { limit = 5, at = now() } = {}) => {
-    const atMs = parseReminderTime(value);
-    if (!atMs) return { ok: false, message: '时间格式不对，要用 yyyy-mm-dd HH:MM，例如 2026-11-26 17:30' };
+  const add = (value, noteText, { limit = 5, at = now(), chatId = '' } = {}) => {
+    const atMs = parseReminderTime(value, at);
+    if (!atMs) return { ok: false, message: '时间格式不对，要用 yyyy-mm-dd HH:MM（例如 2026-11-26 17:30），或「一分钟后 / 半小时后」这类相对时间' };
     if (atMs <= Number(at)) return { ok: false, message: '这个时间已经过去了，请设一个将来的时间' };
     const note = String(noteText || '').trim().slice(0, 500);
     if (!note) return { ok: false, message: '要提醒自己什么？把想说的话写进 note' };
@@ -96,10 +155,11 @@ export function createReminderStore({ file = '', legacyFile = '', now = () => Da
     const id = typeof newId === 'function' ? newId() : `r-${at}-${Math.random().toString(36).slice(2, 10)}`;
     const reminder = normalizeReminder({
       id, at: atMs, note, createdAt: Number(at),
+      chatId: String(chatId || '').trim(),
       attempts: 0, nextAt: atMs, expiresAt: atMs + REMINDER_GRACE_MS, lastError: '',
     });
     save([...live, reminder]);
-    return { ok: true, id, at: reminder.atText, message: `已记下，${reminder.atText} 叫醒你` };
+    return { ok: true, id, at: reminder.atText, message: `已记下，${reminder.atText} 到点我会主动开口` };
   };
 
   /** 关一条；过期/已关的按对方口径如实报错，不静默成功 */
