@@ -100,6 +100,23 @@ test('移除 ai-chat：detect 不再探测 ai-chat 插件，Roost 探测照常',
   });
 });
 
+/**
+ * 接入页那颗开关的状态来源。
+ *
+ * 前端不能自己读 `config.setup.verifyIdentity` 原值——没写过这个键的用户
+ * 拿到的是 `undefined`，界面上开关会是个空档。所以由 `detect()` 回**生效值**，
+ * 这条钉住那个归一（只有显式 `true` 才算开）。
+ */
+test('detect: 回探活身份校验的生效值（默认关，配成 true 才是开）', async () => {
+  const dir = makeRoost();
+  await withFetch(async () => okRes({}), async () => {
+    const off = await makeSetup(dir).detect();
+    assert.equal(off.verifyIdentity, false, '没写过这个键时要显示成关');
+    const on = await makeSetup(dir, { setupCfg: { verifyIdentity: true } }).detect();
+    assert.equal(on.verifyIdentity, true, '配成 true 才是开');
+  });
+});
+
 /* ---------------- 启动：不许拉出第二个 Roost ---------------- */
 
 /**
