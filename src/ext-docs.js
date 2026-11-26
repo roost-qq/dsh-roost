@@ -234,7 +234,7 @@ ${ALLOWED_ENV_KEYS.map((k) => `\`${k}\``).join(' / ')}。
 
 ${V1_SCOPES.map((s) => `- \`${s}\`${SENSITIVE_SCOPES.includes(s) ? '（**敏感**：面板发放要二次确认）' : ''}`).join('\n')}
 
-最小授权默认 \`message:write\` + \`state:read\`；敏感 scope 需要单独勾选确认。
+最小授权默认 \`memory:write\` + \`state:read\`；敏感 scope 需要单独勾选确认。
 
 ## 6. 端点
 
