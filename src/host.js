@@ -14242,6 +14242,58 @@ export function apply(ctx) {
       }),
 
       /**
+       * 接入页「配置主人」：在框架里绑定/解绑主人（写 config/bots/<id>.json 的 owners）。
+       *
+       * 和上面的 /owner/aliases 不是一回事：
+       *   - /owner/aliases 写 dsh-roost 自己的 config，只影响 DSH 这边判档（频道 id 用）
+       *   - 这里写框架的 owners，是「谁能指挥这台机器」的事实源（QQ openid）
+       *
+       * 只在框架支持 /api/owners/add|remove 时可用；旧框架前端会降级为跳转面板。
+       * ownerCache/ownersApiCache 在 setup.bindOwner 里失效，下次读取立刻跟上。
+       */
+      route('/setup/owner/bind', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        try {
+          /** 宿主可能已经预读了 body 到 req.body，必须走 bodyOf 而不是直接读流 */
+          const body = await bodyOf(req);
+          if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            return send(res, 400, { ok: false, message: '参数要是一个对象' });
+          }
+          const openid = String(body.openid ?? '').trim();
+          const remove = body.remove === true;
+          /** 框架的 owners 是 QQ openid（hex 16-64 位），不是频道 id —— 格式不对早点拒 */
+          if (!/^[0-9A-Fa-f]{16,64}$/.test(openid)) {
+            return send(res, 400, { ok: false, message: 'openid 格式不对（16-64 位十六进制）' });
+          }
+          if (!(await setup.ownersApiSupported())) {
+            return send(res, 426, {
+              ok: false,
+              code: 'OWNERS_API_UNSUPPORTED',
+              message: '框架版本不支持面板内绑定主人，请升级到 v1.1.17+，或去框架面板设主人',
+            });
+          }
+          /**
+           * 最后一个主人不能解绑：清空后认领码复活，群里任何人都能 /claim 抢主人。
+           * roostOwners() 不去重——同一人在两个 bot 各有一条时，解绑一条仍有另一条，不算「最后」。
+           */
+          if (remove) {
+            const current = setup.roostOwners ? setup.roostOwners() : [];
+            if (current.length === 1 && current[0] === openid) {
+              return send(res, 400, {
+                ok: false,
+                code: 'LAST_OWNER',
+                message: '不能解绑最后一个主人：清空后认领码会复活，群里任何人都能抢先认领',
+              });
+            }
+          }
+          const r = await setup.bindOwner(openid, remove);
+          send(res, 200, { ok: true, result: r });
+        } catch (e) {
+          send(res, 502, { ok: false, message: `绑定失败：${e?.message || e}` });
+        }
+      }),
+
+      /**
        * 「把机器人加进频道」的链接。
        *
        * **不在这里画二维码**（2026-11-17 主人决定）：这条链接在浏览器里打开后，

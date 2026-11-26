@@ -569,6 +569,85 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
    * 但也不能永久缓存——用户在 Roost 面板上加了主人，这边应该很快跟上。
    */
   let ownerCache = { at: 0, id: '' };
+
+  /**
+   * 框架是否支持「面板内绑定主人」专用接口（v1.1.17+ 的 /api/owners/add|remove）。
+   *
+   * 为什么探测而不是硬编码版本：现网还有 1.1.12（见 pidInLocalInstances 注释），
+   * 而 framework 没有版本协商字段；旧框架上直接 POST 只会 404。
+   * 探测结果缓存到下次绑定/解绑——既不每次开页都多一次请求，也不会永久卡在旧结论。
+   * null = 还没探过，true/false = 探过的结果。
+   */
+  let ownersApiCache = null;
+  let ownersApiCheckedAt = 0;
+  async function ownersApiSupported() {
+    const now = Date.now();
+    /**
+     * 否结论只缓存 5 秒，是结论长期缓存：
+     * 框架刚启动时偶发 404/超时，若永久缓存 false，面板会一直显示「版本太旧」
+     * 而用户根本没机会重试（降级后前端不发绑定请求，也就不会触发缓存失效）。
+     */
+    if (ownersApiCache === true) return true;
+    if (ownersApiCache === false && now - ownersApiCheckedAt < 5_000) return false;
+    if (!(await isRunning())) return false;
+    try {
+      /** GET /api/roles 老版本就有；新版本返回里带 owners 数组。别用 ok 字段判——两种形态都有 */
+      const r = await api('/api/roles');
+      ownersApiCache = Boolean(r && Array.isArray(r.owners));
+    } catch {
+      ownersApiCache = false;
+    }
+    ownersApiCheckedAt = now;
+    return ownersApiCache;
+  }
+
+  /** 让下次读取立刻重读框架配置（绑定后不能等 5 秒缓存） */
+  function invalidateOwnerCache() {
+    ownerCache = { at: 0, id: '' };
+    ownersApiCache = null;
+    ownersApiCheckedAt = 0;
+  }
+
+  /**
+   * 在 Roost 面板里绑定/解绑主人（写框架的 config/bots/<id>.json owners）。
+   *
+   * 只在框架支持专用接口时调用；调用方负责先看 ownersApiSupported()。
+   * openid 校验交给框架（hex 16-64 位），这里只做最基本的非空与类型检查。
+   */
+  async function bindOwner(openid, remove = false) {
+    if (!(await isRunning())) throw new Error('Roost 没在跑，先启动');
+    const id = String(openid ?? '').trim();
+    if (!id) throw new Error('openid 不能为空');
+    const path = remove ? '/api/owners/remove' : '/api/owners/add';
+    const r = await api(path, { method: 'POST', body: JSON.stringify({ openid: id }) });
+    invalidateOwnerCache();
+    return r;
+  }
+
+  /**
+   * 框架里所有的主人 openid（跨 bot，不去重）。
+   *
+   * 「不能解绑最后一个」数的是**条目数**不是不同人数：同一人在 main / other
+   * 两个 bot 各有一条，解绑其中一条后另一个 bot 仍有他，不是「最后一个」。
+   * 去重会把这种合法场景误判成只剩一人。
+   */
+  function roostOwners() {
+    const out = [];
+    try {
+      const bd = join(dirOf(), 'config', 'bots');
+      for (const f of readdirSync(bd).filter((x) => x.endsWith('.json'))) {
+        try {
+          const j = JSON.parse(readFileSync(join(bd, f), 'utf8'));
+          for (const o of Array.isArray(j?.owners) ? j.owners : []) {
+            const id = String(o || '').trim();
+            if (id) out.push(id);
+          }
+        } catch {}
+      }
+    } catch {}
+    return out;
+  }
+
   function roostOwner() {
     const now = Date.now();
     if (ownerCache.at && now - ownerCache.at < 5_000) return ownerCache.id;
@@ -961,6 +1040,13 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
       /** 主人在 Roost 面板里设了没有（读 config/bots/<id>.json 的 owners） */
       ownersConfigured: ownerCount > 0,
       ownerCount,
+      /** 框架里当前的主人 openid（去重），接入页据此显示「已绑 / 解绑」 */
+      owners: [...new Set(roostOwners())],
+      /**
+       * 框架是否支持面板内绑定主人（/api/owners/add|remove，v1.1.17+）。
+       * 不支持时接入页第 6 步降级为「跳转框架面板」。
+       */
+      ownersApi: await ownersApiSupported(),
       /** 本插件固定服务的地址（/v1 控制面、TTS）。直连不需要对方来推消息 */
       dshUrl: `http://127.0.0.1:${cfgOf().server.port}`,
       /** 启动 DSH 时是否自动拉起 Roost（面板开关的状态来源） */
@@ -1656,6 +1742,14 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
     api,
     /** Roost 配置里的主人 openid（主动搭话的收件人）。空 = 那边也没配 */
     roostOwner,
+    /** 框架里所有主人 openid（跨 bot，不去重；解绑保护数的是条目数） */
+    roostOwners,
+    /** 框架是否支持 /api/owners/add|remove（v1.1.17+）；探测结果有缓存 */
+    ownersApiSupported,
+    /** 在框架里绑定/解绑主人（写 config.owners），remove=true 为解绑 */
+    bindOwner,
+    /** 让 owner / 接口探测缓存立即失效（绑定后调用） */
+    invalidateOwnerCache,
     /** 面板密钥的 query 片段，没有就是空串 */
     keyQuery: () => (keyOf() ? `?key=${encodeURIComponent(keyOf())}` : ''),
     get busy() {
