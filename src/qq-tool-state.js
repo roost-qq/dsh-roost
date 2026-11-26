@@ -142,6 +142,27 @@ export function buildOutputPrompt({
       + '主人和管理员才能跨会话、按别人查。别承诺你权限外的检索。',
     );
   }
+  /**
+   * 撤回：只在工具真挂上时教，且**只教撤自己的**。
+   *
+   * 措辞上的三条硬约束：
+   *   · 不写「可以撤别人的」——官机只有群管理员能撤普通成员，而模型没有
+   *     稳定的成员消息号来源，教了也做不到，只会让它答应做不到的事；
+   *   · 必须写「2 分钟」——这是官方硬限（`40064004`）。不写的话，模型会
+   *     在十分钟后还想撤，然后拿到一次失败、再试、再失败；
+   *   · 必须写「撤了不代表没说过」——不然它会把撤回当成「可以随便说」的
+   *     许可，而群里的人其实已经看见了。
+   */
+  const retractDenied = toolWasDenied(denied, 'qq_retract');
+  const retractRegistered = !registeredNames || registeredNames.has('qq_retract');
+  if (!retractDenied && retractRegistered) {
+    lines.push(
+      '· 说错了、发重了、或者那句话不该留在这儿，可以调 `qq_retract` 撤回**你自己刚发的**那条'
+      + '（默认最近一条，也能撤倒数第 2～5 条）。撤不了别人的；'
+      + '官方只给 2 分钟，超时就撤不回来——那就别再试，直接补一句更正。'
+      + '撤回只是让消息消失，看过的人已经看过了，别把它当成「没说过」。',
+    );
+  }
   return lines.join('\n');
 }
 

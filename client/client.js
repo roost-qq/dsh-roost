@@ -12545,6 +12545,16 @@ window.__ModuleLoader__.load({
       const groupCfg = config?.group || {}
       /** 翻聊天记录 / 上下文补齐的那几个键（`recall.*`） */
       const recallCfg = config?.recall || {}
+      /**
+       * 引用 / 撤回（09 卡）。口径和 `src/quote-auto.js` 一致：概率非数字时
+       * 退回 40，**不是**当成 0——写错一个字符就永远不引用、还不报错，太难查。
+       */
+      const qqTools = config?.qqTools || {}
+      const qqQuote = qqTools.quote || {}
+      const quoteOn = qqQuote.enabled !== false
+      const retractOn = qqTools.retract !== false
+      const rawQuotePct = Number(qqQuote.percent)
+      const quotePercent = Number.isFinite(rawQuotePct) ? rawQuotePct : 40
       const overrides = groupCfg.overrides || {}
       const responseModes = groupCfg.responseModes || {}
       const defaultResponse = groupCfg.responseDefault || 'chat'
@@ -12714,7 +12724,7 @@ window.__ModuleLoader__.load({
            */
           h(GRow, {
             label: '群响应模式默认',
-            hint: '没单独设过的群按这个来；设了例外的群在 09 里单独改',
+            hint: '没单独设过的群按这个来；设了例外的群在 10 里单独改',
           },
             h(Dropdown, {
               className: 'roost-g-sel', value: defaultResponse, disabled: busy,
@@ -12960,10 +12970,61 @@ window.__ModuleLoader__.load({
               onClick: () => setTab && setTab('logs'),
             }, '去排障页')),
         ),
+        /**
+         * 09：引用回复与撤回（2026-11-26 主人指定挪到这里）。
+         *
+         * ## 为什么在这一页
+         *
+         * 这两项一开始只注册进 `features.js` 的功能分组，于是只出现在「能力 →
+         * 怎么说话」里。主人找到了，但原话是「找到了，不好找啊」——找「引用
+         * 概率」的人不会去「能力」页（那页管的是谁能用什么工具）翻。
+         *
+         * 挪到群聊策略，因为引用和撤回都是**接话的收尾动作**：引用决定这条
+         * 回复挂不挂「回复某某」，撤回决定说错了能不能收回。表达页管的是
+         * 「用什么形式出声」（语音、表情、发帖），不是这个。
+         *
+         * 放在「所有群默认」而不是「单个群」：它是全局开关，**私聊也生效**，
+         * 按群覆写那份不认这两个键。能力页那份留着（那是「哪一档人能用」的
+         * 开关），两处写的是同一组 config 键，不会打架。
+         */
+        h(GCard, {
+          n: '09', title: '引用回复与撤回',
+          desc: '回复时挂不挂「回复某某」的引用块，以及她能不能把说错的话收回去。'
+            + '全局生效，私聊里也一样。',
+        },
+          h(GRow, { label: '引用回复', hint: '多人同时说话时，看得出她在接谁的话' },
+            h(Switch, {
+              on: quoteOn, label: '引用回复', disabled: busy,
+              onToggle: (v) => put({ qqTools: { quote: { enabled: v } } }),
+            })),
+          h(GRow, {
+            label: '引用概率',
+            hint: '每轮掷一次骰子；命中只给这一轮的第一条消息挂，不是每条都挂。上面关掉时这个值不起作用',
+          },
+            h(GNum, {
+              value: quotePercent, min: 0, max: 100, step: 10, unit: '%', disabled: busy || !quoteOn,
+              onSave: (v) => put({
+                qqTools: { quote: { percent: Math.min(100, Math.max(0, Math.round(v))) } },
+              }),
+            })),
+          h(GRow, {
+            label: '说错了能自己撤回',
+            hint: '官方只给 2 分钟，撤不了别人的。关掉 = 工具整个不注册，提示词里也不再教她',
+          },
+            h(Switch, {
+              on: retractOn, label: '说错了能自己撤回', disabled: busy,
+              onToggle: (v) => put({ qqTools: { retract: v } }),
+            })),
+          h('div', { className: 'roost-g-note' },
+            '对应 config.qqTools.quote 与 config.qqTools.retract。'
+            + '0% = 永不引用，100% = 每轮第一条都引用。'
+            + '引用的是她正在回的那条消息本身，不是那条消息所引用的更早的消息。'
+            + '撤回工具的参数里没有消息号——她没法指向别人的消息，哪怕机器人在群里是管理员。'),
+        ),
         ),
         h('div', { style: { display: pageTab === 'single' ? '' : 'none' } },
         h(GCard, {
-          n: '09', title: '按群覆写',
+          n: '10', title: '按群覆写',
           desc: '某个群想单独设（这个群安静点、那个群只在被 @ 时回），在这里给它一份例外。'
             + '改完要点下面的「保存这个群的例外」才生效（响应模式除外，它点了就存）；'
             + '留空 = 跟上面的全局设置；没列的群一律不受影响。',
@@ -13081,7 +13142,7 @@ window.__ModuleLoader__.load({
         ),
         h('div', { style: { display: pageTab === 'decisions' ? '' : 'none' } },
         h(GCard, {
-          n: '10', title: '刚才为什么回 / 不回',
+          n: '11', title: '刚才为什么回 / 不回',
           desc: '每条消息进来都会过一遍上面的规则，这里按时间列出最近 20 条的判定和原因。和排障页日志是同一份 reason，只是排好了队；只在内存里，不落盘。「旁听」= 这个群设成只旁听，她照样读、照样记，只是不说话。',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadDecisions }, '刷新'),
         },
@@ -21918,11 +21979,18 @@ window.__ModuleLoader__.load({
       )
     }
 
+
     function ExpressTab({ config, stickers, saveCfg, toast, reload, part = 'all' }) {
       return h('div', null,
         part === 'sticker' ? null : h(TtsCard, { config, saveCfg, toast, reload }),
         /** A3：听语音只在独立的「语音」页出现；老入口 part='all' 行为不变 */
         part === 'voice' ? h(AsrCard, { toast }) : null,
+        /**
+         * 引用回复 / 撤回（`SpeakStyleCard`）**不在这页**：2026-11-26 主人定了
+         * 放到「群与频道 → 群聊策略 → 所有群默认」的最后一张卡。
+         * 理由：那是「她怎么接话」的整页，引用和撤回都是接话的收尾动作，
+         * 而表达页管的是「用什么形式出声」（语音、表情、发帖）。
+         */
         /** 独立成页时它是这一页的第 01 节；留在表达页时仍是 02（排在语音后面） */
         part === 'voice' ? null : h(StickerDirsCard, {
           config, stickers, saveCfg, toast, reload,

@@ -439,7 +439,7 @@ function buildSearchDef({ caller, searchOf }) {
  * @param {() => object} o.cfgOf
  * @param {() => {parts:number}} o.stateOf 本轮已发段数
  */
-export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null, reminderOf = null, proposeOf = null, sayOf = null, noteOf = null, modulesOf = null, handOf = null }) {
+export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null, reminderOf = null, proposeOf = null, sayOf = null, noteOf = null, modulesOf = null, handOf = null, retractOf = null }) {
   const caller = () => callerOf?.() || { chatId: '', kind: '', said: '', hasPayload: false, bucket: '' };
   /**
    * 描述是模型唯一能看到的工具契约：TTS 关着就不能教它写语音标记，
@@ -570,6 +570,65 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
         };
       } catch (e) {
         return { ok: false, message: `发送失败：${e?.message ?? e}` };
+      }
+    },
+  };
+
+  /**
+   * 撤回自己刚发的消息（2026-11-26 加）。
+   *
+   * ## 为什么工具里**没有** `msg_id` 参数
+   *
+   * 官机的撤回端点是 `DELETE /v2/groups/{group_openid}/messages/{message_id}`，
+   * 而 `message_id` 只有**发送接口的响应**里才有。模型在上下文里从来没见过
+   * 自己消息的 id（日记、注入块、账本里都没有），给它一个 `msg_id` 参数
+   * 等于给一个它填不出来的必填项——那不是能力，是必错项。
+   *
+   * 所以参数是「倒数第几条」：宿主自己记着这个会话最近发过的消息号，
+   * 模型只说「撤最近这条」。这也正好把能力边界钉在「自己的消息」上——
+   * 它没有办法指定别人的消息，哪怕机器人是群管理员、官方允许撤普通成员。
+   * 那个能力（管理员撤群友）故意不做：模型没有稳定的成员消息号来源，
+   * 群里也从来没有「谁让我撤一下」的确认环节。
+   *
+   * ## 失败必须说清楚
+   *
+   * 官方两个码是有含义的：`40064004` 超 2 分钟、`40062003` 没权限。
+   * 只说「失败了」模型会原地重试，白烧一轮；说清「撤不回来了」它才会改口
+   * 补一句更正。宿主那边的 `retractOf` 负责翻译，这里只负责转达。
+   */
+  const retract = {
+    name: 'qq_retract',
+    description:
+      '把**你自己**刚发出去的一条消息撤回。'
+      + '只能撤你自己发的，撤不了别人的；官方限 2 分钟内，超时就撤不回来了。'
+      + '说错了、发重了、或者那句话不该出现在这里时用。'
+      + '撤回只是让那条消失，看过的人已经看过了——需要的话补一句说明。',
+    parameters: {
+      index: {
+        type: 'number',
+        description: '撤哪一条：1（默认）= 你最近发的那条，2 = 倒数第二条，最多 5',
+      },
+      why: {
+        type: 'string',
+        description: '为什么要撤，一句话（可不填，只记日志，不会发出去）',
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
+    },
+    async execute({ index, why } = {}) {
+      if (typeof retractOf !== 'function') return { ok: false, message: '撤回没接线' };
+      const c = caller();
+      try {
+        return await retractOf({
+          chatId: c.chatId,
+          kind: c.kind,
+          index,
+          why: String(why ?? '').trim(),
+        });
+      } catch (e) {
+        return { ok: false, message: `撤回失败：${e?.message ?? e}` };
       }
     },
   };
@@ -777,6 +836,13 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
   return [
     send,
     close,
+    /**
+     * 撤回：没注入 `retractOf` 就不注册（同 `fileOf` 口径）。
+     *
+     * 提示词那边是按「清单里有没有 `qq_retract`」决定要不要教，所以少注册
+     * 一个就等于自动闭嘴；注册了却必然失败，才是真教模型去做做不成的事。
+     */
+    ...(typeof retractOf === 'function' ? [retract] : []),
     /** 小闹钟（没注入 reminderOf 就不注册） */
     ...(reminderOf ? [setReminder, closeReminder] : []),
     ...(proposeOf ? [propose] : []),
@@ -872,8 +938,8 @@ function buildPostThreadDef({ postThreadOf }) {
  *
  * @returns {Promise<{ok:boolean, names:string[], reason?:string, mode?:string, off?:Function}>}
  */
-export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null, reminderOf = null, proposeOf = null, sayOf = null, noteOf = null, modulesOf = null, handOf = null, log = () => {} }) {
-  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf, infoOf, searchOf, postThreadOf, reminderOf, proposeOf, sayOf, noteOf, modulesOf, handOf });
+export async function registerQqTools({ agent, callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf = null, sessionOf = null, infoOf = null, searchOf = null, postThreadOf = null, reminderOf = null, proposeOf = null, sayOf = null, noteOf = null, modulesOf = null, handOf = null, retractOf = null, log = () => {} }) {
+  const defs = buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stateOf, groupOf, ledgerOf, sessionOf, infoOf, searchOf, postThreadOf, reminderOf, proposeOf, sayOf, noteOf, modulesOf, handOf, retractOf });
   const registry = agent?.ctx?.tools;
   if (!registry?.register) {
     /**

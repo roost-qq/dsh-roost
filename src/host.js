@@ -30,6 +30,10 @@ import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyT
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
 import { resolvePolicy, dangerOf, BUCKETS, defaultStore } from './capabilities.js';
 import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting, isOff, isOn } from './features.js';
+/** 自动引用回复要不要挂、引用谁（纯函数，见文件头的「为什么抽出来」） */
+import { pickQuoteRef } from './quote-auto.js';
+/** `qq_retract` 的「挑哪条 / 失败怎么说」（纯函数，同上） */
+import { pickRetractTarget, explainRetractFailure } from './retract-target.js';
 import { createCapabilityStore } from './capability-store.js';
 import { createExtGroups } from './ext-groups.js';
 import { createQuota, shouldCharge, QUOTA_DEFAULTS } from './quota.js';
@@ -5514,46 +5518,96 @@ export function apply(ctx) {
      * 三条路径不会再各写一份。
      */
     /**
+     * 自动引用回复：**每轮掷一次骰子**，命中就把「正在回的这条」挂成本轮
+     * 第一条消息的引用（`qqTools.quote.percent`，默认 40）。
+     *
+     * ## 为什么每轮一次、只挂第一条
+     *
+     * 一轮里她可能用 `qq_send` 分三段说。三段都挂引用就是三条带引用块的
+     * 刷屏，概率也失去意义（说 40% 实际每条都带）。只挂第一条既保留了
+     * 「这句在接谁的话」这个信息，又不吵。
+     *
+     * ## 为什么用 `scene.msgIdx` 而不是 `replyTo`
+     *
+     * `replyTo` 是**用户这条消息引用了谁**（`serialize.js` 取的是入站
+     * `message_reference.message_id`），拿它当引用目标会引用到用户引用的
+     * 那条上去，看起来像「她在回复更早的第三个人」。`msg.scene.msgIdx`
+     * （`REFIDX_xxx`）才是「本条消息自己的索引」，官方要的就是它。
+     *
+     * 拿不到（频道消息 / 主动搭话轮）就是空串，自动不挂——不猜、不硬凑。
+     */
+    /**
+     * 掷骰子的部分抽到 `quote-auto.js` 了（纯函数、可单测），这里只负责
+     * 把配置和「这一轮在回哪条」喂进去。
+     */
+    const autoQuoteRef = pickQuoteRef({
+      enabled: cfg.qqTools?.quote?.enabled,
+      percent: cfg.qqTools?.quote?.percent,
+      refIdx: last?.scene?.msgIdx,
+    });
+    /** 本轮是否已经用掉这次引用机会（失败会还回去，见下面 `send`） */
+    let quoteSpent = false;
+
+    /**
      * `createActionRunner()` 返回的是**函数本身**（`return async function run`），
      * 不是 `{ run }` 对象。以前这里写成 `outActions.run(...)`，于是
      * 外接协议这条路的每一句回话都炸 `outActions.run is not a function`
      * （2026-11-13 09:26 实机），而 `qq_send` / `/v1/message` 那两条路正常——
      * 因为它们用的是别的调用点。
      */
-    const send = async (text, extra) => outActions({
-      text: String(text ?? ''),
-      extra: extra ?? {},
-      scene: chatScene,
-      /** 频道消息要靠这个四态值打到 /channels/{id}/messages 或 /dms/{id}/messages */
-      kind: chatKind,
-      target: chatId,
-      msgId: String(last?.msgId ?? ''),
-      receivedAt: Number(last?.at) || 0,
-      /** 3.7：事件只有 event_id 时走被动回复，不占主动额度（msgId 优先） */
-      eventId: String(last?.eventId ?? ''),
-      requestId: String(extra?.requestId ?? ''),
+    const send = async (text, extra) => {
       /**
-       * 发送者是谁：`<<say>>` 的语音条额度要按人算。
-       * 以前这条链在 ai-chat 侧，那边不传 openid，配额只能标「暂未生效」。
+       * 只有「本轮第一条**文字**消息」带引用。
        *
-       * **字段叫 `openid`，不是 `id`。** `batch.msg` 是框架推来的**原始事件**
-       * （`bot/src/host/serialize.js` 里 `sender: { openid, uin, identityId, … }`），
-       * 只有内部 payload（`roost-payload.js` 造的）才把它拍平成 `sender.id`。
-       * 2026-11-13 审计抓到：这里写成 `sender.id` 恒为 `''`，`quota.charge()`
-       * 于是退回 `id || target` —— 「按人算」静默变成「按会话算」，不报任何错。
+       * 文件 / 图片那条（`extra.files`）不挂：一条消息只能有一种富文本，
+       * 挂上去要么被官方丢、要么引用块配着文件看着莫名其妙。这种发送
+       * **不算用掉机会**，留给后面那条真正的正文。
        */
-      senderId: String(last?.sender?.openid ?? ''),
+      const wantQuote = Boolean(autoQuoteRef) && !quoteSpent && !(extra?.files?.length);
+      if (wantQuote) quoteSpent = true;
+      const r = await outActions({
+        text: String(text ?? ''),
+        extra: extra ?? {},
+        scene: chatScene,
+        /** 频道消息要靠这个四态值打到 /channels/{id}/messages 或 /dms/{id}/messages */
+        kind: chatKind,
+        target: chatId,
+        msgId: String(last?.msgId ?? ''),
+        receivedAt: Number(last?.at) || 0,
+        /** 3.7：事件只有 event_id 时走被动回复，不占主动额度（msgId 优先） */
+        eventId: String(last?.eventId ?? ''),
+        requestId: String(extra?.requestId ?? ''),
+        /**
+         * 发送者是谁：`<<say>>` 的语音条额度要按人算。
+         * 以前这条链在 ai-chat 侧，那边不传 openid，配额只能标「暂未生效」。
+         *
+         * **字段叫 `openid`，不是 `id`。** `batch.msg` 是框架推来的**原始事件**
+         * （`bot/src/host/serialize.js` 里 `sender: { openid, uin, identityId, … }`），
+         * 只有内部 payload（`roost-payload.js` 造的）才把它拍平成 `sender.id`。
+         * 2026-11-13 审计抓到：这里写成 `sender.id` 恒为 `''`，`quota.charge()`
+         * 于是退回 `id || target` —— 「按人算」静默变成「按会话算」，不报任何错。
+         */
+        senderId: String(last?.sender?.openid ?? ''),
+        /**
+         * 说话人的档位：`quota.voice.byBucket` 靠它给主人更松的额度。
+         * 由 `handleTurn` 算好存进 `turnBucket`（出站层拿不到 payload）。
+         * 拿不到就是空串 → 走默认额度，不会误给高配额。
+         */
+        bucket: turnBucket.get(chatId) || '',
+        /** 真的发出去了才记：没发出去也记的话，冷却会把下一句白吃掉 */
+        onSent: () => roostDecider.noteReplied(chatId),
+        /** `<<quote:>>` 留空时的兜底索引；不写标记时完全用不到 */
+        replyTo: String(last?.replyTo ?? ''),
+        /** 自动引用的目标；显式 `<<quote:>>` 优先，出站层自己判 */
+        quoteRef: wantQuote ? autoQuoteRef : '',
+      });
       /**
-       * 说话人的档位：`quota.voice.byBucket` 靠它给主人更松的额度。
-       * 由 `handleTurn` 算好存进 `turnBucket`（出站层拿不到 payload）。
-       * 拿不到就是空串 → 走默认额度，不会误给高配额。
+       * 没真发出去就把机会还回去：这一段失败（网络 / 限频）之后还会发下一段，
+       * 引用不该跟着一条没送到的消息一起消失。
        */
-      bucket: turnBucket.get(chatId) || '',
-      /** 真的发出去了才记：没发出去也记的话，冷却会把下一句白吃掉 */
-      onSent: () => roostDecider.noteReplied(chatId),
-      /** `<<quote:>>` 留空时的兜底索引；不写标记时完全用不到 */
-      replyTo: String(last?.replyTo ?? ''),
-    });
+      if (wantQuote && !r?.sent) quoteSpent = false;
+      return r;
+    };
     /**
      * 整批的附件 / 卡片合成一份。
      *
@@ -7897,6 +7951,55 @@ export function apply(ctx) {
             st2.texts.push(text);
           }
           return { ok: true, note: at.note };
+        },
+        /**
+         * 撤回自己刚发的消息（`qq_retract`）。
+         *
+         * ## 为什么目标由宿主挑，不由模型给 id
+         *
+         * 官机的 `message_id` 只在发送响应里出现，模型上下文里从来没有过它
+         * （日记、注入块、账本都不带）。所以模型只说「倒数第几条」，宿主拿
+         * `outActions.recentSentOf()` 里自己记的那份去对——顺手把能力钉在
+         * 「自己的消息」上：它没有语法能指向别人的消息。
+         *
+         * ## 2 分钟先本地判一次
+         *
+         * 官方是「发送超过 2 分钟不可撤回（40064004）」。本地先判掉**明显**
+         * 超时的（>2 分钟）能省一次必然失败的往返，也让模型立刻知道「这条路
+         * 走不通了，改补一句更正」。临界区（比如 118 秒）不拦——那种交给服务端
+         * 判更准，我们记的 `at` 是发送**返回**的时刻，比服务端收到的时刻晚一点点。
+         *
+         * 失败不抛：`qq_retract` 要把原因转成话告诉模型（见工具那边的注释）。
+         */
+        retractOf: async ({ chatId, kind, index, why } = {}) => {
+          const c = cur();
+          const target = String(chatId || c.chatId || '');
+          if (!target) return { ok: false, message: '不知道在哪个会话里撤——这一轮没有会话上下文' };
+
+          const list = typeof outActions.recentSentOf === 'function'
+            ? outActions.recentSentOf(target)
+            : [];
+          if (!list.length) {
+            return { ok: false, message: '这个会话里还没有你发过的消息可以撤（只有真发出去的才算）。' };
+          }
+          /** 挑哪条 + 2 分钟预检都在纯函数里（见 `retract-target.js`），这里只管发 */
+          const pick = pickRetractTarget(list, index);
+          if (!pick.ok) return { ok: false, message: pick.message };
+
+          const ch = channels.active();
+          if (typeof ch?.retract !== 'function') {
+            return { ok: false, message: '当前通道不支持撤回，别答应对方。' };
+          }
+          const r = await ch.retract({ chatId: target, msgId: pick.rec.id, kind: pick.rec.kind || kind });
+          if (r?.ok) {
+            log.info(`撤回：${target.slice(0, 8)} 倒数第 ${pick.n} 条${why ? `（${why}）` : ''}`);
+            return {
+              ok: true,
+              message: `撤回了${pick.n > 1 ? `倒数第 ${pick.n} 条` : '刚发的那条'}。`,
+            };
+          }
+          log.warn(`撤回失败：${r?.message || '未知原因'}`);
+          return { ok: false, message: explainRetractFailure(r) };
         },
         closeOf: ({ chatId, point, resume, kind }) => {
           const r = closing.set(chatId, { point, resume, kind });

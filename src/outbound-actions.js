@@ -42,6 +42,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { parseCardValue, tuwenProblem } from './tuwen.js';
+/** `MAX_REF_IDX`：引用索引的长度上限，**必须**和 `quote-auto.js` 用同一个值 */
+import { MAX_REF_IDX } from './quote-auto.js';
 import { encodeButtonData } from './roost-interaction.js';
 import { dimsOfPath } from './image-size.js';
 
@@ -607,6 +609,25 @@ export function createActionRunner({
   const isDry = () => dryRunOf() === true;
   /** chatId → { id, kind, at } */
   const lastSent = new Map();
+  /**
+   * chatId → `[{ id, kind, at }]`，**最新在末尾**。
+   *
+   * `lastSent` 只留一条，够 `<<retract>>`（它撤的就是「上一条」）用；但
+   * `qq_retract` 工具要能挑「倒数第二条」（模型一轮分段说了三句，想撤中间
+   * 那句写错的）。官方撤回本身限 2 分钟，所以环形留 8 条绰绰有余。
+   *
+   * 只在**真的拿到消息号**时记：主动消息 / 试运行 / 分块待定都没有 id，
+   * 记进去只会让工具以为「有东西可撤」。
+   */
+  const recentSent = new Map();
+  const RECENT_KEEP = 8;
+  const rememberSent = (chatId, rec) => {
+    const k = String(chatId);
+    const list = recentSent.get(k) ?? [];
+    list.push(rec);
+    if (list.length > RECENT_KEEP) list.splice(0, list.length - RECENT_KEEP);
+    recentSent.set(k, list);
+  };
   /** `chatId|type|value` → at */
   const mediaSeen = new Map();
 
@@ -626,7 +647,12 @@ export function createActionRunner({
    *
    * @returns {Promise<{ok:boolean, sent:boolean, ...}>} 发送结果，供调用方记日记/冷却
    */
-  return async function run({
+  /**
+   * 用 `const` 绑定而不是直接 `return async function run(...)`：下面要在函数
+   * 对象上挂 `recentSentOf`（`qq_retract` 工具读它），没有名字就挂不上。
+   * 调用点一行未变——它仍然是个「收一个参数、返回结果」的异步函数。
+   */
+  const run = async function run({
     /** kind 是框架四态（group/c2c/guild/dm），scene 仍是两态投影 */
     text, extra = {}, scene = 'c2c', kind = '', target = '', msgId = '', receivedAt = 0,
     /** 3.7：事件被动回复（只有 event_id 的事件）；msgId 优先 */
@@ -636,12 +662,34 @@ export function createActionRunner({
     /** `<<quote:>>` 留空时的兜底：入站 `replyTo`（被引用那条的 message_id） */
     replyTo = '',
     /**
+     * 宿主掷骰子决定的自动引用目标（`qqTools.quote.percent`，每轮只给第一条）。
+     *
+     * **必须和 `replyTo` 一样在顶层**：`extra` 是「本条消息的附加物」（files /
+     * requestId / silenceMs），引用目标属于「这条怎么发」，不是内容附件。
+     * 2026-11-26 这里漏了收这个参数，宿主传了、这边没解构，于是
+     * `extra?.quoteRef` 永远是 `undefined`——概率设到 100% 也一条都不引用，
+     * 而且不报错、不写日志。下面 `...rest` 那行就是为了让这类漏接**出声**。
+     */
+    quoteRef = '',
+    /**
      * `senderId` 是**说话的人**，不是会话 id——`<<say>>` 的语音额度按人扣。
      * 没有真人（主动搭话 / 事件轮）时留空，配额退回按会话算。
      */
     requestId = '', senderId = '', bucket = '', onSent = () => {},
+    /**
+     * 剩下没解构的键。**别删**：这个函数是「宿主传一个对象、这边解构」的
+     * 形状，漏收一个键的后果是**静默失效**（传了等于没传，不报错不写日志）。
+     * `quoteRef` 就这么丢过一次——概率设 100% 也不引用，查了半天。
+     * 留着只为下面报一句日志，不参与任何逻辑。
+     */
+    ...rest
   } = {}) {
     const ch = channel();
+    /** 漏接的键要出声：静默丢参数是这里最容易犯、也最难查的错（见上面 `...rest`） */
+    const unknownKeys = Object.keys(rest);
+    if (unknownKeys.length) {
+      log(`出站参数没接住：${unknownKeys.join(' / ')}——传了等于没传，去查 createActionRunner 的解构`);
+    }
     const { text: body0, actions, wantSkip } = parseOutboundActions(text, { resolveImage });
     let body = body0;
 
@@ -782,20 +830,27 @@ export function createActionRunner({
     /**
      * `<<quote: 索引>>`：这条回复挂引用样式。
      *
-     * **默认不挂**——只有模型/扩展显式写了标记才生效。原因：官方
-     * `message_reference` 要 `REFIDX_xxx`（取自 message_scene.ext.msg_idx），
-     * 而入站 `replyTo` 是被引用那条的 message_id，两者不是同一个东西；
-     * 而且 `markdown(msg_type=2) + message_reference` 能否共存没有源码可证。
-     * 自动给所有回复挂引用，最坏情况是整条发不出去——那是减功能，不是加功能。
+     * 两条来源，**显式优先**：
+     *   1. 模型/扩展写的 `<<quote:>>`——写了值用值，留空退回 `replyTo`；
+     *   2. 宿主掷骰子给的**顶层** `quoteRef`（`qqTools.quote.percent`，每轮一次）。
+     *      模型明确要求引用时不该被概率覆盖，所以显式存在就不看自动的。
      *
-     * 显式标记让调用方自己保证索引格式：写了值就用值，留空则退回 `replyTo`。
+     * 自动引用是 2026-11-26 加的。原先这里写着「自动给所有回复挂引用，最坏
+     * 情况是整条发不出去」——那是**没验证过**时的保守判断。真机跑过四条对照
+     * （`plugins/quotetest`：`msg_type=2 + message_reference`）之后这条顾虑
+     * 不成立：引用块正常、markdown 照常渲染，所以才有按概率自动挂载。
+     *
+     * 值必须是 `REFIDX_xxx`（取自 `message_scene.ext.msg_idx`），**不是** message_id。
      * 只取最后一个标记，多个没有意义。
      */
     const quoteActions = actions.filter((a) => a.type === 'quote');
-    const quoteRef = quoteActions.length
-      ? String(quoteActions[quoteActions.length - 1].value || replyTo || '').trim().slice(0, 128)
+    const explicitQuote = quoteActions.length
+      ? String(quoteActions[quoteActions.length - 1].value || replyTo || '').trim().slice(0, MAX_REF_IDX)
       : '';
-    const messageReference = quoteRef ? { message_id: quoteRef } : null;
+    /** 自动引用只读**顶层** `quoteRef`（宿主传的那个），不再兼容 `extra.quoteRef`——两种位置并存只会让人搞不清谁在生效 */
+    const autoQuote = explicitQuote ? '' : String(quoteRef ?? '').trim().slice(0, MAX_REF_IDX);
+    const quoteTarget = explicitQuote || autoQuote;
+    const messageReference = quoteTarget ? { message_id: quoteTarget } : null;
     if (quoteActions.length && !messageReference) {
       log('<<quote:>> 没给索引、入站也没有 replyTo，这条按普通回复发');
     }
@@ -817,7 +872,11 @@ export function createActionRunner({
       if (r?.ok) {
         r.sent = true;
         /** 存四态 kind：撤回频道消息要带 guild/dm，否则会打到群/单聊撤回端点 */
-        if (r.id) lastSent.set(target, { id: String(r.id), kind: kind || scene, at: Date.now() });
+        if (r.id) {
+          const rec = { id: String(r.id), kind: kind || scene, at: Date.now() };
+          lastSent.set(target, rec);
+          rememberSent(target, rec);
+        }
         onSent();
       }
     } else if (skipOnly) {
@@ -1055,4 +1114,19 @@ export function createActionRunner({
     /** 文件失败不覆盖 `ok`（正文可能已发），单独用 `filesOk` 告诉调用方 */
     return filesOk ? { ...r, filesOk: true } : { ...r, filesOk: false, fileErrors };
   };
+
+  /**
+   * 这个会话最近发出去的消息，**最新在前**。`qq_retract` 工具靠它挑目标。
+   *
+   * 返回副本：调用方（宿主）会按序号挑一条再撤回，给它一份能改的数组，
+   * 免得它 `reverse()` 把内部环形顺序搞反——下一次「上一条」就撤错人了。
+   *
+   * @param {string} chatId
+   * @returns {Array<{id:string, kind:string, at:number}>}
+   */
+  run.recentSentOf = (chatId) => {
+    const list = recentSent.get(String(chatId ?? '')) ?? [];
+    return list.slice().reverse().map((x) => ({ ...x }));
+  };
+  return run;
 }

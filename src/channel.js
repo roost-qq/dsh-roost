@@ -625,7 +625,7 @@ export function createRoostHostChannel({
       }
     },
 
-    /** `<<retract>>`：撤回自己上一条（消息 id 由出站动作层记着） */
+    /** `<<retract>>` / `qq_retract`：撤回自己发的一条（消息 id 由出站动作层记着） */
     async retract({ chatId, msgId, kind = 'c2c' } = {}) {
       if (!chatId || !msgId) return { ok: false, message: '缺 chatId 或 msgId' };
       try {
@@ -636,7 +636,20 @@ export function createRoostHostChannel({
         return { ok: true };
       } catch (e) {
         log(`roost 撤回失败：${e?.message ?? e}`);
-        return { ok: false, message: e?.message ?? String(e) };
+        /**
+         * `code` / `qqCode` 都要带出去。
+         *
+         * 以前只回 `message`，`qq_retract` 工具就只能把「HTTP 400」这种话转给
+         * 模型——它读不懂，只能瞎猜着换个说法再试。官方两个码是有明确含义的：
+         * `40064004` 超 2 分钟、`40062003` 没权限（不是自己的消息 / 不是管理员），
+         * 工具据此能直接告诉模型「这条撤不回来了，别重试」。
+         */
+        return {
+          ok: false,
+          code: String(e?.code ?? ''),
+          qqCode: Number(e?.qqCode) || 0,
+          message: e?.message ?? String(e),
+        };
       }
     },
 

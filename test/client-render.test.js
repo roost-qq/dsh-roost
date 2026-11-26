@@ -1246,18 +1246,80 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
     config: { roostHost: { decide: { mode: 'ai' }, merge: {} }, chat: {}, group: {} },
     saveCfg: () => {}, toast: () => {}, setTab: () => {},
   }), rt))
-  assert.deepEqual(gs.map((s) => s.n), ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10'], '群聊策略页编号应 01–10 连续')
+  assert.deepEqual(gs.map((s) => s.n), ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11'], '群聊策略页编号应 01–11 连续')
   /**
    * 顺序按**功能常用程度**排（2026-11-26 主人要求），不是按配置分类：
    *   01 什么时候接话 → 02 插话概率 → 03 话题与群活跃度 → 04 静默时段与忽略词
    *   → 05 安全刹车 → 06 连发合并 → 07 翻聊天记录 → 08 一轮与队列
    * 前 4 张是日常会反复调的；后 4 张配一次就不动。锁住顺序，
    * 免得以后往中间插卡时又被挤回「按分类排」。
+   *
+   * 09 引用回复与撤回（2026-11-26 加）：「所有群默认」的收尾卡，全局生效、
+   * 私聊也管；10 按群覆写 / 11 最近判定 是另外两个页签，编号接着往下排。
    */
   assert.deepEqual(gs.slice(0, 8).map((s) => s.title), [
     '什么时候接话', '插话概率', '话题与群活跃度', '静默时段与忽略词',
     '安全刹车', '连发合并', '翻聊天记录', '一轮与队列',
   ], '「所有群默认」的 8 张卡应按常用程度排')
+})
+
+test('群聊策略 09 卡：引用开关 / 引用概率 / 撤回开关都渲染，写的是 qqTools 的键', async () => {
+  /**
+   * 这三项 2026-11-26 从「能力 → 怎么说话」挪到群聊策略（主人原话「不好找啊」）。
+   * 只断言编号是不够的——卡里要是没控件、或者开关写到别的键上，页面照样「渲染不炸」。
+   * 这里直接调组件拿**未展开**的元素树，Switch / GNum 的 props 还在，可以真按一下。
+   */
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const calls = []
+  const saveCfg = async (patch) => { calls.push(patch); return { ok: true } }
+
+  rt.reset()
+  const raw = mod.GroupChatTab({
+    config: { roostHost: { decide: {}, merge: {} }, chat: {}, group: {}, qqTools: {} },
+    saveCfg, saveAll: async () => ({ ok: true }), toast: () => {}, setTab: () => {}, chats: [],
+  })
+  /** 未展开的树里 GCard / GRow 还是函数元素，但 props.children 里已经挂着 Switch / GNum */
+  const findIn = (root, pred) => {
+    let hit = null
+    const walk = (n) => {
+      if (hit || !n || typeof n !== 'object') return
+      if (Array.isArray(n)) { n.forEach(walk); return }
+      if (typeof n.type === 'function' && pred(n)) { hit = n; return }
+      walk(n.props?.children)
+    }
+    walk(root)
+    return hit
+  }
+  const byName = (root, name, label) => findIn(root, (n) => n.type.name === name
+    && (label === undefined || n.props?.label === label))
+
+  /**
+   * 只在 09 这张卡里找控件：整页有十几个 GNum，不限定范围会抓到 01 卡里的
+   * 「@ 之后接着聊多久」（第一版就这么写错了，断言 100 !== 40）。
+   */
+  const card = findIn(raw, (n) => n.type.name === 'GCard' && n.props?.title === '引用回复与撤回')
+  assert.ok(card, '缺 09「引用回复与撤回」卡')
+  const quoteSw = byName(card, 'Switch', '引用回复')
+  const pctNum = byName(card, 'GNum')
+  const retractSw = byName(card, 'Switch', '说错了能自己撤回')
+  assert.ok(quoteSw, '缺「引用回复」开关')
+  assert.ok(pctNum, '缺「引用概率」数字框')
+  assert.ok(retractSw, '缺「说错了能自己撤回」开关')
+  /** 配置里没写过时按「开 + 40%」显示，和 quote-auto.js 的缺省一致 */
+  assert.equal(quoteSw.props.on, true, '引用回复缺省应显示为开')
+  assert.equal(retractSw.props.on, true, '撤回缺省应显示为开')
+  assert.equal(pctNum.props.value, 40, '引用概率缺省应显示 40')
+  assert.equal(pctNum.props.disabled, false, '引用开着时概率不该是禁用态')
+
+  await quoteSw.props.onToggle(false)
+  await pctNum.props.onSave(100)
+  await retractSw.props.onToggle(false)
+  assert.deepEqual(calls, [
+    { qqTools: { quote: { enabled: false } } },
+    { qqTools: { quote: { percent: 100 } } },
+    { qqTools: { retract: false } },
+  ], '三项必须各写各的键，不能整份顶掉 qqTools')
 })
 
 test('群聊策略页：翻聊天记录那张卡的入口真能打开设置弹窗', () => {
