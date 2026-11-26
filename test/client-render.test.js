@@ -1059,6 +1059,108 @@ test('前端渲染：组件版本块查不到时不报错，只写「查不到�
   assert.ok(txt.includes('不影响使用'), '要说明不影响使用')
 })
 
+test('前端渲染：接入页有「探活身份校验」开关，没配过时显示关闭', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'setup'
+  rt.reset()
+  const txt = textOf(expand(mod.RoostPage(), rt))
+
+  assert.ok(txt.includes('探活身份校验'), '接入页缺这颗开关')
+  /**
+   * 默认关上必须**写出来**。`verifyIdentity` 没写过时是 undefined，
+   * 若界面拿原值渲染就会只剩一颗灰色空档，看不出当前是开是关。
+   */
+  assert.ok(txt.includes('默认关闭'), '没配过时要显示成「默认关闭」')
+  assert.ok(txt.includes('只要候选端口上有 Roost 应答'), '要写明关掉时的判定口径')
+})
+
+test('前端渲染：探活开关打开时写明「已开启（严格）」和会核对什么', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const h = rt.React.createElement
+
+  const txt = textOf(
+    expand(
+      h(mod.ProbeIdentityCard, {
+        st: { verifyIdentity: true },
+        saveCfg: async () => ({ ok: true }),
+        toast: () => {},
+        reload: async () => {},
+      }),
+      rt,
+    ),
+  )
+
+  assert.ok(txt.includes('已开启（严格）'), '开着要一眼看出来')
+  assert.ok(txt.includes('核对端口上这份 Roost 是不是配置目录那份'), '要写明开了会核对什么')
+  /**
+   * 手机端那句不能删：这是这个开关**唯一**会被普通用户碰到的场景
+   * （dsh-go / PRoot 路径形态不同 → 面板开着却说没起来）。
+   * 删了之后下一个人只会看到「有个开关」，不知道什么时候该关。
+   */
+  assert.ok(txt.includes('手机端'), '要保留手机端会误判的提示')
+  assert.ok(txt.includes('碰到就关掉'), '要给一句明确的做法')
+})
+
+/**
+ * 找树里那颗 role=switch 的开关。
+ * 只用于这颗卡片——接入页整页有别的开关（自动启动、WS 通道），按 role 找会撞上。
+ */
+const findSwitch = (node) => {
+  let found = null
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object' || found) return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (n.props?.role === 'switch') { found = n; return }
+    walk(n.props?.children)
+  })(node)
+  return found
+}
+
+/** 造一份「点一下就能观察副作用」的卡片渲染环境 */
+function renderProbeCard({ verifyIdentity, saveCfg = async () => ({ ok: true }) }) {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const calls = []
+  const toasts = []
+  let reloads = 0
+  const tree = expand(rt.React.createElement(mod.ProbeIdentityCard, {
+    st: { verifyIdentity },
+    saveCfg: async (patch) => { calls.push(patch); return saveCfg(patch) },
+    toast: (m) => toasts.push(m),
+    reload: async () => { reloads += 1 },
+  }), rt)
+  return { tree, sw: findSwitch(tree), calls, toasts, reloads: () => reloads }
+}
+
+test('接入页开关：点一下只翻 setup.verifyIdentity，并刷一次接入状态', async () => {
+  /**
+   * 这条钉的是「开关真的写进配置」和「写的路径对不对」。
+   * 写错的代价很隐蔽：写 `verifyProbe` 或写到 `roostHost` 段，配置里多一个
+   * 谁都不读的键，界面上开关照常动，探活行为一点没变。
+   */
+  const off = renderProbeCard({ verifyIdentity: false })
+  assert.ok(off.sw, '要有能点的开关')
+  await off.sw.props.onClick()
+  assert.deepEqual(off.calls, [{ setup: { verifyIdentity: true } }], '只翻 setup.verifyIdentity，不能顺带写别的段')
+  assert.equal(off.reloads(), 1, '存完要刷一次接入状态，否则开关会落后于盘上')
+
+  const on = renderProbeCard({ verifyIdentity: true })
+  await on.sw.props.onClick()
+  assert.deepEqual(on.calls, [{ setup: { verifyIdentity: false } }], '关掉也要真的写 false')
+})
+
+test('接入页开关：存不上时不装作成功，也不刷状态', async () => {
+  const bad = renderProbeCard({
+    verifyIdentity: false,
+    saveCfg: async () => ({ ok: false, message: '配置只读' }),
+  })
+  await bad.sw.props.onClick()
+  assert.ok(bad.toasts.some((m) => m.includes('配置只读')), '要把后端那句原样告诉用户')
+  assert.equal(bad.reloads(), 0, '没存上就别刷状态，刷了会让人以为已经改了')
+})
+
 test('前端渲染：扫码 / 填配置那块要提示「换账号去 Roost 面板」', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)

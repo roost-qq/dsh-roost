@@ -965,6 +965,14 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
       dshUrl: `http://127.0.0.1:${cfgOf().server.port}`,
       /** 启动 DSH 时是否自动拉起 Roost（面板开关的状态来源） */
       roostAutoStart: Boolean(cfgOf().roostHost?.autoStart),
+      /**
+       * 探活是否校验身份（接入页那颗开关的状态来源）。
+       *
+       * 默认 false，见 `setup.verifyIdentity` 的说明。这里回的是**生效值**
+       * 而不是原样透传配置——用户没写过这个键时也要显示成「关」，
+       * 否则开关在界面上会是个 undefined 的空档。
+       */
+      verifyIdentity: cfgOf().setup?.verifyIdentity === true,
       busy,
     };
   }
