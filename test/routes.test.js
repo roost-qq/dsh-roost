@@ -3261,3 +3261,51 @@ test('路由：/gate/silence 只收 POST', async () => {
     assert.equal(r.status, 405);
   } finally { h.off?.(); }
 });
+
+test('路由：/setup/owner/bind 校验 openid 格式且只收 POST', async () => {
+  const h = await bootHost({ setup: { roostDir: join(tmpdir(), 'no-such-roost-bind-xyz') } });
+  try {
+    const bad = await h.call('/setup/owner/bind', {
+      method: 'POST', body: { openid: '有 空格' },
+    });
+    assert.equal(bad.status, 400);
+    assert.match(bad.json.message, /格式不对/);
+
+    const short = await h.call('/setup/owner/bind', {
+      method: 'POST', body: { openid: 'ABC' },
+    });
+    assert.equal(short.status, 400, '太短也要拒');
+
+    /** 宿主预读 body 到 req.body 的形态也要能绑定（bodyOf 而不是裸 readBody） */
+    const pre = await h.call('/setup/owner/bind', {
+      method: 'POST', preBody: { openid: 'AAAAAAAAAAAAAAAAAA' },
+    });
+    assert.notEqual(pre.status, 400, '预读 body 不能再被当成缺参数');
+
+    const wrongMethod = await h.call('/setup/owner/bind');
+    assert.equal(wrongMethod.status, 405);
+  } finally { h.off?.(); }
+});
+
+test('路由：/setup/owner/bind 在框架没起/不支持时回 426，不写 dsh config', async () => {
+  const h = await bootHost({ setup: { roostDir: join(tmpdir(), 'no-such-roost-bind-xyz') } });
+  try {
+    const before = readFileSync(join(h.dir, 'config.json'), 'utf8');
+    const r = await h.call('/setup/owner/bind', {
+      method: 'POST', body: { openid: 'AAAAAAAAAAAAAAAAAA' },
+    });
+    assert.equal(r.status, 426);
+    assert.equal(r.json.code, 'OWNERS_API_UNSUPPORTED');
+    assert.match(r.json.message, /v1\.1\.17/);
+    assert.equal(readFileSync(join(h.dir, 'config.json'), 'utf8'), before, '不该写 dsh-roost 自己的 config');
+  } finally { h.off?.(); }
+});
+
+test('路由：/setup/owner/bind 保留「最后一人不能解绑」与 404 降级守卫', () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.match(host, /LAST_OWNER/, '要有最后一人保护的错误码');
+  assert.match(host, /current\.length === 1/, '只留一个主人时拒绝解绑');
+  assert.match(host, /OWNERS_API_UNSUPPORTED/, '旧框架要有明确降级码');
+  assert.match(host, /setup\.bindOwner\(openid, remove\)/, '绑定要委托给 setup 层写框架 config');
+  assert.doesNotMatch(host, /patchConfig\(\{ owners:/, '不得把框架 owners 写进 dsh config');
+});

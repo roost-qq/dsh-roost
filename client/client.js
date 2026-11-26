@@ -1162,8 +1162,11 @@ window.__ModuleLoader__.load({
 }
 .roost-g-desc{margin:0 0 10px;font-size:12px;line-height:1.6;
   color:var(--dsw-alias-label-secondary, inherit);opacity:.92}
+.roost-g-list{margin-top:4px}
+.roost-g-hint{font-size:11.5px;color:var(--dsw-alias-label-secondary, inherit);opacity:.85}
 .roost-g-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--line-soft)}
 .roost-g-desc + .roost-g-row{border-top:0}
+.roost-g-list > .roost-g-row:first-child{border-top:0}
 .roost-g-label{flex:1 1 45%;min-width:0}
 .roost-g-label b{display:block;font-size:12.5px;font-weight:600}
 .roost-g-label small{display:block;font-size:11.5px;line-height:1.5;margin-top:2px;
@@ -2771,6 +2774,45 @@ window.__ModuleLoader__.load({
       const [wipeMsg, setWipeMsg] = useState('')
       const [cfgMsg, setCfgMsg] = useState('')
       const [work, setWork] = useState('')
+      const s = st || {}
+      /**
+       * 接入页「配置主人」候选（框架 v1.1.17+ 才能面板内绑定）。
+       *
+       * 候选来自 /owner/aliases 的 recent（最近说过话的人，按 id 去重）——
+       * 让用户从昵称里点「这是我」，不必自己去找那串 hex openid。
+       */
+      const [ownerCandidates, setOwnerCandidates] = useState(null)
+      const [ownerBusy, setOwnerBusy] = useState('')
+      const loadOwnerCandidates = useCallback(async () => {
+        try {
+          const r = await get('/owner/aliases')
+          setOwnerCandidates(Array.isArray(r?.recent) ? r.recent : [])
+        } catch {
+          setOwnerCandidates([])
+        }
+      }, [])
+      /** 只有框架支持新接口、且机器人在线时才拉候选；否则不打扰 */
+      useEffect(() => {
+        if (s.ownersApi && s.running) loadOwnerCandidates()
+      }, [s.ownersApi, s.running, loadOwnerCandidates])
+      const bindOwner = async (openid, remove) => {
+        setOwnerBusy(openid)
+        try {
+          const r = await post('/setup/owner/bind', { openid, remove: Boolean(remove) })
+          if (r?.ok) {
+            toast(remove ? '已解绑主人' : '已绑定为主人，约 5 秒后生效')
+            await Promise.all([reload(), loadOwnerCandidates()])
+          } else {
+            toast(r?.code === 'OWNERS_API_UNSUPPORTED'
+              ? '框架版本太旧，请升级到 v1.1.17+，或去框架面板设主人'
+              : r?.message || '没绑上')
+          }
+        } catch (e) {
+          toast('没绑上：' + (e?.message || e))
+        } finally {
+          setOwnerBusy('')
+        }
+      }
       const qrTimer = useRef(null)
       const mode = reg?.current || 'qr'
       /** 框架版本对照（/update/deps） */
@@ -2787,7 +2829,6 @@ window.__ModuleLoader__.load({
       }
       /** 进页查一次（服务端有半小时缓存，不会每点一次都打 GitHub） */
       useEffect(() => { loadDeps(false) }, [])
-      const s = st || {}
       const locked = Boolean(work) || Boolean(busy)
 
       /**
@@ -3481,23 +3522,59 @@ window.__ModuleLoader__.load({
            * 第 6 步：配置主人。**放在最后**——前面五步是「能跑起来」，
            * 这一步是「谁能指挥它」，是跑起来之后才需要定的事。
            *
-           * 主人只能在 **Roost 面板**里设（面板有「主人与群组」那块），
-           * 这里只读状态 + 给个跳转按钮，不代劳——
-           * 主人是「谁能指挥这台机器」的根，不该由插件代写。
+           * 框架 v1.1.17+ 有 /api/owners/add|remove，面板内就能从「最近说过话的人」
+           * 里点一下绑定，不必跳出去找那串 hex openid。旧框架没有这个接口，
+           * 降级为只读状态 + 跳转框架面板（主人是根权限，不代写）。
            */
           h(Step, {
             n: 6, state: mark.owner, title: '配置主人',
             desc: s.ownersConfigured
               ? `已设 ${s.ownerCount || 1} 个主人 —— 群友的话她只当聊天，主人才能指挥她动工具`
-              : '去 Roost 面板的「主人与群组」里把你自己设成主人，不然她只能聊天、不能动工具',
+              : '设一个主人：她才听指挥、能动工具；否则只把群友的话当聊天',
           },
-            h('button', {
-              type: 'button',
-              className: 'roost-btn',
-              disabled: !s.webui,
-              onClick: () => window.open(`${s.webui || ''}#groups`, '_blank', 'noopener'),
-            /** 2.6：和第 2 步那颗不是同一件事——这颗带 #groups，直达主人名单 */
-            }, s.ownersConfigured ? '打开「主人与群组」' : '去框架面板设主人'),
+            s.ownersApi
+              ? h('div', null,
+                h('p', { className: 'roost-note' },
+                  '下面是最近说过话的人，点「这是我」就写进框架的主人名单。'
+                  + '这里绑的是 QQ 群/私聊的 openid；频道用户请去「频道」页用「这是我」登记。'),
+                ownerCandidates === null
+                  ? h('p', { className: 'roost-note' }, s.running
+                    ? '读取候选…'
+                    : '框架还没启动：先完成上面的接入步骤，启动后再来这里绑主人。')
+                  : ownerCandidates.length
+                    ? h('div', { className: 'roost-g-list' }, ownerCandidates.map((p) => {
+                      const bound = (s.owners || []).includes(p.id)
+                      return h('div', { className: 'roost-g-row', key: p.id },
+                        h('span', null,
+                          h('b', null, p.name || '（没有昵称）'),
+                          h('span', { className: 'roost-g-hint' },
+                            ` · ${{ group: '群', c2c: '私聊', guild: '频道', dm: '频道私信' }[p.kind] || p.kind} · ${String(p.id).slice(0, 10)}…`
+                            + (bound ? ' · 已是主人' : ''))),
+                        h('button', {
+                          type: 'button', className: 'roost-btn',
+                          disabled: Boolean(ownerBusy),
+                          onClick: () => bindOwner(p.id, bound),
+                        }, ownerBusy === p.id
+                          ? (bound ? '解绑中…' : '绑定中…')
+                          : (bound ? '解绑' : '这是我')))
+                    }))
+                    : h('p', { className: 'roost-note' },
+                      '还没有候选：先去群里 @ 机器人说句话，回来就能点选。'),
+                h('button', {
+                  type: 'button', className: 'roost-btn', style: { marginTop: 8 },
+                  disabled: !s.webui,
+                  onClick: () => window.open(`${s.webui || ''}#groups`, '_blank', 'noopener'),
+                }, '打开框架面板管理主人'),
+              )
+              : h('div', null,
+                h('p', { className: 'roost-note' },
+                  '当前框架版本不支持面板内绑定，请升级到 v1.1.17+；也可以去框架面板设。'),
+                h('button', {
+                  type: 'button', className: 'roost-btn',
+                  disabled: !s.webui,
+                  onClick: () => window.open(`${s.webui || ''}#groups`, '_blank', 'noopener'),
+                }, s.ownersConfigured ? '打开「主人与群组」' : '去框架面板设主人'),
+              ),
           ),
         ),
 
