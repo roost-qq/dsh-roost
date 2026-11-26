@@ -29,7 +29,7 @@ import { createAvatarCache } from './avatar-cache.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools, isOwnerSender } from './permissions.js';
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
 import { resolvePolicy, dangerOf, BUCKETS, defaultStore } from './capabilities.js';
-import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting, isOff, isOn } from './features.js';
+import { FEATURES, FEATURE_GROUPS, FEATURE_HOME, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting, isOff, isOn } from './features.js';
 /** 自动引用回复要不要挂、引用谁（纯函数，见文件头的「为什么抽出来」） */
 import { pickQuoteRef } from './quote-auto.js';
 /** `qq_retract` 的「挑哪条 / 失败怎么说」（纯函数，同上） */
@@ -2110,21 +2110,31 @@ export function apply(ctx) {
   let reminderBusy = false;
 
   /**
-   * 小闹钟到点：把系统提醒投进主人私聊的**真会话**，由她自己决定说不说。
-   * 走 awake.compose（内部已处理会话/工具/投递），不直接 sendOut。
-   * 成功/放弃由 store.remove / store.fail 收场；失败重试 15min 窗口 / 5min 间隔。
+   * 小闹钟到点：把系统提醒投进**设闹钟那个私聊**的真会话，让她自己决定说不说；
+   * 她真说了之后，必须**再经 `sendOut` 投递到 QQ**。
+   *
+   * 为什么两步都要：真会话注入只让文本落在 DSH 会话窗口（所以「dsh 会显示」），
+   * 而 DSH 本身没有 QQ 通道（app.asar 里没有 openapi.qq.com 客户端），
+   * 不补 `sendOut` 就是用户看到的「qq 电脑跟 qq 手机都接收不到」。
+   *
+   * 老记录没有 `chatId` 时回落主人；成功/放弃由 store.remove / store.fail 收场，
+   * 失败重试 15min 窗口 / 5min 间隔。
    */
   async function fireReminder(r) {
     const owner = ownerId();
     if (!owner) return { ok: false, why: '没配主人 openid' };
-    const text = `【系统提醒，不是主人说的话】你之前给自己定的小闹钟到时间了：${r.atText}「${r.note}」。现在可以主动找主人说这件事；如果觉得现在不适合打扰，就只回 <<skip>>。`;
+    /** 目标 = 设这条闹钟的私聊；老记录回落主人 */
+    const target = String(r.chatId || owner);
+    const isOwner = target === owner;
+    const who = isOwner ? '主人' : '对方';
+    const text = `【系统提醒，不是主人说的话】你之前给自己定的小闹钟到时间了：${r.atText}「${r.note}」。现在可以主动找${who}说这件事；如果觉得现在不适合打扰，就只回 <<skip>>。`;
     /**
      * 4 分钟兜底超时，会话轮 settle 后 clearTimeout 并 unref。
      *
      * **必须走真会话注入，不能用 awake.compose**：compose 只生成文本不投递，
      * 拿完就丢等于闹钟白响。照主动搭话成熟范式（host.js:1720-1745）：
      * agentFor → mount → waitFor → 收窄工具 → turns.run。她的回复由 turn/end
-     * 正常落地（她自己决定说不说），不是宿主替她发——正是对方 pushToSession 语义。
+     * 正常落地（她自己决定说不说），不是宿主替她发。
      */
     let timer = null;
     const timeout = new Promise((resolve) => {
@@ -2136,21 +2146,38 @@ export function apply(ctx) {
       result = await Promise.race([
         (async () => {
           try {
-            if (turnQueue?.isBusy(owner)) return { ok: false, why: '主人会话正忙，这轮让位' };
-            const chat = { kind: 'c2c', chatId: owner, sessionKey: owner, name: '小闹钟', preset: 'roost-private' };
+            if (turnQueue?.isBusy(target)) return { ok: false, why: '这个私聊正忙，这轮让位' };
+            const chat = { kind: 'c2c', chatId: target, sessionKey: target, name: '小闹钟', preset: 'roost-private' };
             const { agent } = await agentFor(chat);
             mount(agent, chat);
             /** 工具异步挂载：等挂完再开轮，否则第一轮工具清单是空的 */
             await qqToolRegistry.waitFor(agent);
-            /** 宿主发起的轮次必须同时收工具 + 套人格限制，别让 edit/write 从这条漏出去 */
+            /**
+             * 宿主发起的轮次必须同时收工具 + 套人格限制，别让 edit/write 从这条漏出去。
+             * 权限按「目标是不是主人」分档：非主人的私聊只给聊天档，绝不给 owner 全套工具。
+             */
+            const bucket = isOwner ? 'owner' : 'member';
             const cut = restrictTurnTools(agent, {
-              mode: 'all', bucket: 'owner', chatId: chat.chatId,
+              mode: isOwner ? 'all' : 'chat', bucket, chatId: chat.chatId,
               personaTools: personaToolsFor(chat), denyExtra: AWAKE_DENY_TOOLS,
             });
             try {
-              const r = await withOwnerSpeaker(agent, () =>
+              const raw = await withSpeaker(agent, { chatId: target, bucket }, () =>
                 turns.run(agent, text, { source: { kind: 'roost-reminder' } }));
-              return { ok: r !== false && r !== null };
+              const rawText = String(raw ?? '');
+              /** 她决定不说：这条就到这里，别投递、也别重试 */
+              if (/<<\s*skip\s*>>/i.test(rawText)) return { ok: true, skipped: true };
+              /** 去掉 <<image: #N>> 之类的标记，只留真要说的话 */
+              const said = rawText.replace(/<<[^>]*>>/g, '').trim();
+              if (!said) return { ok: true, skipped: true };
+              /**
+               * 补投递：这一句已经在 DSH 会话里显示过，现在把它真正发到 QQ。
+               * 成功判据以 `sendOut` 的返回为准——以前是「模型吐了字就算成功」，
+               * 于是面板记「已触发」而用户一条都没收到。
+               */
+              const sent = await sendOut({ scene: 'c2c', target, text: said });
+              if (!sent?.ok) return { ok: false, why: sent?.message || '没发出去', code: sent?.code };
+              return { ok: true, sent: true };
             } finally { try { cut.off?.(); } catch {} }
           } catch (e) { return { ok: false, why: e?.message || String(e) }; }
         })(),
@@ -2161,7 +2188,7 @@ export function apply(ctx) {
     }
     if (result.ok) {
       reminderStore.remove(r.id);
-      log.info(`小闹钟触发：${r.atText} ${r.note}`);
+      log.info(`小闹钟触发：${r.atText} ${r.note}${result.skipped ? '（她决定不说）' : '（已投递）'}`);
       return { ok: true };
     }
     if (cfg.speakUp?.reminderRetry === false) {
@@ -3729,13 +3756,13 @@ export function apply(ctx) {
    * 临时塞一份「主人私聊」的身份，跑完还原；原来有就还原，没有就删掉——
    * 不留残留，否则下一次真人消息会被这条假身份盖住。
    */
-  async function withOwnerSpeaker(agent, fn) {
+  async function withSpeaker(agent, { chatId = ownerId(), bucket = 'owner' } = {}, fn) {
     const sid = agent?.session?.id ?? agent?.sessionId ?? '';
     if (!sid) return fn();
     const prev = speaker.get(sid);
     speaker.set(sid, {
-      payload: { chat: { chatId: ownerId(), kind: 'c2c' } },
-      bucket: 'owner',
+      payload: { chat: { chatId, kind: 'c2c' } },
+      bucket,
       system: prev?.system || '',
     });
     try {
@@ -3744,6 +3771,16 @@ export function apply(ctx) {
       if (prev) speaker.set(sid, prev);
       else speaker.delete(sid);
     }
+  }
+
+  /**
+   * 主人私聊身份的快捷方式。
+   *
+   * 主动搭话 / 觉醒 / 巩固这些宿主发起的轮次都固定按主人算；
+   * 小闹钟要按「设闹钟的那个私聊」注入，所以单独给了 `withSpeaker`。
+   */
+  async function withOwnerSpeaker(agent, fn) {
+    return withSpeaker(agent, { chatId: ownerId(), bucket: 'owner' }, fn);
   }
 
   /**
@@ -7659,19 +7696,23 @@ export function apply(ctx) {
           return { ...c, openid: c.senderId, hasPayload: Boolean(c.payload) };
         },
         /**
-         * 小闹钟（A1）：只在主人私聊可用，且面板开关开着；关着如实拒绝。
-         * 传函数不传实例——开关随时可切，工具内部每次现取。
+         * 小闹钟（A1）：任意私聊都能用（能私聊进来的都在主人白名单里），
+         * 面板开关关着时如实拒绝。传函数不传实例——开关随时可切，工具内部每次现取。
          */
         reminderOf: {
           gate: (c) => {
-            const owner = ownerId();
-            const isOwnerPrivate = c?.kind === 'c2c' && !!owner && String(c.senderId || '') === owner;
-            if (!isOwnerPrivate) return { ok: false, message: '只有主人能在私聊里用小闹钟' };
+            const chatId = String(c?.chatId || c?.senderId || '').trim();
+            /** 只认私聊；群聊的 chatId 是群 openid，到点会给整个群发消息，不能放 */
+            if (c?.kind !== 'c2c' || !chatId) return { ok: false, message: '小闹钟只能在私聊里用' };
             if (masterOff()) return { ok: false, message: '插件总开关没开启' };
             if (!remindersOn()) return { ok: false, message: '小闹钟没开启（去「主动搭话」页打开）' };
             return { ok: true };
           },
-          add: (at, note) => reminderStore.add(at, note, { limit: cfg.speakUp?.reminderLimit ?? 5 }),
+          /** `chatId` = 设闹钟的这个私聊，到点就投给它 */
+          add: (at, note, chatId) => reminderStore.add(at, note, {
+            limit: cfg.speakUp?.reminderLimit ?? 5,
+            chatId: String(chatId || '').trim(),
+          }),
           close: (id) => reminderStore.close(id),
         },
         /** 她自己写提案（A5）：工具与面板共用 writeProposal，格式不漂移 */
@@ -10491,7 +10532,20 @@ export function apply(ctx) {
         return ctx.webServer.register({
           kind: 'exact',
           path: API + path,
-          handler: (req, res) => {
+          /**
+           * **宿主路由鉴权声明**（DSH 0.2.3-alpha.1 起生效，旧宿主忽略）。
+           *
+           * 0.2.3 起 `webServer.register` 的 `auth` 默认是 `required`，宿主会在
+           * 调用 handler **之前**完成鉴权，并把准入 Peer 作为 handler 第三个
+           * 参数传进来（`docs/upgrade-guide/v0.2.2-rc.2/connection-page-peer`）。
+           * 旧宿主（0.2.2-rc.1 及之前）的 `register` 只做 `table.set(path, route)`，
+           * 不认识这个字段也不会报错，所以两代宿主可以共用同一份声明。
+           *
+           * `anonymous` 只给扩展静态页：iframe 导航带不了凭据，宿主对匿名路由
+           * 仍会做 Host/Origin 来源检查（不是完全不判）。
+           */
+          auth: skipFence ? 'anonymous' : 'required',
+          handler: (req, res, peer) => {
             /**
              * 先过栅栏再进 handler。
              *
@@ -10515,16 +10569,41 @@ export function apply(ctx) {
                 message: '这个请求来自一个沙箱页面，面板接口不接受（扩展页面请通过面板转发）',
               });
             }
-            let bad = null;
             if (!skipFence) {
-              try {
-                bad = fence(req);
-              } catch (e) {
-                bad = { status: 403, why: `请求栅栏异常：${e?.message ?? e}` };
-              }
-              if (bad) {
-                log.warn(`面板 API 拒绝 ${path}：${bad.why}`);
-                return send(res, bad.status, { ok: false, message: bad.why });
+              /**
+               * **新宿主：Peer 由宿主交回，直接用，别再二次鉴权。**
+               *
+               * 0.2.3 起 webServer 已经按 `auth` 做完准入，handler 第三参数就是
+               * 那个 Peer。以前这里会再调一次 `fence(req)` → `connection.admit()`，
+               * 等于对同一个请求鉴权两次；新版 `admit()` 要求
+               * `ConnectionTrustRequest` 形状，与裸 `IncomingMessage` 不完全一致，
+               * 会误判成未授权 → 面板所有接口 403，前端只看到「读不到宿主状态」。
+               */
+              if (peer) {
+                req[PEER] = peer;
+                const kind = peer?.principal?.kind;
+                if (kind !== undefined && kind !== 'owner') {
+                  log.warn(`面板 API 拒绝 ${path}：调用方不是本机所有者`);
+                  return send(res, 403, { ok: false, message: '调用方不是本机所有者' });
+                }
+              } else {
+                /**
+                 * **旧宿主：没有 Peer 参数，走原来的栅栏。**
+                 *
+                 * 0.2.2-rc.1 及之前 `handler` 只收 `(req, res)`，第三参数恒为
+                 * `undefined`；这条路必须原样保留，否则旧版 DSH 上的面板会
+                 * 失去唯一一道鉴权。
+                 */
+                let bad = null;
+                try {
+                  bad = fence(req);
+                } catch (e) {
+                  bad = { status: 403, why: `请求栅栏异常：${e?.message ?? e}` };
+                }
+                if (bad) {
+                  log.warn(`面板 API 拒绝 ${path}：${bad.why}`);
+                  return send(res, bad.status, { ok: false, message: bad.why });
+                }
               }
             }
             return Promise.resolve(handler(req, res)).catch((e) => send(res, 500, { ok: false, message: e.message }));
@@ -11461,6 +11540,14 @@ export function apply(ctx) {
                   requires: f.requires,
                   /** 面板按 kind 决定画开关、下拉还是输入框 */
                   kind: kindOf(f),
+                  /**
+                   * 这个开关归哪一页（`src/features.js` 的 `FEATURE_HOME`）。
+                   *
+                   * 前端是独立 DSH 模块、不能 import src，所以由这里下发，
+                   * 避免前端再抄一份「id → 页」映射出来两头对不上。
+                   * 前端各页只渲染 `f.home === tab` 的项，一个不多一个不少。
+                   */
+                  home: FEATURE_HOME[f.id],
                   ...(kindOf(f) === 'toggle' ? {} : {
                     options: f.options || [],
                     custom: !!f.custom,
@@ -15967,7 +16054,14 @@ export function apply(ctx) {
           return send(res, r.ok ? 200 : 400, r);
         }
         if (!remindersOn()) return send(res, 409, { ok: false, message: '小闹钟没开启（去「主动搭话」页打开）' });
-        const r = reminderStore.add(body?.at, body?.note, { limit: cfg.speakUp?.reminderLimit ?? 5 });
+        /**
+         * 面板代设是主人从自己面板点的，目标默认主人私聊；
+         * 想指定别的私聊就显式传 `chatId`（面板目前不传）。
+         */
+        const r = reminderStore.add(body?.at, body?.note, {
+          limit: cfg.speakUp?.reminderLimit ?? 5,
+          chatId: String(body?.chatId || ownerId() || '').trim(),
+        });
         return send(res, r.ok ? 200 : 400, r);
       }),
 

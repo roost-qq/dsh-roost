@@ -676,14 +676,14 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
   };
 
   /**
-   * 她的小闹钟（A1）：只在主人私聊可用；面板开关关着时如实拒绝。
-   * 没注入 reminderOf 就不注册——不挂一个调了就炸的壳子（同 fileOf 口径）。
+   * 她的小闹钟（A1）：任意私聊可用（能私聊进来的都在主人白名单里）；
+   * 面板开关关着时如实拒绝。没注入 reminderOf 就不注册——不挂一个调了就炸的壳子。
    */
   const setReminder = {
     name: 'qq_set_reminder',
-    description: '给未来的自己定一个小闹钟。到点系统会提醒你主动找主人说话。at 必须是 yyyy-mm-dd HH:MM（本地时间），note 是到时要提醒自己的内容/由头。只用于主人私聊；面板里的小闹钟开关关着时不能用。',
+    description: '给未来的自己定一个小闹钟。到点你会在「当前这个私聊」里主动开口——不是替别人发消息给第三方，对方就是现在跟你说话的人。at 可以写绝对时间 yyyy-mm-dd HH:MM（本地时间），也可以写「一分钟后 / 半小时后 / 2小时」这类相对时间（别再自己心算）。note 是到时要说的由头。面板里的小闹钟开关关着时不能用。',
     parameters: {
-      at: { type: 'string', required: true, description: '时间，格式 yyyy-mm-dd HH:MM，例如 2026-11-26 17:30' },
+      at: { type: 'string', required: true, description: '绝对时间 yyyy-mm-dd HH:MM（如 2026-11-26 17:30），或相对时间（如「一分钟后」「半小时后」「2小时」）' },
       note: { type: 'string', required: true, description: '到时要提醒自己的事' },
     },
     output: {
@@ -693,14 +693,16 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
     async execute({ at, note } = {}) {
       if (!reminderOf) return { ok: false, message: '小闹钟没接线' };
       const c = caller();
-      const gate = reminderOf.gate?.(c) || { ok: false, message: '只有主人能用小闹钟' };
+      const gate = reminderOf.gate?.(c) || { ok: false, message: '小闹钟只能在私聊里用' };
       if (!gate.ok) return { ok: false, message: gate.message || gate.why };
-      return reminderOf.add(String(at || ''), String(note || ''));
+      /** 目标 = 当前私聊的对方：私聊里 chatId 就是对方 openid */
+      const chatId = String(c?.chatId || c?.openid || '').trim();
+      return reminderOf.add(String(at || ''), String(note || ''), chatId);
     },
   };
   const closeReminder = {
     name: 'qq_close_reminder',
-    description: '关闭一个自己设的小闹钟。id 用面板「小闹钟与追问」里那张列表的编号。只用于主人私聊。',
+    description: '关闭一个自己设的小闹钟。id 用面板「小闹钟与追问」里那张列表的编号。只能在私聊里用。',
     parameters: {
       id: { type: 'string', required: true, description: '要关闭的小闹钟 id' },
     },
@@ -711,7 +713,7 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
     async execute({ id } = {}) {
       if (!reminderOf) return { ok: false, message: '小闹钟没接线' };
       const c = caller();
-      const gate = reminderOf.gate?.(c) || { ok: false, message: '只有主人能用小闹钟' };
+      const gate = reminderOf.gate?.(c) || { ok: false, message: '小闹钟只能在私聊里用' };
       if (!gate.ok) return { ok: false, message: gate.message || gate.why };
       return reminderOf.close(String(id || ''));
     },
