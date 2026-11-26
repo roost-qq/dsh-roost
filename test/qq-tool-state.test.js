@@ -45,7 +45,7 @@ test('原有提示词逐句保留（重构快照）', () => {
     '你手上有这几个工具：`qq_send`（发一段话）、`qq_close`（给这段对话收尾），以及（装了的话）`qq_send_file`（发一个文件）。',
     '· 想说话就调 `qq_send`，一次发一段，按需要可以分多次。**别把要发的话写进正文**。',
     '· 调过 `qq_send` 之后，你回复的正文**不会**再发出去——正文只当思考用。',
-    '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
+    '· **只在私聊里**、聊到自然结束对方要走的时候，可以用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后不说话。群里没有「聊完」这回事，别用。',
     '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**——那样只发工具那条，正文会被丢掉。',
     '· 想发**语音条**时，按前面语音说明的 `<voice>…</voice>` 写法，',
     '· 要发文件（文档、表格、压缩包、图片都算）就调 `qq_send_file`，参数是**绝对路径**，一轮最多一个。',
@@ -91,7 +91,7 @@ test('提示词：长时间思考引导是软建议，不压正常短回复', ()
    *     已经想到的内容，空话既占回话额度又显得敷衍。
    *   · 想好后那句同样走 qq_send（「把剩下的说出来」）。
    */
-  const added = text.split('· 如果这件事要想比较久')[1]?.split('· 聊到自然结束')[0] ?? '';
+  const added = text.split('· 如果这件事要想比较久')[1]?.split('· **只在私聊里**')[0] ?? '';
   assert.ok(added.length > 0, '引导句必须注入');
   assert.doesNotMatch(added, /正文/, '引导句不许提「正文」，否则和同段规则打架');
   assert.doesNotMatch(added, /我想想|等我|稍等|正在想|让我想/, '不许引导拖延话术，先发的必须是已想到的内容');
@@ -309,4 +309,59 @@ test('撤回提示：工具被 deny 时整句不出现', () => {
 test('撤回提示：注册清单里没有它时也不教（跨版本兜底）', () => {
   const p = withRetract({ registeredNames: new Set(['qq_send', 'qq_close']) });
   assert.doesNotMatch(p, /qq_retract/);
+});
+
+/* ---------------- 907 段：权限句 / 记忆 / 提案（2026-11-26 补） ---------------- */
+
+/** 带「可选只读工具 + 自驱工具」的完整清单，用来验逐条裁剪 */
+const ALL_TOOLS = new Set([
+  ...ALL, 'qq_who', 'qq_search', 'qq_retract', 'memory_search', 'memory_note', 'autotelic_propose',
+]);
+
+test('权限句：qq_search 不许再写「只在当前会话」', () => {
+  const p = buildOutputPrompt({ mounted: MOUNTED, denied: null, registeredNames: ALL_TOOLS });
+  assert.doesNotMatch(p, /只在当前会话/, '2026-11-16 定的是「其他人也能跨会话」，旧文案把边界说反了');
+  assert.match(p, /只能搜到自己的消息/, '边界是「谁的消息」，不是「哪个会话」');
+});
+
+test('场景句：qq_close 必须点明只在私聊', () => {
+  const p = buildOutputPrompt({ mounted: MOUNTED, denied: null, registeredNames: ALL_TOOLS });
+  assert.match(p, /只在私聊里/);
+  assert.match(p, /群里没有「聊完」这回事/, '不写这句群里每轮都会白调一次');
+});
+
+test('记忆：memory_search 常教，memory_note 只给能写的那一轮', () => {
+  const base = { mounted: MOUNTED, denied: null, registeredNames: ALL_TOOLS };
+  const guest = buildOutputPrompt({ ...base, memoryWrite: false });
+  assert.match(guest, /memory_search/);
+  assert.doesNotMatch(guest, /memory_note/, '群里教它写记忆，execute 必然按 canWrite 拒');
+  const owner = buildOutputPrompt({ ...base, memoryWrite: true });
+  assert.match(owner, /memory_note/);
+});
+
+test('记忆 / 提案：没挂上时不教', () => {
+  const p = buildOutputPrompt({
+    mounted: MOUNTED, denied: null, registeredNames: new Set(['qq_send', 'qq_close']),
+    memoryWrite: true,
+  });
+  assert.doesNotMatch(p, /memory_search/);
+  assert.doesNotMatch(p, /autotelic_propose/);
+});
+
+test('记忆 / 提案：本轮被收走时不教', () => {
+  const p = buildOutputPrompt({
+    mounted: MOUNTED, denied: ['memory_search', 'autotelic_propose'],
+    registeredNames: ALL_TOOLS, memoryWrite: true,
+  });
+  assert.doesNotMatch(p, /memory_search/);
+  assert.doesNotMatch(p, /autotelic_propose/);
+});
+
+test('提案：措辞不许承诺「一定会被采纳」', () => {
+  const p = buildOutputPrompt({
+    mounted: MOUNTED, denied: null, registeredNames: ALL_TOOLS, memoryWrite: true,
+  });
+  assert.match(p, /框架代码你改不到/, '必须说清它自己改不了');
+  assert.match(p, /由主人定/, '成不成不在它');
+  assert.doesNotMatch(p, /一定会|保证/, '不许给确定性承诺');
 });

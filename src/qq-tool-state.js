@@ -57,6 +57,7 @@ export function registeredToolNames(agent) {
  * @param {Set<string>|null} [opts.registeredNames] schemas() 报的注册清单
  * @param {boolean} [opts.ttsEnabled] 语音是否开启
  * @param {boolean} [opts.longThinkHint] 是否注入「想久了先用 qq_send 说一句」
+ * @param {boolean} [opts.memoryWrite] 这一轮能不能写记忆（只有主人档为真）
  * @returns {string}
  */
 export function buildOutputPrompt({
@@ -65,6 +66,7 @@ export function buildOutputPrompt({
   registeredNames = null,
   ttsEnabled = false,
   longThinkHint = false,
+  memoryWrite = false,
 } = {}) {
   if (!mounted?.ok) return '';
   /** 报「挂上了」却没挂 qq_send 时也不能注入，否则又是教模型调不存在的工具 */
@@ -111,7 +113,13 @@ export function buildOutputPrompt({
           '· 轮次中间确实收到需要回应的新消息时，也可以先用 `qq_send` 把能答的部分先答了，再接着想完——仍然是同一轮。',
         ]
       : []),
-    '· 聊到自然结束、对方要走的时候，用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后可以不说话。',
+    /**
+     * **必须写「只在私聊」**：`closing.js` 的 `acceptClose` 是
+     * `kind !== 'c2c'` 直接拒。旧文案没写场景，群里聊到自然结束模型就会
+     * 调一次、拿一个「只做私聊」回来——白烧一轮，而且它下一轮还会再试。
+     * 工具 description 里有这句，但 907 权重更高，两边必须一致。
+     */
+    '· **只在私聊里**、聊到自然结束对方要走的时候，可以用 `qq_close` 记一句「收在哪 / 下次怎么接」，然后不说话。群里没有「聊完」这回事，别用。',
     '· 一个工具都不调时，正文会照常发出去（旧方式）。**不要又调工具又写正文**——那样只发工具那条，正文会被丢掉。',
     /**
      * 语音写法已经由 900 段（roostVoiceHintText）每轮教会模型，这里只讲工具模式下
@@ -151,19 +159,27 @@ export function buildOutputPrompt({
   /**
    * 搜历史：只在工具真的挂上时教。
    *
-   * 描述里必须把**权限差异**说清楚：普通群成员调用时只能搜自己、且只在当前
-   * 会话里。不写这句，模型会在群里承诺「我翻翻你们以前的聊天」，然后被工具
-   * 的收窄打了个空，看起来像失忆。
+   * 描述里必须把**权限差异**说清楚：普通群成员的视野是「自己的消息」，
+   * 不是「当前会话」。不写这句，模型会在群里承诺「我翻翻你们以前的聊天」，
+   * 然后被工具的收窄打了个空，看起来像失忆。
    */
   const searchDenied = toolWasDenied(denied, 'qq_search');
   const searchRegistered = !registeredNames || registeredNames.has('qq_search');
+  /**
+   * 权限句必须和 `qq-tools.js` 的 execute 一致，**别再写「只在当前会话范围内」**。
+   *
+   * 2026-11-16 主人定的是「其他人也要可以跨会话」——非特权用户跨会话
+   * 只暴露「这个群存在」，不暴露别人的消息，边界是「谁的消息」而不是
+   * 「哪个会话」。旧文案把边界说反了，模型在群里会主动示弱
+   * （「我只能查本群」），而它其实能查到自己别处的发言。
+   */
   if (!searchDenied && searchRegistered) {
     lines.push(
       '· 想不起来「以前说过什么」时，调 `qq_search`（只读）搜账本：'
       + '关键词空格分隔、多个词要同时命中（没有结果会自动放宽成任一）。'
       + '返回按时间倒序，带会话名、发言人、时间、正文。'
-      + '**普通成员只能搜到自己的消息、且只在当前会话范围内**；'
-      + '主人和管理员才能跨会话、按别人查。别承诺你权限外的检索。',
+      + '**普通成员只能搜到自己的消息（跨会话也能查到自己说过的话，但查不到别人的）**；'
+      + '主人和管理员才能按别人查。别承诺你权限外的检索。',
     );
   }
   /**
@@ -185,6 +201,53 @@ export function buildOutputPrompt({
       + '（默认最近一条，也能撤倒数第 2～5 条）。撤不了别人的；'
       + '官方只给 2 分钟，超时就撤不回来——那就别再试，直接补一句更正。'
       + '撤回只是让消息消失，看过的人已经看过了，别把它当成「没说过」。',
+    );
+  }
+  /**
+   * 翻记忆 / 记一笔。
+   *
+   * 为什么必须在这儿说：903 段只注入 facts **数据**，不注入「你能自己翻」。
+   * 模型看得到记忆内容，却不知道有一把能主动检索的钥匙——被问「上周那个方案」
+   * 时只要没进 TopK，就只会答「不记得」。工具 description 里写了，但它是
+   * 「调用前才读」的，不会主动提醒；这一句是每轮都在的。
+   *
+   * `memory_note` 只给主人（`tools.js` 的 `canWrite` 硬判），所以由调用方
+   * 用 `memoryWrite` 传入，别在这里猜档位。
+   */
+  const memSearchDenied = toolWasDenied(denied, 'memory_search');
+  const memSearchRegistered = !registeredNames || registeredNames.has('memory_search');
+  if (!memSearchDenied && memSearchRegistered) {
+    lines.push(
+      /**
+       * 措辞要和 `qq_search` 分开：上一句已经用了「想不起来以前说过什么」，
+       * 这里再用同一句开头，模型会以为是同一件事的两种说法，不知道该调哪个。
+       * 两者的差别是**搜什么**：`qq_search` 搜聊天账本原文，这里搜她自己记下的事。
+       */
+      '· 除了这儿列出来的，你还记着别的事——需要时调 `memory_search` 在自己记过的东西里查，'
+      + '别直接说「我不记得」。',
+    );
+  }
+  const memNoteDenied = toolWasDenied(denied, 'memory_note');
+  const memNoteRegistered = !registeredNames || registeredNames.has('memory_note');
+  if (memoryWrite && !memNoteDenied && memNoteRegistered) {
+    lines.push(
+      '· 有值得长期留住的事（对方的偏好、说好的事、重要日期）就调 `memory_note` 记一条；'
+      + '一次性的闲聊不用记。',
+    );
+  }
+  /**
+   * 写提案：自驱引擎的出口，挂在 QQ 会话里，但之前从没在任何提示词里出现过。
+   *
+   * 主人的真实问法（「你能不能加个功能」）会让模型直接答「我做不到」——
+   * 而它其实有一条正规通道。只教「写提案」，**不承诺会被采纳**，
+   * 也明确「框架代码你改不到」，免得它答应一个自己做不到的改动。
+   */
+  const proposeDenied = toolWasDenied(denied, 'autotelic_propose');
+  const proposeRegistered = !registeredNames || registeredNames.has('autotelic_propose');
+  if (!proposeDenied && proposeRegistered) {
+    lines.push(
+      '· 想要个新能力、觉得哪里该改、或者想给自己添个工具时，写成提案：调 `autotelic_propose`，'
+      + '说清想要什么、为什么。框架代码你改不到，提案是唯一的路子，成不成由主人定。',
     );
   }
   return lines.join('\n');

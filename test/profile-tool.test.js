@@ -298,6 +298,21 @@ test('P1 提示词按开关拼；都关就是空串', () => {
   assert.match(both, /主人/);
 });
 
+/**
+ * 头像单独成段（2026-11-26 补）。
+ *
+ * 它是唯一被漏掉的一项：sign / name 都在 906 段教了，avatar 工具挂着
+ * 却一句提示都没有，主人说「换个头像」时她会答「我改不了」。
+ */
+test('P1 提示词：头像开关单独生效，且三种来源和工具参数对得上', () => {
+  const onlyAvatar = buildProfilePrompt({ avatar: true });
+  assert.match(onlyAvatar, /头像/);
+  assert.match(onlyAvatar, /网络图片地址/, 'url 参数');
+  assert.match(onlyAvatar, /本机|png/, 'path 参数');
+  assert.doesNotMatch(onlyAvatar, /简介/, '只开头像时不许带简介');
+  assert.doesNotMatch(onlyAvatar, /名字/, '只开头像时不许带昵称');
+});
+
 /* ---------------- 头像 ---------------- */
 
 test('AV1 来源校验：url 只收 http(s)，dataUrl 只收四种图', () => {

@@ -7590,14 +7590,15 @@ export function apply(ctx) {
             menu: cfg.selfExpression?.menu?.enabled !== false,
             sign: cfg.selfExpression?.sign?.enabled !== false,
             name: cfg.selfExpression?.name?.enabled !== false,
+            avatar: cfg.selfExpression?.avatar?.enabled !== false,
           };
-          if (!on.menu && !on.sign && !on.name) return '';
+          if (!on.menu && !on.sign && !on.name && !on.avatar) return '';
           return [
             buildMenuPrompt({
               enabled: on.menu,
               cooldownMin: cfg.selfExpression?.menu?.cooldownMin ?? 0,
             }),
-            buildProfilePrompt({ sign: on.sign, name: on.name }),
+            buildProfilePrompt({ sign: on.sign, name: on.name, avatar: on.avatar }),
           ].filter(Boolean).join('\n');
         },
       }));
@@ -8562,6 +8563,14 @@ export function apply(ctx) {
             ttsEnabled: cfg.tts?.enabled === true,
             /** 想久了先用 qq_send 说一句：跟群聊插话同一个开关，热读；走 isOff 认字符串 "false" */
             longThinkHint: !isOff(cfg.roostHost?.merge?.steerInGroup),
+            /**
+             * 能不能写记忆：`tools.js` 的 `canWrite()` 按 bucket 硬判，
+             * 这里只是别在群里教它调一个必然被拒的工具。现读，不烤快照。
+             */
+            memoryWrite: (() => {
+              const sid = agent?.session?.id;
+              return (sid ? speaker.get(sid) : null)?.bucket === 'owner';
+            })(),
           }),
         }),
       );
@@ -8701,8 +8710,12 @@ export function apply(ctx) {
              * 调用方（ai-chat 插件 / 扩展）给了 `payload.system` 就用它的——
              * 那份和它的解析侧配套，措辞也更全。没给（纯直连部署）才用宿主
              * 内置的最小契约，否则模型根本不知道有标记可用。
+             *
+             * `picks` 只在内置契约里起作用：`<<pick:>>` 靠外接协议把
+             * `INTERACTION_CREATE` 推回来才结算，没连框架时教了只会得到
+             * 一堆点了没反应的按钮。
              */
-            const picked = pickMarkerContract(cur?.system);
+            const picked = pickMarkerContract(cur?.system, { picks: roostRef?.connected === true });
             if (!contractLogged) {
               contractLogged = true;
               log.debug(`标记契约来源：${picked.source === 'builtin' ? '宿主内置（调用方没给 system）' : '调用方 payload.system'}`);
