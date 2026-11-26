@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import {
   plantAuthorDocs, authorPrompt, forkExtension, countFiles, AUTHOR_GUIDE, GUIDE_URL,
 } from '../src/ext-author.js';
+import { validateManifest, EXT_ALLOWED_SCOPES } from '../src/ext-registry.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const HOMES = [];
@@ -169,4 +170,40 @@ test('宿主：四条引导路由都经 regAuthor 注册（清理时才会被注
     assert.ok(src.includes(`regAuthor('/extensions/${p}'`), `${p} 路由要用 regAuthor，否则重载会重复注册`);
   }
   assert.ok(src.includes('...authorOffs'), 'offs 要展开 authorOffs，不然清理函数漏掉它们');
+});
+
+/**
+ * **教程里的代码必须能照抄。**
+ *
+ * 原来 3.2 节的清单示例写的是 `"scopes": ["message:read"]`，而允许列表里只有
+ * `message:write`——用户照抄，装的时候整份被拒，报「scopes 含未知项」。
+ * 文档里贴的示例是**第一个被抄的东西**，错一个字就等于教程不可用，
+ * 所以这里把示例真的过一遍 `validateManifest`，而不是用眼睛看。
+ */
+test('教程 3.2 节的清单示例照抄能被宿主接受', () => {
+  const text = fs.readFileSync(join(ROOT, 'docs', AUTHOR_GUIDE), 'utf8');
+  const sec = text.slice(text.indexOf('### 3.2'), text.indexOf('### 3.3'));
+  const m = sec.match(/```json\n([\s\S]*?)```/);
+  assert.ok(m, '3.2 节要有一份 json 清单示例');
+  const raw = JSON.parse(m[1]);
+  const v = validateManifest(raw, { expectedId: raw.id });
+  assert.ok(v.ok, `清单示例没通过校验：${v.errors?.join('；')}`);
+});
+
+test('教程里出现的 scopes 值都在允许列表里（写错一个字母就装不上）', () => {
+  const text = fs.readFileSync(join(ROOT, 'docs', AUTHOR_GUIDE), 'utf8');
+  const found = [...text.matchAll(/"scopes"\s*:\s*\[([^\]]*)\]/g)]
+    .flatMap((x) => [...x[1].matchAll(/"([^"]+)"/g)].map((y) => y[1]));
+  assert.ok(found.length > 0, '教程里至少要给出一个 scopes 写法当例子');
+  for (const s of found) {
+    assert.ok(EXT_ALLOWED_SCOPES.includes(s), `教程写了不存在的 scope「${s}」`);
+  }
+});
+
+test('市场页的教程卡前面有引导语（不然用户不知道这张卡跟自己有关）', () => {
+  const src = fs.readFileSync(join(ROOT, 'client', 'client.js'), 'utf8');
+  const marketTab = src.slice(src.indexOf('function ExtMarketTab('), src.indexOf('function ExtUiPage('));
+  assert.match(marketTab, /没有想要的|自己写/, '市场页要有一句「没找到就自己写」的引导');
+  assert.ok(marketTab.indexOf('没有想要的') < marketTab.indexOf('ExtGuideBlock'),
+    '引导语要在教程卡之前');
 });

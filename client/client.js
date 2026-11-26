@@ -23902,8 +23902,14 @@ window.__ModuleLoader__.load({
         /**
          * 逛市场的人也是「可能想写一个」的人：装了一圈发现没有想要的，
          * 下一步就是自己写。教程放这里，不用回已安装页找。
+         *
+         * 卡前面必须有这一句：只挂一张折叠卡，用户看到的是一个陌生的
+         * 「写扩展教程」，不知道跟自己有什么关系（2026-11-27 实看出来的）。
          */
         h(ExtSettingsBlock, { toast, part: 'market', reloadExtPages }),
+        h('div', { className: 'roost-note', style: { marginTop: 12 } },
+          '逛了一圈没有想要的？扩展就是「一个目录 + 一份 plugin.json + 一个 MCP server」，',
+          '下面这份教程带你从零写一个。写完想给别人用，教程里「想发到市场」那一节讲了怎么发。'),
         h(ExtGuideBlock, { toast }),
       )
     }
