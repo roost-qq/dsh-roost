@@ -506,6 +506,97 @@ test('忙时：被 @ 的连发只交第一批，其余攒着等 release 合成�
   m.dispose();
 });
 
+test('忙时群聊插话：开关打开时走 onSteer，不攒批、不新开一轮', async () => {
+  const flushed = [];
+  const steered = [];
+  const m = createMerger({
+    waitSec: 0.05, maxSec: 0.3, trackBusy: true, steerInGroup: () => true,
+    onFlush: (_id, b) => flushed.push(b),
+    onSteer: (_id, b) => { steered.push(b); return true; },
+  });
+  /** 第一条群消息放行并置忙 */
+  m.add(mkEvt('第一条'), { force: true });
+  assert.equal(flushed.length, 1);
+  /** 这一轮期间又来 2 条群消息：默认 steerInGroup=false 会攒批，这里开关打开应插话 */
+  m.add(mkEvt('第二条', { sender: { name: '乙', openid: 'U2' } }), { force: true });
+  m.add(mkEvt('第三条', { sender: { name: '丙', openid: 'U3' } }), { force: true });
+  /** onSteer 走 Promise 链，等它跑完再断言（现有私聊用例也是这个套路） */
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(steered.length, 2, '两条都插进当前轮');
+  assert.equal(flushed.length, 1, '不新开一轮');
+  assert.match(steered[0].steerText, /乙/, '插话文本带发言人名，模型才知道谁说的');
+  m.dispose();
+});
+
+test('忙时群聊插话：开关关掉退回攒批，release 后合成一批', () => {
+  const flushed = [];
+  const steered = [];
+  const m = createMerger({
+    waitSec: 0.05, maxSec: 0.3, trackBusy: true, steerInGroup: () => false,
+    onFlush: (_id, b) => flushed.push(b),
+    onSteer: (_id, b) => { steered.push(b); return true; },
+  });
+  m.add(mkEvt('第一条'), { force: true });
+  m.add(mkEvt('第二条'), { force: true });
+  m.add(mkEvt('第三条'), { force: true });
+  assert.equal(steered.length, 0, '关掉后不插话');
+  assert.equal(flushed.length, 1);
+  m.release('G');
+  assert.equal(flushed.length, 2, 'release 把攒的两条合成一批');
+  assert.equal(flushed[1].count, 2);
+  m.dispose();
+});
+
+test('忙时插话护栏：达次数上限后退回攒批，不吊死轮次', async () => {
+  const flushed = [];
+  const steered = [];
+  const m = createMerger({
+    waitSec: 0.05, maxSec: 0.3, trackBusy: true,
+    steerInGroup: () => true, steerMaxPerTurn: 2,
+    onFlush: (_id, b) => flushed.push(b),
+    onSteer: (_id, b) => { steered.push(b); return true; },
+  });
+  m.add(mkEvt('第一条'), { force: true });
+  m.add(mkEvt('第二条'), { force: true });
+  m.add(mkEvt('第三条'), { force: true });
+  m.add(mkEvt('第四条'), { force: true });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(steered.length, 2, '最多插话 2 次');
+  assert.equal(flushed.length, 1);
+  m.release('G');
+  assert.equal(flushed.length, 2, '超出上限那条由 release 补交，不丢');
+  assert.equal(flushed[1].count, 1, '前两条已 steer 走，只剩第 4 条攒批');
+  m.dispose();
+});
+
+test('忙时插话护栏：steer 失败的那条计数退回，下一轮额度不受影响', async () => {
+  const flushed = [];
+  const steered = [];
+  let attempt = 0;
+  const m = createMerger({
+    waitSec: 0.05, maxSec: 0.3, trackBusy: true,
+    steerInGroup: () => true, steerMaxPerTurn: 1,
+    onFlush: (_id, b) => flushed.push(b),
+    onSteer: (_id, b) => {
+      attempt += 1;
+      const ok = attempt !== 1; // 这一轮第一次 steer 失败
+      if (ok) steered.push(b);
+      return ok;
+    },
+  });
+  m.add(mkEvt('第一条'), { force: true });   // 开一轮
+  m.add(mkEvt('第二条'), { force: true });   // steer 失败 → 计数退回 → 攒批等 release
+  await new Promise((r) => setImmediate(r));
+  m.release('G');                            // 失败那条补交，开新轮
+  await new Promise((r) => setImmediate(r));
+  assert.equal(flushed.length, 2, '失败的消息没丢，release 后补交');
+  m.add(mkEvt('第三条'), { force: true });   // 新轮：额度应恢复，能再 steer
+  await new Promise((r) => setImmediate(r));
+  assert.equal(steered.length, 1, '新轮额度恢复，第三条成功插入');
+  m.dispose();
+});
+
 test('忙时：私聊插话交给 onSteer，不新开一轮', async () => {
   const flushed = [];
   const steered = [];

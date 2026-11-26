@@ -104,19 +104,24 @@ test('排队：不同会话互不影响', async () => {
   q.dispose();
 });
 
-test('排队：队列满 → full，且那条不执行', async () => {
-  const { q } = rig({ maxPending: 1 });
+test('排队：超软上限不拒绝，仍入队、记日志、轮到就跑', async () => {
+  const logs = [];
+  const { q } = rig({ maxPending: 1, log: (m) => logs.push(m) });
   const d = deferred();
+  let thirdRan = false;
   const first = q.push('g1', d.task);
   const second = q.push('g1', async () => {});
-  const third = q.push('g1', async () => {});
+  const third = q.push('g1', async () => { thirdRan = true; });
   assert.equal(first.queued, false);
   assert.equal(second.queued, true);
-  assert.equal(third.accepted, false);
-  assert.equal(third.reason, 'full');
+  assert.equal(third.accepted, true, '软上限不再拒绝');
+  assert.equal(third.queued, true);
+  assert.ok(logs.some((m) => /超出软上限/.test(m)), '超限只记日志');
   d.release();
   await first.promise;
   await second.promise;
+  await third.promise;
+  assert.equal(thirdRan, true, '超软上限的消息不丢');
   q.dispose();
 });
 

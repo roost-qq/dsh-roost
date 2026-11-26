@@ -11,9 +11,10 @@
  * ## 三条不能动的规矩
  *
  * 1. **入队不吭声**。大部分排队几秒就轮到，发「排队中」是纯噪音。
- * 2. **队列满 / 预算不够要说话**，但**不能伪造 `busy` 异常**——
- *    抛异常会走 `handleTurn` 的 catch，把「排满了」记成「这一轮失败了」，
- *    事后看数据分不清是模型挂了还是只是排队。
+ * 2. **队列满 / 预算不够都静默，只记日志**（2026-11-26 主人定）——
+ *    以前回「上一条还在想」/「没赶上」，高频群刷屏。现在两条提示都进日志，
+ *    用户那边一句不发。同样**不能伪造 `busy` 异常**：抛异常会走 `handleTurn`
+ *    的 catch，把「排队」记成「这一轮失败了」。
  * 3. **预算从 ai-chat 的 `expiresAt` 起算**。它比「入站那一刻 + 180s」更保守
  *    （payload 是在合并窗口之后才建的，晚 1.5–6 秒），方向是对的。
  */
@@ -22,7 +23,8 @@
  * @param {object} o
  * @param {object} o.q             `createTurnQueue` 的实例
  * @param {(payload:any)=>Promise<void>} o.handleTurn  真正干活的那一轮（自己吞异常）
- * @param {(payload:any, text:string, done:boolean)=>Promise<any>} o.postReply
+ * @param {(payload:any, text:string, done:boolean)=>Promise<any>} [o.postReply]
+ *        保留签名兼容旧调用方；当前实现不再用它回排队提示
  * @param {(payload:any)=>string} o.chatIdOf  从 payload 取 **chatId 字符串**（同步）
  * @param {(payload:any)=>string} [o.keyOf]  排队用哪个键，缺省同 `chatIdOf`
  * @param {() => number} [o.now]
@@ -45,10 +47,14 @@ export function createInboundShell({
   now = () => Date.now(),
   log = () => {},
 }) {
-  /** 队列满：确实是堆着了，这句话才诚实 */
-  const BUSY_TEXT = '上一条还在想，稍等一下。';
-  /** 过窗口：明说没赶上，比沉默强——用户知道不是没听见 */
-  const EXPIRED_TEXT = '这条等太久了没赶上，再说一次？';
+  /**
+   * 排队类的提示一律静默（2026-11-26 主人定）。
+   *
+   * 这两句话以前分别回在「队列满」和「预算不够」时，高频群里会连着刷好几条，
+   * 而收到提示的消息本身也没被处理——用户看到提示等于白等一次。
+   * 现在只在日志里记录原因，用户那边一句不发。
+   */
+  const SILENT_REASONS = new Set(['full', 'expired', 'disposed', 'bad-task']);
 
   /**
    * 已经为「收到对象」报过一次。
@@ -109,8 +115,18 @@ export function createInboundShell({
         return;
       }
 
-      const text = r.reason === 'expired' ? EXPIRED_TEXT : BUSY_TEXT;
-      log(`排队：${chatId.slice(0, 8)} 未入队（${r.reason}），回了「${text}」`);
+      /**
+       * 静默：只记日志，不 postReply。
+       * `SILENT_REASONS` 用 Set 收口是为了让「还有哪些 reason 要静默」一眼看全——
+       * 以后 push() 加了新拒绝原因，漏加到这里就会漏回话（用户那边静默失效）。
+       * 这里反过来用「不在集合里才回话」兜底未知原因，避免静默变成丢消息的黑洞。
+       */
+      if (SILENT_REASONS.has(r.reason) || typeof postReply !== 'function') {
+        log(`排队：${chatId.slice(0, 8)} 未入队（${r.reason}），静默不回话`);
+        return;
+      }
+      const text = '这条暂时没排上，请再说一次。';
+      log(`排队：${chatId.slice(0, 8)} 未入队（${r.reason}），回「${text}」`);
       Promise.resolve()
         .then(() => postReply(payload, text, true))
         .catch((e) => log(`排队回话失败：${e?.message ?? e}`));

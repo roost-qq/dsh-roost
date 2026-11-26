@@ -28,7 +28,7 @@
 
 /**
  * @param {object} o
- * @param {number} [o.maxPending]      每个会话最多排几条（0 = 不排队，直接跑）
+ * @param {number} [o.maxPending]      每个会话的软上限：超出只记日志、继续排队（0 = 不记日志）
  * @param {number} [o.minBudgetMs]     出队时剩余预算低于这个就不跑了
  * @param {number} [o.capMs]           单个任务最长多久，超了强放槽位
  * @param {() => number} [o.now]       时钟（测试注入假时钟）
@@ -60,10 +60,10 @@ export function createTurnQueue({
    */
   const val = (v, fallback) => {
     const n = Number(typeof v === 'function' ? v() : v);
-    /**
-     * 不能用 `|| fallback`：`maxPending: 0` 是「关掉排队」的**合法值**，
-     * 会被 `||` 吃成默认 2。只在非有限数时才兜底。
-     */
+      /**
+       * 不能用 `|| fallback`：`maxPending: 0` 是「不记软上限日志」的**合法值**，
+       * 会被 `||` 吃成默认 2。只在非有限数时才兜底。
+       */
     return Number.isFinite(n) ? n : fallback;
   };
 
@@ -172,7 +172,7 @@ export function createTurnQueue({
       const lane = laneOf(chatId);
       const item = { task, deadline, label, chatId, resolve: null };
 
-      /** `maxPending = 0` 表示关掉排队：和以前一样直接跑，不等 */
+      /** 空闲就直接跑，与软上限无关 */
       if (!lane.running) {
         const promise = new Promise((r) => {
           item.resolve = r;
@@ -183,8 +183,15 @@ export function createTurnQueue({
 
       const cap = val(maxPending, 2);
       const budget = val(minBudgetMs, 30_000);
-      if (!Number.isFinite(cap) || cap <= 0) return { accepted: false, reason: 'full' };
-      if (lane.pending.length >= cap) return { accepted: false, reason: 'full' };
+      /**
+       * 软上限（照 AstrBot 会话锁「忙 = 等待」）：超出不再 `full` 拒绝，
+       * 继续入队、只记日志；消息不丢，也不回「上一条还在想」。
+       * `cap <= 0` 表示连日志都不记（无限排队）。
+       * 真正的淘汰靠 `deadline`：出队时预算不够会 `expired` 丢弃。
+       */
+      if (Number.isFinite(cap) && cap > 0 && lane.pending.length >= cap) {
+        log(`排队：${label || chatId} 超出软上限 ${cap}（已排 ${lane.pending.length} 条），仍入队`);
+      }
       if (deadline && deadline - now() < budget) return { accepted: false, reason: 'expired' };
 
       const promise = new Promise((r) => {
