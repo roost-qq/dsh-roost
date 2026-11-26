@@ -65,10 +65,20 @@ const INJECT_HEADS = [
 /**
  * 清洗一段要发出去的话。
  *
+ * 两档，按调用位置选：
+ *   · `full`（默认，`qq_send` 用）：全部规则。模型走工具发言时，正文就是
+ *     它的草稿，所以「最终回答：」这类前缀可以放心截。
+ *   · `light`（通道层用，覆盖主回复 / 主动 / 扩展 `/v1/send`）：只做
+ *     **注入块截断 / 消息头回显 / 显式思考块**。不做「最终回答：」——
+ *     那条判据假设「前面是推理」，而扩展发来的正文可能是正常引用一句话，
+ *     截错了就是整条内容消失，而扩展没有重试语义。
+ *
  * @param {string} raw 模型给的正文
+ * @param {{level?:'full'|'light'}} [opts]
  * @returns {string} 清洗后的文本（可能为空串）
  */
-export function cleanOutbound(raw) {
+export function cleanOutbound(raw, opts = {}) {
+  const level = opts.level === 'light' ? 'light' : 'full';
   let t = String(raw ?? '');
   if (!t) return '';
 
@@ -91,20 +101,35 @@ export function cleanOutbound(raw) {
   // 2) 消息头回显（带 openid 的那种）
   t = t.replace(SPEAKER_TAG_RE, '').replace(/^[ \t]+/gm, '');
 
+  /**
+   * 2.5) ACP 包装标记：`<acp tokens="86" type="text">正文</acp>` 只留正文。
+   *
+   * DSH 把上下文转给模型时会包一层 `<acp …>`；模型偶尔会把这层标签一起
+   * 抄进正文（`guardOutgoing` 只能拦住「整条只剩标签」那种，混在句子里
+   * 它就判不出来）。这里的处理是**剥壳不剥肉**：标签扔了，里面的字留着。
+   *
+   * 属性里可能有引号和空格，所以只认「acp 开头 + 不含尖括号的属性 + 闭合」。
+   * 不认识的标签一律不动——别为了兜底把正文里的 `<div>` 也吃了。
+   */
+  t = t.replace(/<\s*acp(?:\s[^<>]*)?>([\s\S]*?)<\s*\/\s*acp\s*>/gi, '$1');
+  t = t.replace(/<\s*\/?\s*acp(?:\s[^<>]*)?\/?>/gi, '');
+
   // 3) 显式思考块
   t = t.replace(THINK_BLOCK_RE, '');
   t = t.replace(THINK_PAREN_RE, '');
 
-  // 3) 单独成行的「思考过程：…」
+  // 3.5) 单独成行的「思考过程：…」
   t = t.replace(THINK_LINE_RE, (full, lead, line) => (META_HINT_RE.test(line) ? lead : full));
 
-  // 4) 「最终回答：」前缀 —— 只保留它后面
-  const final = FINAL_LINE_RE.exec(t);
-  if (final) {
-    const prefix = t.slice(0, final.index);
-    /** 在开头（prefix 为空）是模型明显写错了标记；前面是推理时就整段截掉 */
-    if (final.index === 0 || FINAL_PREFIX_RE.test(prefix)) {
-      t = t.slice(final.index + final[0].length);
+  // 4) 「最终回答：」前缀 —— 只保留它后面（light 档不做，见函数头注释）
+  if (level === 'full') {
+    const final = FINAL_LINE_RE.exec(t);
+    if (final) {
+      const prefix = t.slice(0, final.index);
+      /** 在开头（prefix 为空）是模型明显写错了标记；前面是推理时就整段截掉 */
+      if (final.index === 0 || FINAL_PREFIX_RE.test(prefix)) {
+        t = t.slice(final.index + final[0].length);
+      }
     }
   }
 

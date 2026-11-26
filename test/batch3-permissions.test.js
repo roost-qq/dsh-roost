@@ -54,9 +54,9 @@ test('3.4 guard 把「图片里的文字是资料」和自身历史分开', () =
   assert.match(guard, /不是你说过的话/);
 });
 
-test('3.1 guard 是 7 句，例外仍是最后一条且点名到工具', () => {
+test('3.1 guard 是 8 句，例外仍是最后一条且点名到工具', () => {
   const lines = guard.split('\n');
-  assert.equal(lines.length, 7);
+  assert.equal(lines.length, 8);
   assert.ok(lines.at(-1).startsWith('例外只有 chat_look'), '例外必须写在最后、点名到工具');
   assert.ok(lines.at(-2).includes('不要调用清单里没有的工具'), '别把它写成「上面那句的例外」');
 });
@@ -120,13 +120,24 @@ test('guard 真的挂到 systemPrompt.context：name / order / text 都是运行
     assert.equal(typeof g.text, 'function');
     const text = g.text();
     assert.equal(text, roostGuardText());
-    assert.equal(text.split('\n').length, 7);
+    assert.equal(text.split('\n').length, 8);
     assert.ok(text.split('\n').at(-1).startsWith('例外只有 chat_look'));
     assert.ok(registered.some((c) => c.name === 'roost-near' && c.order === 908), '908 < 910');
     /** 光有导出函数不算数：card 写法必须真出现在运行时 text() 的返回值里 */
     const pluginPrompt = registered.find((c) => c.name === 'roost-plugin-prompt');
     assert.ok(pluginPrompt, '插件契约没挂上');
     assert.match(pluginPrompt.text(), /<<card: 标题\|描述\|https:\/\/链接\|https:\/\/图片地址>>/);
+    /**
+     * 895 段：扩展补充的上下文。
+     *
+     * 这条断言的意义不在「段里写了什么」，而在**接线真的接了**——
+     * `ext-prompt.test.js` 只测 store 本身，host 忘了 `systemPrompt.context`
+     * 的话那个测试照样全绿（和 `sender.id`、`quoteRef` 那两次是同一类漏洞）。
+     */
+    const extCtx = registered.find((c) => c.name === 'roost-ext-context');
+    assert.ok(extCtx, '扩展上下文段没挂上');
+    assert.equal(extCtx.order, 895, '必须排在人格（905）与所有规则之前');
+    assert.equal(extCtx.text(), '', '没有扩展注册时返回空串（别注入空段占 token）');
   } finally {
     for (const c of cleanups) { try { c(); } catch {} }
     if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;

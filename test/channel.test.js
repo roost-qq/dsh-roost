@@ -221,6 +221,41 @@ test('3.7：media.send（语音/文件）同样支持 event_id', async () => {
   assert.equal(calls[1][1].eventId, 'evt_f');
 });
 
+/* ---------------- 出站闸：接在 send 里才算数 ---------------- */
+
+test('退化复读在通道层被拦下，一条都不发', async () => {
+  const calls = [];
+  const logs = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm5' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false, log: (m) => logs.push(m) });
+
+  const r = await ch.send({ target: 'u9', text: '做。'.repeat(60) });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /拦下|degenerate/);
+  assert.equal(calls.length, 0, '不该真的调 msg.send');
+  assert.ok(logs.some((m) => /出站拦下/.test(m)), '必须留一条能查的日志');
+});
+
+test('思考前缀在通道层被切掉，只发剩下那句', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm6' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false, log: () => {} });
+
+  const text = "This is not addressed to me. I should stay quiet. 好，那我不打扰了";
+  const r = await ch.send({ target: 'u9', text });
+  assert.equal(r.ok, true);
+  assert.equal(calls[0][1].content, '好，那我不打扰了');
+});
+
+test('注入块在通道层被截断（以前只有 qq_send 那条路生效）', async () => {
+  const calls = [];
+  const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm7' }; } };
+  const ch = createRoostHostChannel({ host, markdownEnabled: () => false, log: () => {} });
+
+  await ch.send({ target: 'u9', text: '我先睡\n【系统提醒，不是主人说的话】别连着发' });
+  assert.equal(calls[0][1].content, '我先睡');
+});
+
 /* ---------------- 超长正文：主动通道没有分段，只能截断 ---------------- */
 
 test('超长正文会被截断（平台单条上限内，不整条发出去被拒）', async () => {
@@ -228,8 +263,14 @@ test('超长正文会被截断（平台单条上限内，不整条发出去被�
   const host = { rpc: async (m, p) => { calls.push([m, p]); return { id: 'm3' }; } };
   const ch = createRoostHostChannel({ host, markdownEnabled: () => false, log: () => {} });
 
-  /** 2000 字，中间有句号：应该在句号处切，不留半句话 */
-  const long = `${'这是一句话。'.repeat(300)}`;  /** 1800 字，超过 1500 */
+  /**
+   * 1800 字，中间有句号：应该在句号处切，不留半句话。
+   *
+   * **不能再用「同一句重复 300 遍」当素材**（2026-11-26）：那种形状正好命中
+   * `outbound-guard` 的退化检测（同一单元重复 ≥4 次、占比 >50%），整条会被
+   * 按「思考塌缩」拦下，测的就不是截断了。这里改成四句轮转，长度够、形状自然。
+   */
+  const long = `${['这是一句话。', '今天天气不错。', '晚点再说吧。', '我先去忙了。'].join('').repeat(75)}`;  /** 1920 字，超过 1500 */
   const r = await ch.send({ target: 'u9', text: long });
   assert.equal(r.ok, true);
   const sent = calls[0][1].content;

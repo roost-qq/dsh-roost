@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createJournalBridge } from '../src/journal-bridge.js';
+import { createJournalBridge, cleanBotText } from '../src/journal-bridge.js';
 
 function rig({ off = false, throwOnAdd = false } = {}) {
   const added = [];
@@ -144,4 +144,38 @@ test('E6 按人关：memoryOff 收到 sender.id，被关的人说的话不记', 
 test('E6 主人豁免：主人被误配进 noUsers 也不停记（源码断言）', () => {
   const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
   assert.match(host, /sid !== String\(ownerId\(\)/, 'noUsers 判定要排除主人');
+});
+
+test('控制标记不进日记：<skip> / <<skip>> 剥完只剩空，add 直接不写', () => {
+  for (const mark of ['<skip>', '<<skip>>', '<SKIP>', '<<retract>>', '<<quote: 2>>', '<<pick: 好|1>>', '<<file: a.pdf>>']) {
+    assert.equal(cleanBotText(mark).trim(), '', `${mark} 应被整个剥掉`);
+  }
+  const { bridge, added } = rig();
+  bridge.add({ id: 'm1' }, { chatId: 'c1' }, '<skip>', 'bot');
+  bridge.add({ id: 'm2' }, { chatId: 'c1' }, '<<skip>>', 'bot');
+  assert.equal(added.length, 0, '纯 skip 的 bot 行一个字都不写——QQ 侧也没发过');
+});
+
+test('混写时只剥标记、留正文；<voice>文本</voice> 留文本并记语音', () => {
+  assert.equal(cleanBotText('在吗<skip>').trim(), '在吗');
+  assert.equal(cleanBotText('<<skip>>好的').trim(), '好的');
+  assert.equal(cleanBotText('<voice>要念这句</voice>').trim(), '要念这句\n（发了语音）');
+  const { bridge, added } = rig();
+  bridge.add({ id: 'm3' }, { chatId: 'c1' }, '你好 <skip>', 'bot');
+  assert.equal(added.length, 1);
+  assert.equal(added[0].text, '你好');
+  assert.ok(!added[0].text.includes('skip'), '日记里不能留 skip 字面量');
+});
+
+test('半截控制标记也摘掉，后面的正文保留', () => {
+  assert.equal(cleanBotText('你好<<skip 断了').trim(), '你好');
+  assert.equal(cleanBotText('你好<skip').trim(), '你好<skip', '单尖括号半截不是已知控制标记，留原文');
+});
+
+test('主回复轮教了沉默出口：<<skip>> 与「不写成想法」都在 PERSONA_BASE（源码断言）', () => {
+  const host = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  const base = host.match(/const PERSONA_BASE = \[([\s\S]*?)\]\.join\('\\n'\)/)?.[1] || '';
+  assert.ok(base, 'PERSONA_BASE 应该在 host.js 里');
+  assert.match(base, /只输出 <<skip>>/, '「不接 / 停住 / 当成不是」要明确给 <<skip>> 出口');
+  assert.match(base, /不要把「我不太想回」/, '别让模型把沉默的判断写成话发出来');
 });

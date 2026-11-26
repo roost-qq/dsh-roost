@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { createInboundServer } from '../src/server.js';
+import { createExtPromptContexts } from '../src/ext-prompt.js';
 import {
   createApiV1, V1_ROUTES, V1_SCOPES, isRouteImplemented, isRouteDesignedOff,
 } from '../src/api-v1.js';
@@ -51,6 +52,8 @@ test('全部端点：已实现的不是 501，未实现/不开放的才是 501',
   // 全套假依赖：这条测试验的是「接线 + 鉴权 + 状态码」，不是宿主内部逻辑。
   const hooks = createExtApiHooks({
     cfgOf: () => ({ speakUp: { enabled: false, chatId: 'u1' } }),
+    /** `prompt.context` 要一个真 store，否则探针会拿到 501（那是「没接线」的信号） */
+    promptContextsOf: () => createExtPromptContexts({ log: () => {} }),
     moodOf: () => ({ valence: 0, energy: 0.5 }),
     moodTextOf: () => '平静',
     memoryOf: () => ({

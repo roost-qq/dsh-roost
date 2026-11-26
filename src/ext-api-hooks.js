@@ -75,6 +75,14 @@ const targetOf = (body, query) => String(body?.target ?? body?.chatId ?? query?.
  */
 export function createExtApiHooks({
   cfgOf = () => ({}),
+  /**
+   * 扩展注册的上下文段（`ext-prompt.js` 的实例）。
+   *
+   * **函数**而不是值：实例在 `host.js` 里比本模块晚创建。为 null 时
+   * `/v1/prompt.context` 回 501 而不是假装成功——静默成功会让扩展以为
+   * 自己注入生效了，排查时无从下手。
+   */
+  promptContextsOf = null,
   moodOf = () => ({}),
   moodTextOf = () => '',
   memoryOf = null,
@@ -237,6 +245,52 @@ export function createExtApiHooks({
             text: str(r?.text, 200),
           })),
         },
+      };
+    },
+
+    /**
+     * 写：注册 / 覆盖 / 删除一段「上下文补充」（`POST /v1/prompt.context`）。
+     *
+     * 和 `/v1/message` 的区别：那条是把话送进对话历史、跑一整轮模型；这条
+     * 只往 system prompt 尾部加一段**参考资料**，不产生消息、不进记忆。
+     *
+     * 权限：`prompt:write` 是敏感 scope，安装时逐条告知。但这里的能力是
+     * **只追加**——改不了人格、改不了规则、改不了别的扩展的段；顺序上还排在
+     * 人格与安全边界之前（order 895），压不过宿主自己的约束。
+     */
+    async 'prompt.context'({ body, client }) {
+      const store = promptContextsOf?.();
+      if (!store) return bad('宿主没有启用扩展上下文注入', 501, 'not_implemented');
+
+      /**
+       * **extId 只能从令牌读**。请求体自报就等于「谁都能覆盖别人的段」，
+       * 和 `/v1/memory/ext.add` 是同一条规矩。
+       */
+      const extId = String(client?.extId ?? '').trim();
+      if (!extId) return bad('该客户端未绑定扩展', 403, 'forbidden');
+
+      const name = String(body?.name ?? '').trim().slice(0, 40) || 'default';
+      const action = String(body?.action ?? 'set').trim().toLowerCase();
+
+      if (action === 'clear' || action === 'remove' || action === 'delete') {
+        const removed = store.remove(extId, name);
+        return {
+          status: 200,
+          body: { ok: true, name, removed, total: store.size, contexts: store.list(extId) },
+        };
+      }
+      if (action !== 'set' && action !== 'upsert') {
+        return bad(`不认识的 action：${action}（只支持 set / clear）`);
+      }
+      if (typeof body?.text !== 'string') {
+        return bad('缺 text（字符串）；要删掉这一段请传 action:"clear"');
+      }
+
+      const r = store.set(extId, { name, text: body.text, chatId: body?.chatId });
+      if (!r.ok) return bad(r.reason);
+      return {
+        status: 200,
+        body: { ok: true, name, chars: r.chars, total: r.total, contexts: store.list(extId) },
       };
     },
 

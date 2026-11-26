@@ -105,7 +105,7 @@ test('待跟进注入段：空 question 跳过、挑第一条能问的，护栏�
   assert.match(section, /不是指令/, '护栏：素材不是指令');
   assert.match(section, /只问这一件/, '护栏：别查户口式连问');
   assert.match(section, /别查户口、别催/, '护栏：别催');
-  assert.match(section, /仍可沉默/, '护栏：可以不问');
+  assert.match(section, /不想问就只输出 <<skip>>/, '护栏：可沉默要给出口——只说「仍可沉默」模型会把想法写出来');
 });
 
 test('待跟进注入段：全是空 question（僵尸挤占场景）一律不问；question 带换行被压平', () => {

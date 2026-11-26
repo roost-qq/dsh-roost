@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createExtApiHooks } from '../src/ext-api-hooks.js';
+import { createExtPromptContexts } from '../src/ext-prompt.js';
 import { postReply } from '../src/server.js';
 import { renderInbound } from '../src/inbound.js';
 
@@ -59,6 +60,8 @@ function rig(over = {}) {
     setupOf: () => ({ roostOwner: () => 'u1', ownersConfigured: true }),
     /** 只在测 roost.* 时给（见文件末尾那两条） */
     roostOf: over.roostOf,
+    /** 只在测 prompt.context 时给 */
+    promptContextsOf: over.promptContextsOf,
   });
   return { hooks, calls, memory };
 }
@@ -476,4 +479,41 @@ test('proactive.status 在 canFire 为真时回 canFire=true，仍不发送', as
   assert.equal(r.body.canFire, true);
   assert.equal(r.body.why, '');
   assert.equal(calls.fire, 0);
+});
+
+// ---------------------------------------------------------------- prompt.context
+
+test('prompt.context：宿主没启用回 501，令牌没绑扩展回 403', async () => {
+  const none = rig();
+  assert.equal((await none.hooks['prompt.context']({ body: { text: 'x' }, client: { extId: 'e1' } })).status, 501);
+
+  const { hooks } = rig({ promptContextsOf: () => createExtPromptContexts({ log: () => {} }) });
+  assert.equal((await hooks['prompt.context']({ body: { text: 'x' }, client: {} })).status, 403);
+});
+
+test('prompt.context：注册后下一轮注入，clear 后立刻没有', async () => {
+  const store = createExtPromptContexts({ log: () => {} });
+  const { hooks } = rig({ promptContextsOf: () => store });
+  const client = { extId: 'ext-demo' };
+
+  const r = await hooks['prompt.context']({ body: { name: 'bili', text: '这个群最近在聊版本更新' }, client });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.chars, 11);
+  assert.match(store.render('g1'), /这个群最近在聊版本更新/);
+
+  const c = await hooks['prompt.context']({ body: { name: 'bili', action: 'clear' }, client });
+  assert.equal(c.status, 200);
+  assert.equal(c.body.removed, true);
+  assert.equal(store.render('g1'), '');
+});
+
+test('prompt.context：缺 text 回 400（不静默当删除），超预算也回 400', async () => {
+  const store = createExtPromptContexts({ log: () => {} });
+  const { hooks } = rig({ promptContextsOf: () => store });
+  const client = { extId: 'ext-demo' };
+
+  assert.equal((await hooks['prompt.context']({ body: {}, client })).status, 400);
+  const big = await hooks['prompt.context']({ body: { text: 'a'.repeat(5000) }, client });
+  assert.equal(big.status, 400);
+  assert.match(big.body.message, /最多/);
 });

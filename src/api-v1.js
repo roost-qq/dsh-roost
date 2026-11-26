@@ -178,6 +178,18 @@ export const V1_ROUTES = {
   'POST /v1/session.ensure': { scope: 'session:write', hook: 'session.ensure' },
   'POST /v1/session.configure': { scope: 'prompt:write', hook: 'session.configure' },
   /**
+   * 往 system prompt 尾部加一段**参考资料**（扩展自己的上下文）。
+   *
+   * 和 `/v1/message` 的区别：那条进对话历史、跑一轮模型；这条只加一段背景，
+   * 不产生消息、不进记忆。
+   *
+   * 为什么不复用 `session:write`：`session.configure` 是「这个会话用谁」，
+   * 这条是「这一轮多知道点什么」。能力上更接近 `prompt:write`（改她看到的东西），
+   * 而且**只追加、改不了人格与规则**，顺序还排在人格之前（order 895）。
+   * 装机分级会按 `prompt:write` 单独让主人确认。
+   */
+  'POST /v1/prompt.context': { scope: 'prompt:write', hook: 'prompt.context' },
+  /**
    * 人格库：列 / 读 / 改 / 建 / 删。
    *
    * 为什么要有这五条：面板那边 `/personas*` 有二十来条路由，扩展一条都调不到。
@@ -235,6 +247,7 @@ export const V1_IMPLEMENTED_HOOKS = Object.freeze([
   'message', 'send', 'say', 'state', 'mood', 'context',
   'memory.read', 'memory.write', 'proactive', 'proactive.submit', 'proactive.status', 'session.ensure',
   'session.configure',
+  'prompt.context',
   'memory.facts', 'memory.edit', 'journal.read', 'usage.read', 'self.read', 'stickers.list',
   'stickers.file', 'self.propose', 'group.info', 'group.mute', 'group.kick', 'tts.speak',
   'personas.list', 'personas.read', 'personas.save', 'personas.create', 'personas.remove',
