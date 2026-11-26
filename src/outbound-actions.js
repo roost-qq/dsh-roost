@@ -344,9 +344,18 @@ export function parseOutboundActions(raw, opts = {}) {
   let out = String(raw ?? '');
   const resolveImage = typeof opts?.resolveImage === 'function' ? opts.resolveImage : null;
 
-  /** `<skip>` 先摘：它影响「这条要不要发」，不是动作 */
-  const wantSkip = /<skip>/i.test(out);
-  if (wantSkip) out = out.replace(/<skip>/gi, '');
+  /**
+   * skip 先摘：它影响「这条要不要发」，不是动作。
+   *
+   * 单/双尖括号都要整体摘。双尖括号来自 ai-chat 转发给宿主的 system 契约
+   * （`<<skip>>`）以及全部主动轮提示词——旧正则 `/<skip>/gi` 只匹配到中间
+   * 那段，`<<skip>>` 会残留 `<>`，而 `skipOnly = wantSkip && !body.trim()`
+   * 看见非空正文就照发，于是群里冒出一条光秃秃的 `<>`。
+   */
+  const SKIP_RE = /<{1,2}\s*skip\s*>{1,2}/gi;
+  const skipped = out.replace(SKIP_RE, '');
+  const wantSkip = skipped !== out;
+  out = skipped;
 
   /**
    * 语音标记混写时只保留「要念的文字」：

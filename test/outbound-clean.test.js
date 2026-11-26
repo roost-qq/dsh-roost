@@ -70,3 +70,13 @@ test('消息头回显：带 openid 的 `[昵称 (id)]` 不能发出去', () => {
   const keep = '（这个括号里有短 id 不算）正常一句';
   assert.equal(cleanOutbound(keep), keep);
 });
+
+test('ACP 包装标记：剥壳留肉，不认识的标签不动', () => {
+  /** DSH 转发上下文时的包装层，模型偶尔会连标签一起抄进正文 */
+  assert.equal(cleanOutbound('<acp tokens="86" type="text">你好呀</acp>'), '你好呀');
+  assert.equal(cleanOutbound('先说一句\n<acp tokens="86">后面这句</acp>'), '先说一句\n后面这句');
+  /** 没有配对的残标签也要清掉，但正文不能动 */
+  assert.equal(cleanOutbound('前</acp>后'), '前后');
+  /** 其它标签不是我们的协议，原样保留（别把正文里的 HTML 吃掉） */
+  assert.equal(cleanOutbound('用 <div> 包一下'), '用 <div> 包一下');
+});

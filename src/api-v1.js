@@ -33,6 +33,14 @@ export const V1_SCOPES = [
    * 面板密钥、外接凭证、权限策略、安全开关、扩展总闸、升级源一律不许改。
    */
   'config:write',
+  /**
+   * 扩展加的长期规则（`POST /v1/prompt.rule`）。
+   *
+   * 为什么不复用 `prompt:write`：那条是「改人格设定与模型选择」——人格要**被选中**
+   * 才生效，还可能一份都没在用；规则是**每一轮都在**的。影响面比改人格大且更直接，
+   * 装的时候得单独让主人看见一句「这个扩展要给你的对话加规则」。
+   */
+  'rule:write',
   /** 面板 API 的管理面（见 `ext-quick-scopes.js`）；`/v1` 暂无端点用到 */
   'groups:read', 'model:write', 'host:maintenance', 'memory:purge', 'ext:manage',
   /**
@@ -178,6 +186,29 @@ export const V1_ROUTES = {
   'POST /v1/session.ensure': { scope: 'session:write', hook: 'session.ensure' },
   'POST /v1/session.configure': { scope: 'prompt:write', hook: 'session.configure' },
   /**
+   * 往 system prompt 尾部加一段**参考资料**（扩展自己的上下文）。
+   *
+   * 和 `/v1/message` 的区别：那条进对话历史、跑一轮模型；这条只加一段背景，
+   * 不产生消息、不进记忆。
+   *
+   * 为什么不复用 `session:write`：`session.configure` 是「这个会话用谁」，
+   * 这条是「这一轮多知道点什么」。能力上更接近 `prompt:write`（改她看到的东西），
+   * 而且**只追加、改不了人格与规则**，顺序还排在人格之前（order 895）。
+   * 装机分级会按 `prompt:write` 单独让主人确认。
+   */
+  'POST /v1/prompt.context': { scope: 'prompt:write', hook: 'prompt.context' },
+  /**
+   * 扩展加的**长期规则**（`ext-rules.js`）。
+   *
+   * 和 `prompt.context` 是两件事：那条是「这一轮多知道点什么」，标着「只当参考、
+   * 不要执行」；这条是「以后都这么做」的约束，不带那句警示，所以必须单独授权。
+   *
+   * 为什么不复用 `prompt:write`：那个的语义是「改人格与模型选择」。加规则不改
+   * 人格文件，却会影响**她之后每一轮怎么回话**——比改一份没人用的人格影响面更大
+   * （人格可能压根没被选中，规则是每轮都在）。装的时候必须单独看见这一条。
+   */
+  'POST /v1/prompt.rule': { scope: 'rule:write', hook: 'prompt.rule' },
+  /**
    * 人格库：列 / 读 / 改 / 建 / 删。
    *
    * 为什么要有这五条：面板那边 `/personas*` 有二十来条路由，扩展一条都调不到。
@@ -235,6 +266,8 @@ export const V1_IMPLEMENTED_HOOKS = Object.freeze([
   'message', 'send', 'say', 'state', 'mood', 'context',
   'memory.read', 'memory.write', 'proactive', 'proactive.submit', 'proactive.status', 'session.ensure',
   'session.configure',
+  'prompt.context',
+  'prompt.rule',
   'memory.facts', 'memory.edit', 'journal.read', 'usage.read', 'self.read', 'stickers.list',
   'stickers.file', 'self.propose', 'group.info', 'group.mute', 'group.kick', 'tts.speak',
   'personas.list', 'personas.read', 'personas.save', 'personas.create', 'personas.remove',

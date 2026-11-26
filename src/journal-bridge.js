@@ -65,8 +65,15 @@ export function isPoliteRevocation(text) {
  * （单独一条）。它们都是标记、要摘，摘完补一条「发了图片」的占位。
  */
 const RE_ACTION = /<<\s*(image-alone|image|card|voice|say|button|silence|remember)\s*(?::|：)\s*((?:(?!<<)[\s\S])*?)>>/gi;
-/** 兜底只认已知动作名，避免 `a << b >> c` 这类正文被误伤 */
-const RE_ANY_MARK = /<<\s*(?:image|card|voice|say|button|silence|remember|forget|mood)\s*(?::|：)?(?:(?!<<)[\s\S])*?>>/gi;
+/**
+ * 兜底只认已知动作名，避免 `a << b >> c` 这类正文被误伤。
+ *
+ * 2026-11-26 补 skip / retract / quote / pick / file：它们和 image 一样是
+ * **控制标记**，不是「她说过的话」。以前这张表只列了带内容的动作，
+ * `<skip>`（单尖括号）和 `<<skip>>` 都漏网，真机表现为【刚才说到】里冒出
+ * `· 你：<skip>`——QQ 侧从没发过这条，却留在日记里被当成既定事实。
+ */
+const RE_ANY_MARK = /<<\s*(?:image|card|voice|say|button|silence|remember|forget|mood|skip|retract|quote|pick|file)\s*(?::|：)?(?:(?!<<)[\s\S])*?>>/gi;
 /**
  * 半截标记只摘到**第一个句末标点或换行**为止。
  *
@@ -74,7 +81,10 @@ const RE_ANY_MARK = /<<\s*(?:image|card|voice|say|button|silence|remember|forget
  * （「你好<<say: 断了，后面还有正常正文」→「你好」）。宁可留个逗号，
  * 也不能把她说过的话静默删掉。同样不许跨过下一个 `<<`。
  */
-const RE_UNCLOSED = /<<\s*(?:image|card|voice|say|button|silence|remember|forget|mood)\s*(?::|：)?(?:(?!<<)[^，。！？\n])*/gi;
+const RE_UNCLOSED = /<<\s*(?:image|card|voice|say|button|silence|remember|forget|mood|skip|retract|quote|pick|file)\s*(?::|：)?(?:(?!<<)[^，。！？\n])*/gi;
+/** 单尖括号控制标记：`<skip>` 只摘标记本身；`<voice>文本</voice>` 留要念的内容 */
+const RE_SINGLE_SKIP = /<skip>/gi;
+const RE_SINGLE_VOICE = /<voice>([\s\S]*?)<\/voice>/gi;
 
 /**
  * 引用文本（L1 的输入）。
@@ -179,6 +189,9 @@ export function cleanBotText(text) {
       return '';
     });
     out = out.replace(RE_ANY_MARK, '');
+    /** 单尖括号：`<voice>文本</voice>` 留要念的内容并记一次语音；`<skip>` 整段摘掉 */
+    out = out.replace(RE_SINGLE_VOICE, (_full, v) => { voices += 1; return String(v ?? ''); });
+    out = out.replace(RE_SINGLE_SKIP, '');
     if (out === before) break;
   }
   /** 半截标记：只摘标记本身，后面的正文留着 */

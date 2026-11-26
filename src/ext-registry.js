@@ -55,7 +55,7 @@ export const EXT_DEFAULT_SCOPES = Object.freeze(['memory:write', 'state:read']);
 export const EXT_ALLOWED_SCOPES = Object.freeze([
   'message:write', 'say:write', 'state:read', 'context:read',
   'memory:read', 'memory:write', 'proactive:write', 'session:write',
-  'prompt:write', 'config:write', 'group:write', 'agent:write', 'core:write',
+  'prompt:write', 'config:write', 'group:write', 'agent:write', 'core:write', 'rule:write',
   /**
    * 下面五个覆盖**面板 API（`/quick`）里的管理面**（2026-11-21）。
    *
@@ -69,7 +69,7 @@ export const EXT_ALLOWED_SCOPES = Object.freeze([
 /** 会对外产生可见动作（说话 / 刷屏 / 改人格 / 开会话 / 改配置 / 管群）的 scope，安装时必须主人点头。 */
 export const EXT_SENSITIVE_SCOPES = Object.freeze([
   'message:write', 'say:write', 'proactive:write', 'session:write', 'prompt:write', 'agent:write',
-  'config:write', 'group:write', 'core:write',
+  'config:write', 'group:write', 'core:write', 'rule:write',
   /** 新增的五个都是敏感项：安装时逐条列出、二次确认 */
   'groups:read', 'model:write', 'host:maintenance', 'memory:purge', 'ext:manage',
 ]);
@@ -915,5 +915,28 @@ export function createExtSecrets({ dir = dataDir(), log = () => {} } = {}) {
       const cur = store?.get?.(`ext:${id}`)?.scopes;
       return { regenerated: true, ...issue(id, store, { scopes: cur }) };
     },
+  };
+}
+
+/**
+ * 「这个扩展现在还算数吗」——给需要**每轮现问**的模块用（提示词注入）。
+ *
+ * 判据与 `verify()` 一致：记录存在且 `enabled !== false`。记录不存在也算不算数
+ * ——吊销、卸载、从没发过令牌，三种情况对注入来说都一样：**不知道是谁塞进来的
+ * 规则，比没有这条规则更糟**。
+ *
+ * 为什么不缓存：`verify()` 本来就是每次重读 `api-clients.json`（吊销立刻生效，
+ * 无 stale），注入这边跟着重读才是一致的。文件是几百字节的 JSON，一轮一次
+ * 同步读远不是瓶颈；缓存反而会做出「面板说停了、她还在讲那件事」。
+ *
+ * @param {{get?:(id:string)=>object|null}} clientStore
+ * @returns {(extId:string)=>boolean}
+ */
+export function extEnabledOf(clientStore) {
+  return (extId) => {
+    const id = String(extId ?? '').trim();
+    if (!id) return false;
+    const rec = clientStore?.get?.(`ext:${id}`);
+    return Boolean(rec) && rec.enabled !== false;
   };
 }

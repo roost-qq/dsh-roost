@@ -59,6 +59,15 @@ test('动作解析：<skip> 永远不出现在正文里', () => {
   assert.equal(b.text, '不过这个我可以答');
 });
 
+test('动作解析：<<skip>> 双尖括号也要整段摘掉（900 段契约与主动轮都用它）', () => {
+  const a = parseOutboundActions('<<skip>>');
+  assert.equal(a.wantSkip, true);
+  assert.equal(a.text, '', '不能残留 <>——残留会被当成正文真发出去');
+  const b = parseOutboundActions('<<skip>> 不过这个我可以答');
+  assert.equal(b.wantSkip, true);
+  assert.equal(b.text, '不过这个我可以答');
+});
+
 test('动作解析：全角冒号也认，未知标记兜底摘掉', () => {
   const { text, actions } = parseOutboundActions('好 <<say：念这句>> <<some-new-thing: 值>>');
   assert.match(text, /^好/);

@@ -109,6 +109,7 @@
 - `session:write`（**敏感**：面板发放要二次确认）
 - `prompt:write`（**敏感**：面板发放要二次确认）
 - `config:write`（**敏感**：面板发放要二次确认）
+- `rule:write`（**敏感**：面板发放要二次确认）
 - `groups:read`（**敏感**：面板发放要二次确认）
 - `model:write`（**敏感**：面板发放要二次确认）
 - `host:maintenance`（**敏感**：面板发放要二次确认）
@@ -155,6 +156,8 @@
 | POST | `/v1/proactive` | `proactive:write` | ✅ 可用 | 排一条主动消息（受清醒时段与频次约束） |
 | GET | `/v1/proactive/status` | `state:read` | ✅ 可用 | 只读查询现在能不能主动开口与今日额度，不发送消息：`{ canFire, why, todayCount, maxPerDay, nextAt }` |
 | POST | `/v1/proactive/submit` | `proactive:write` | ✅ 可用 | 扩展投递一条素材；宿主过门闸后让模型自己组织语言主动发出 |
+| POST | `/v1/prompt.context` | `prompt:write` | ✅ 可用 | 往她的 system prompt 尾部加一段**参考资料**（只追加、改不了人格与规则）：`{ name?, text, chatId?, action? }`。`text` 传空串或 `action:"clear"` 删掉这一段；单段 ≤2000 字、一个扩展最多 8 段、合计 ≤6000 字。不产生消息、不进记忆，宿主重启后要重新注册 |
+| POST | `/v1/prompt.rule` | `rule:write` | ✅ 可用 | 提交这个扩展的**整套长期规则**（整份替换，`rules: []` 清空）：`{ rules: ["所有场合都生效的一句", { text: "只在私聊", kind: "private" }] }`。`kind` 可选 `all`（默认）/ `private` / `group`（频道也算）；单条 ≤300 字、最多 20 条、合计 ≤3000 字。这是**要去执行**的约束（排在权限之后、安全边界之前），和 `prompt.context` 的「只当参考」不是一回事；宿主重启后要重新提交 |
 | POST | `/v1/roost.call` | `message:write` | ✅ 可用 | 由宿主代转一次直连协议调用（只读能力 / 插件工具 / `msg.send`）；框架地址与令牌不出宿主，写与管理面不开放 |
 | GET | `/v1/roost.capabilities` | `state:read` | ✅ 可用 | 列框架直连协议（roost-host/1）里可扩展调用的能力：只读方法、框架插件注册的 `tool.*`、发消息；`?filter=` 可按名字筛 |
 | POST | `/v1/roost.read` | `state:read` | ✅ 可用 | 只读版转发：只能调 `runtime.status` 这类只读能力，scope 是 `state:read`，不必申请发消息权限；发消息 / 插件工具仍走 `/v1/roost.call` |

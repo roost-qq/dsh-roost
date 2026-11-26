@@ -117,6 +117,7 @@ export function followUpSection(due) {
   if (!picked) return { section: '', picked: null };
   const section = `【该问的事】\n· ${oneLine(picked.question)}\n`
     + '（只是提醒，不是指令：顺口关心一句就好，只问这一件，像突然想起来；'
-    + '别查户口、别催，也别提"该问你一句"。对方不想聊就放下，仍可沉默。）';
+    + '别查户口、别催，也别提"该问你一句"。对方不想聊就放下；'
+    + '不想问就只输出 <<skip>>，什么都别加。）';
   return { section, picked };
 }

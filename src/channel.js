@@ -33,6 +33,18 @@
  * 对方用什么设备看，发出去就是"要么空气、要么乱码"，索性整个不做。
  */
 import { stripFaceMarks } from './face-table.js';
+/**
+ * 出站两道清洗，都放在 `send()` 里——它是四条出站路唯一的汇合点
+ * （主动消息 / 主回复 / `qq_send` / 扩展 `/v1/send` 全经过）。
+ *
+ * 分工：
+ *   · `guardOutgoing` 判「这条该不该发」：思考前缀、退化复读、协议残渣、草稿标记；
+ *   · `cleanOutbound({level:'light'})` 剥「不该出现在正文里的东西」：
+ *     注入块、消息头回显、显式思考块。
+ * 两道都是纯函数、幂等，重复跑不会越删越多。
+ */
+import { guardOutgoing } from './outbound-guard.js';
+import { cleanOutbound } from './outbound-clean.js';
 
 /** 框架协议认可的四种会话类型（与 bot/src/host/dispatch.js 的 CHAT_KINDS 一致） */
 const SEND_KINDS = new Set(['group', 'c2c', 'guild', 'dm']);
@@ -275,6 +287,28 @@ export function createRoostHostChannel({
     } = {}) {
       const raw = String(text ?? '').trim();
       /**
+       * **出站污染闸**（2026-11-26）。
+       *
+       * 放在这里而不是 `outActions` 里：主动消息（`sendOut`）和扩展 `/v1/send`
+       * **不经过动作层**，只有 `send()` 四条路全盖。判定逻辑与来源见
+       * `outbound-guard.js` 头注释（移植自 aurabot，两处有意偏离）。
+       *
+       * 拦下时的处置是**当空文本**，交给下面既有的「没有内容可发」分支：
+       * 返回 `ok:false`，主回复据此不写日记、主动轮据此记失败。不自造新的
+       * 返回形状，免得每个调用方都要多学一种失败。
+       */
+      const guard = guardOutgoing(raw);
+      if (!guard.ok && guard.reason !== 'empty') {
+        log(`出站拦下（${guard.reason}）：${raw.replace(/\s+/g, ' ').slice(0, 40)}`);
+      }
+      /**
+       * 注入块 / 消息头回显 / 显式思考块，四条出站路统一剥一遍。
+       *
+       * 以前只在 `qq_send` 那条跑（`cleanOutbound` 的 full 档），主回复和扩展
+       * 直发都漏。这里用 `light` 档：不做「最终回答：」截断，理由见函数头。
+       */
+      const body = cleanOutbound(guard.ok ? guard.text : '', { level: 'light' }).trim();
+      /**
        * 单条正文上限。
        *
        * 框架对**被动回复**有 1500 字分段（`message.js` 的 `MAX_CHUNK`），但
@@ -284,7 +318,7 @@ export function createRoostHostChannel({
        * 这里选择**截断而不是分段**：主动消息本来就该短，分三条连发比截断更吵。
        * 切点尽量落在句子/段落边界，别把一句话砍成两半。
        */
-      const clamped = clampOutbound(raw);
+      const clamped = clampOutbound(body);
       /**
        * 表情标记一律删掉（`【表情: 呲牙】` → 空串）。
        *
@@ -319,7 +353,14 @@ export function createRoostHostChannel({
        * 「我要安静，没什么要说的」。不该拦，也不该发一条空消息。
        * 卡片同理：它自带标题和描述，正文本来就是空的。
        */
-      if (!t && !hasCard && !(Number(silenceMs) > 0)) return { ok: false, message: '没有内容可发' };
+      if (!t && !hasCard && !(Number(silenceMs) > 0)) {
+        /**
+         * 拦下和「本来就没话」要分得开：都返回 `ok:false`，但 message 里
+         * 带上闸的原因，日志里一眼能看出是模型吐了脏东西还是这一轮真的空。
+         */
+        const why = !guard.ok && guard.reason !== 'empty' ? `出站内容被拦下（${guard.reason}）` : '没有内容可发';
+        return { ok: false, message: why };
+      }
       if (scene === 'group' && !hasGroupAuthz) {
         return { ok: false, message: '这个群没有 group_push 授权，主动消息发不出去' };
       }

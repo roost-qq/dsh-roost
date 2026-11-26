@@ -25,6 +25,7 @@ import {
   createExtRegistry,
   createClientStore,
   createExtSecrets,
+  extEnabledOf,
   extensionsDir,
   secretsDir,
   MANIFEST_SHA_FILE,
@@ -493,4 +494,36 @@ test('remove：卸载后指纹记录要清掉，别留给下次装的同名扩�
 
   assert.equal(reg.remove('bili').ok, true);
   assert.equal(reg.manifestStateOf('bili').known, false, '记录要跟着走');
+});
+
+/**
+ * `extEnabledOf`：提示词注入每轮现问「这个扩展还算数吗」。
+ *
+ * 停用语义错一次的代价是**静默的**——面板说停了，她还带着那套规则说话。
+ * 所以四种输入都钉住，尤其「记录不存在」：吊销 / 卸载 / 从没发过令牌
+ * 对注入来说是同一件事，不能因为「查不到」就默认放行。
+ */
+test('extEnabledOf：停用 / 吊销 / 未知一律不算数，重新启用才回来', (t) => {
+  const { home } = staged(t, 'bili');
+  const store = createClientStore({ dir: home });
+  const secrets = createExtSecrets({ dir: home });
+  const enabled = extEnabledOf(store);
+
+  assert.equal(enabled('bili'), false, '没发过令牌 = 不知道是谁，不能算数');
+
+  const issued = secrets.issue('bili', store);
+  assert.equal(enabled('bili'), true, '正常安装并签发后生效');
+
+  store.add({ ...issued.client, enabled: false });
+  assert.equal(enabled('bili'), false, '面板停用要立刻不生效');
+
+  store.add({ ...issued.client, enabled: true });
+  assert.equal(enabled('bili'), true, '重新启用立刻回来，不用重启');
+
+  store.revoke('ext:bili');
+  assert.equal(enabled('bili'), false, '吊销/卸载后不能再注入');
+
+  assert.equal(enabled(''), false);
+  assert.equal(enabled(null), false);
+  assert.equal(extEnabledOf(null)('bili'), false, '没有 store 时保守回 false');
 });

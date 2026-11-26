@@ -17,6 +17,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createExtApiHooks } from '../src/ext-api-hooks.js';
+import { createExtPromptContexts } from '../src/ext-prompt.js';
+import { createExtRules } from '../src/ext-rules.js';
 import { postReply } from '../src/server.js';
 import { renderInbound } from '../src/inbound.js';
 
@@ -59,6 +61,10 @@ function rig(over = {}) {
     setupOf: () => ({ roostOwner: () => 'u1', ownersConfigured: true }),
     /** 只在测 roost.* 时给（见文件末尾那两条） */
     roostOf: over.roostOf,
+    /** 只在测 prompt.context 时给 */
+    promptContextsOf: over.promptContextsOf,
+    /** 只在测 prompt.rule 时给 */
+    rulesOf: over.rulesOf,
   });
   return { hooks, calls, memory };
 }
@@ -476,4 +482,84 @@ test('proactive.status 在 canFire 为真时回 canFire=true，仍不发送', as
   assert.equal(r.body.canFire, true);
   assert.equal(r.body.why, '');
   assert.equal(calls.fire, 0);
+});
+
+// ---------------------------------------------------------------- prompt.context
+
+test('prompt.context：宿主没启用回 501，令牌没绑扩展回 403', async () => {
+  const none = rig();
+  assert.equal((await none.hooks['prompt.context']({ body: { text: 'x' }, client: { extId: 'e1' } })).status, 501);
+
+  const { hooks } = rig({ promptContextsOf: () => createExtPromptContexts({ log: () => {} }) });
+  assert.equal((await hooks['prompt.context']({ body: { text: 'x' }, client: {} })).status, 403);
+});
+
+test('prompt.context：注册后下一轮注入，clear 后立刻没有', async () => {
+  const store = createExtPromptContexts({ log: () => {} });
+  const { hooks } = rig({ promptContextsOf: () => store });
+  const client = { extId: 'ext-demo' };
+
+  const r = await hooks['prompt.context']({ body: { name: 'bili', text: '这个群最近在聊版本更新' }, client });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.chars, 11);
+  assert.match(store.render('g1'), /这个群最近在聊版本更新/);
+
+  const c = await hooks['prompt.context']({ body: { name: 'bili', action: 'clear' }, client });
+  assert.equal(c.status, 200);
+  assert.equal(c.body.removed, true);
+  assert.equal(store.render('g1'), '');
+});
+
+test('prompt.context：缺 text 回 400（不静默当删除），超预算也回 400', async () => {
+  const store = createExtPromptContexts({ log: () => {} });
+  const { hooks } = rig({ promptContextsOf: () => store });
+  const client = { extId: 'ext-demo' };
+
+  assert.equal((await hooks['prompt.context']({ body: {}, client })).status, 400);
+  const big = await hooks['prompt.context']({ body: { text: 'a'.repeat(5000) }, client });
+  assert.equal(big.status, 400);
+  assert.match(big.body.message, /最多/);
+});
+
+// ---------------------------------------------------------------- prompt.rule
+
+test('prompt.rule：没启用回 501，令牌没绑扩展回 403，rules 不是数组回 400', async () => {
+  const none = rig();
+  assert.equal((await none.hooks['prompt.rule']({ body: { rules: [] }, client: { extId: 'e1' } })).status, 501);
+
+  const store = createExtRules({ log: () => {} });
+  const { hooks } = rig({ rulesOf: () => store });
+  assert.equal((await hooks['prompt.rule']({ body: { rules: [] }, client: {} })).status, 403);
+  assert.equal((await hooks['prompt.rule']({ body: {}, client: { extId: 'ext-demo' } })).status, 400);
+  /** 字符串不能被当成数组静默接受，否则「一条」会变成 4 个字符的 4 条 */
+  assert.equal((await hooks['prompt.rule']({ body: { rules: '一句话' }, client: { extId: 'ext-demo' } })).status, 400);
+});
+
+test('prompt.rule：提交后按场景注入，重复提交是整份替换', async () => {
+  const store = createExtRules({ log: () => {} });
+  const { hooks } = rig({ rulesOf: () => store });
+  const client = { extId: 'ext-demo' };
+
+  const r = await hooks['prompt.rule']({
+    body: { rules: ['所有场合都听', { text: '只在私聊', kind: 'private' }] },
+    client,
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.count, 2);
+  assert.equal(r.body.total, '所有场合都听'.length + '只在私聊'.length);
+
+  assert.match(store.render('private'), /只在私聊/);
+  assert.doesNotMatch(store.render('group'), /只在私聊/);
+  assert.match(store.render('group'), /所有场合都听/);
+
+  /** 第二次提交整份替换：上次的「只在私聊」不能残留 */
+  const r2 = await hooks['prompt.rule']({ body: { rules: ['换掉了'] }, client });
+  assert.equal(r2.status, 200);
+  assert.doesNotMatch(store.render('private'), /只在私聊/);
+  assert.match(store.render('private'), /换掉了/);
+
+  /** 空数组清空 */
+  const r3 = await hooks['prompt.rule']({ body: { rules: [] }, client });
+  assert.equal(r3.body.count, 0);
+  assert.equal(store.render('private'), '');
 });

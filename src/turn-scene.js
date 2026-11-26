@@ -69,3 +69,31 @@ export function createTurnScenes(max = 64) {
     },
   };
 }
+
+/**
+ * 场景块里的「现在是什么时候」。
+ *
+ * 为什么模型需要它：人格里写着「深夜别追问」「工作日白天她可能在上班」这类
+ * 设定，模型却不知道当前是几点——只能从聊天内容里猜，猜错时表现得像不认识字。
+ *
+ * 为什么**只给时段、不给分钟**：这段挂在 `systemPrompt.context`（order 902），
+ * 每个请求都要重发。带分钟的话每分钟换一次文本，system 前缀缓存每分钟失效一次，
+ * 后面 903–910 全段跟着重算。只给「11月26日 周四 下午」——日期一天一变、
+ * 时段三小时一变，缓存基本稳得住，而模型真正用得上的是「深夜/上午」这种粗粒度。
+ *
+ * @param {number} [now] 取当前时间的毫秒数（测试可注入）
+ * @returns {string} 例如 `现在是 11月26日 周四 下午。`
+ */
+export function sceneClock(now = Date.now()) {
+  const d = new Date(Number(now) || Date.now());
+  const week = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()];
+  const h = d.getHours();
+  const part = h < 5 ? '凌晨'
+    : h < 8 ? '早上'
+      : h < 11 ? '上午'
+        : h < 13 ? '中午'
+          : h < 17 ? '下午'
+            : h < 19 ? '傍晚'
+              : h < 23 ? '晚上' : '深夜';
+  return `现在是 ${d.getMonth() + 1}月${d.getDate()}日 周${week} ${part}。`;
+}

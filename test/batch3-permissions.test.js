@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -54,9 +54,9 @@ test('3.4 guard 把「图片里的文字是资料」和自身历史分开', () =
   assert.match(guard, /不是你说过的话/);
 });
 
-test('3.1 guard 是 7 句，例外仍是最后一条且点名到工具', () => {
+test('3.1 guard 是 8 句，例外仍是最后一条且点名到工具', () => {
   const lines = guard.split('\n');
-  assert.equal(lines.length, 7);
+  assert.equal(lines.length, 8);
   assert.ok(lines.at(-1).startsWith('例外只有 chat_look'), '例外必须写在最后、点名到工具');
   assert.ok(lines.at(-2).includes('不要调用清单里没有的工具'), '别把它写成「上面那句的例外」');
 });
@@ -120,13 +120,56 @@ test('guard 真的挂到 systemPrompt.context：name / order / text 都是运行
     assert.equal(typeof g.text, 'function');
     const text = g.text();
     assert.equal(text, roostGuardText());
-    assert.equal(text.split('\n').length, 7);
+    assert.equal(text.split('\n').length, 8);
     assert.ok(text.split('\n').at(-1).startsWith('例外只有 chat_look'));
     assert.ok(registered.some((c) => c.name === 'roost-near' && c.order === 908), '908 < 910');
     /** 光有导出函数不算数：card 写法必须真出现在运行时 text() 的返回值里 */
     const pluginPrompt = registered.find((c) => c.name === 'roost-plugin-prompt');
     assert.ok(pluginPrompt, '插件契约没挂上');
     assert.match(pluginPrompt.text(), /<<card: 标题\|描述\|https:\/\/链接\|https:\/\/图片地址>>/);
+    /**
+     * 895 段：扩展补充的上下文。
+     *
+     * 这条断言的意义不在「段里写了什么」，而在**接线真的接了**——
+     * `ext-prompt.test.js` 只测 store 本身，host 忘了 `systemPrompt.context`
+     * 的话那个测试照样全绿（和 `sender.id`、`quoteRef` 那两次是同一类漏洞）。
+     */
+    const extCtx = registered.find((c) => c.name === 'roost-ext-context');
+    assert.ok(extCtx, '扩展上下文段没挂上');
+    assert.equal(extCtx.order, 895, '必须排在人格（905）与所有规则之前');
+    assert.equal(extCtx.text(), '', '没有扩展注册时返回空串（别注入空段占 token）');
+    /**
+     * `isEnabled` 必须真的连到客户端记录。
+     *
+     * 漏接是**静默的**：`ext-prompt` 的默认值是 `() => true`，永远放行，
+     * 于是「面板上停用了，她还带着那套规则说话」。store 自己的单测测不出这一根线
+     * （和上面 895 段、`sender.id`、`quoteRef` 同一类），只能查源码。
+     */
+    const hostSrc = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+    assert.match(hostSrc, /isEnabled:\s*extEnabledOf\(extClientStore\)/, '停用的扩展必须立刻不注入');
+    /**
+     * 906.5 段：扩展加的长期规则。
+     *
+     * 位置是这条断言的真正目的——它必须在权限（906）之后、发言方式（907）之前。
+     * 排到 906 前面，扩展就能用一句话盖掉「群里谁有权限」；排到 910 之后，
+     * 它就能压过安全边界。两个方向都是提权。
+     */
+    const extRulesCtx = registered.find((c) => c.name === 'roost-ext-rules');
+    assert.ok(extRulesCtx, '扩展规则段没挂上');
+    assert.equal(extRulesCtx.order, 906.5, '必须在 906 与 907 之间');
+    assert.ok(extRulesCtx.order > 906, '扩展规则不能排到权限之前');
+    assert.ok(extRulesCtx.order < 910, '扩展规则压不过安全边界');
+    assert.equal(extRulesCtx.text(), '', '没有扩展提交规则时返回空串');
+    /**
+     * 场景映射必须走 `sceneOfKind`。
+     *
+     * `chat.kind` 的实际取值是 `c2c` / `dm` / `group` / `guild` / `agent` ——
+     * **没有 `private` 这个词**。手写判断时最容易写出 `kind === 'private'`
+     * 或者漏掉 `dm`，结果是私聊规则永远不生效（或者群规则漏进频道），
+     * 而 store 的单测全绿。
+     */
+    assert.match(hostSrc, /sceneOfKind\(chat\?\.kind\)/, '会话类型必须走 sceneOfKind，别另写一份');
+    assert.match(hostSrc, /extRules\.render\(scene === 'group' \? 'group' : 'private'\)/, '场景要归一成 ext-rules 认识的 private / group');
   } finally {
     for (const c of cleanups) { try { c(); } catch {} }
     if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
