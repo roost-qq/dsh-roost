@@ -10,6 +10,16 @@
 export const GH_OWNER = 'roost-qq';
 export const GITEE_OWNER = 'tdcq9594';
 
+/**
+ * 本仓（dsh-roost 自己）。
+ *
+ * 必须单列：`docs/` 下的文件（教程、API.md）只存在于这一层，框架仓
+ * qq-bot-roost 里没有同名路径。曾经把教程链接写成 FW_REPO，点过去是 404——
+ * 「本项目」和「框架」是两个仓，拼错时 URL 看起来完全正常。
+ */
+export const SELF_REPO = `${GH_OWNER}/dsh-roost`;
+export const GITEE_SELF_REPO = `${GITEE_OWNER}/dsh-roost`;
+
 export const FW_REPO = `${GH_OWNER}/qq-bot-roost`;
 export const GITEE_FW_REPO = `${GITEE_OWNER}/qq-bot-roost`;
 export const EXT_REPO = `${GH_OWNER}/qq-bot-roost-plugins`;
