@@ -29,7 +29,7 @@ import { createAvatarCache } from './avatar-cache.js';
 import { bucketOf, modeFor, describeSpeaker, rulesFor, planGuestTools, planDenyTools, planPersonaTools, GUEST_KEEP_TOOLS, guestKeepTools, memberLookAllowed, AWAKE_DENY_TOOLS, protectOutputTools, isOwnerSender } from './permissions.js';
 import { createQqToolState, buildOutputPrompt, registeredToolNames } from './qq-tool-state.js';
 import { resolvePolicy, dangerOf, BUCKETS, defaultStore } from './capabilities.js';
-import { FEATURES, FEATURE_GROUPS, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting, isOff, isOn } from './features.js';
+import { FEATURES, FEATURE_GROUPS, FEATURE_HOME, visibleFeatures, visibleGroups, readFeatures, readSettings, rawFeature, forcedDenyTools, patchForFeature, cannotEnable, featureDef, kindOf, normalizeSetting, isOff, isOn } from './features.js';
 /** 自动引用回复要不要挂、引用谁（纯函数，见文件头的「为什么抽出来」） */
 import { pickQuoteRef } from './quote-auto.js';
 /** `qq_retract` 的「挑哪条 / 失败怎么说」（纯函数，同上） */
@@ -11461,6 +11461,14 @@ export function apply(ctx) {
                   requires: f.requires,
                   /** 面板按 kind 决定画开关、下拉还是输入框 */
                   kind: kindOf(f),
+                  /**
+                   * 这个开关归哪一页（`src/features.js` 的 `FEATURE_HOME`）。
+                   *
+                   * 前端是独立 DSH 模块、不能 import src，所以由这里下发，
+                   * 避免前端再抄一份「id → 页」映射出来两头对不上。
+                   * 前端各页只渲染 `f.home === tab` 的项，一个不多一个不少。
+                   */
+                  home: FEATURE_HOME[f.id],
                   ...(kindOf(f) === 'toggle' ? {} : {
                     options: f.options || [],
                     custom: !!f.custom,

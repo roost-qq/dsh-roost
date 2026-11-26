@@ -193,7 +193,7 @@ test('渲染：当前页被隐藏时留在原地，并标「（已隐藏）」',
   assert.match(textOf(cur), /心情（已隐藏）/, '标记要写清楚它被藏了')
 })
 
-test('渲染：概览组变成两页，二级行出现「概览 · 个性化」', () => {
+test('渲染：概览组三页，二级行出现「概览 · 设置总览 · 个性化」', () => {
   resetStore('personalize')
   const { mod: m, rt } = loadClient()
   const tree = expand(m.RoostPage(), rt)
@@ -206,7 +206,7 @@ test('渲染：概览组变成两页，二级行出现「概览 · 个性化」'
     }
     walk(n.props?.children)
   })(tree)
-  assert.equal(sub, '概览个性化', '概览组现在有两页，二级行必须出来（顺序按声明）')
+  assert.equal(sub, '概览设置总览个性化', '概览组现在有三页，二级行必须出来（顺序按声明）')
 })
 
 test('渲染：强调色注入根节点，未选时不注入', () => {
@@ -243,7 +243,8 @@ test('渲染：整组都被隐藏时，一级分组不再出现', () => {
   /* 用人设组测整组消失：能力组的 `caps` 在保护名单里，永远藏不掉（开关总入口）。
      这条同时也钉住「保护页让所在组不会变成空壳」这个副作用。 */
   /** autotelic 已从 awake 页拆成独立 tab，也归人设组，整组隐藏测试要一起藏 */
-  store['roost.ui.v1'] = JSON.stringify({ hidden: ['her', 'profile', 'mood', 'awake', 'autotelic', 'memory', 'people'] })
+  /* 2026-11-26：人设组新增 talk（聊天），同样要藏，否则留一个空壳页签 */
+  store['roost.ui.v1'] = JSON.stringify({ hidden: ['her', 'talk', 'profile', 'mood', 'awake', 'autotelic', 'memory', 'people'] })
   const { mod: m, rt } = loadClient()
   const tree = expand(m.RoostPage(), rt)
   const groups = []

@@ -111,8 +111,8 @@ globalThis.localStorage = {
   setItem: (k, v) => { store[k] = String(v) },
 }
 
-/* 与 client.js 的 TABS 同序：频道 7 页收成 4 页 + 新增「资料」「自身设置」后 31 个可见页签 */
-const TABS = ['overview', 'personalize', 'her', 'profile', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'ch-post', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag', 'connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about']
+/* 与 client.js 的 TABS 同序：频道 7 页收成 4 页 + 新增「资料」「自身设置」「设置总览」「聊天」等页签 */
+const TABS = ['overview', 'summary', 'personalize', 'her', 'talk', 'profile', 'mood', 'awake', 'memory', 'people', 'caps', 'express', 'stickers', 'ch-post', 'model', 'ext', 'ext-market', 'ext-api', 'groupchat', 'groupadmin', 'ch-home', 'ch-policy', 'ch-api', 'ch-diag', 'connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about']
 /* 隐藏页：老 localStorage 存着时仍要能正常渲染（chats / account 已提升为正式页） */
 const HIDDEN_TABS = ['context', 'setup']
 
@@ -129,9 +129,10 @@ const HIDDEN_TABS = ['context', 'setup']
  * 这里是特意抄的死结构：页签改动必须同步改这里，改不动就说明导航真坏了。
  */
 const NAV = {
-  home: { label: '概览', tabs: ['overview', 'personalize'] },
+  home: { label: '概览', tabs: ['overview', 'summary', 'personalize'] },
   /* 2026-11-16：人设组新增「资料」（她长什么样、能不能自己改） */
-  self: { label: '人设', tabs: ['her', 'profile', 'mood', 'awake', 'memory', 'people'] },
+  /* 2026-11-26：人设组新增「聊天」（说话方式 / 排队与插话，从权限页搬来的开关） */
+  self: { label: '人设', tabs: ['her', 'talk', 'profile', 'mood', 'awake', 'memory', 'people'] },
   express: { label: '表达', tabs: ['express', 'stickers', 'ch-post'] },
   /**
    * 2026-11-16：**群聊并入「群与频道」**（一级 8 → 7）。两页回答同一个问题
@@ -144,7 +145,7 @@ const NAV = {
   system: { label: '系统', tabs: ['connect', 'bot-self', 'chats', 'account', 'sim', 'logs', 'update', 'config', 'backup', 'security', 'about'] },
 }
 const TAB_LABEL = {
-  overview: '概览', personalize: '个性化', her: '人格', mood: '心情', awake: '主动搭话', memory: '记忆', people: '人物',
+  overview: '概览', summary: '设置总览', personalize: '个性化', her: '人格', talk: '聊天', mood: '心情', awake: '主动搭话', memory: '记忆', people: '人物',
   caps: '权限', express: '语音', stickers: '图库', 'ch-post': '发帖', model: '模型', profile: '资料',
   ext: '已安装', 'ext-market': '市场', 'ext-api': '接口',
   groupchat: '群聊策略', groupadmin: '群管',
@@ -1182,11 +1183,14 @@ test('前端渲染：能力页要能显示四档结论，且缺数据不炸', ()
   // 分群例外：没这句说明用户会以为"每个群都得配一遍"
   assert.ok(txt.includes('跟随默认'), '缺分群入口')
   assert.ok(txt.includes('测试群'), '群名没渲染出来')
-  // 功能开关：分组、关掉的说明、被依赖挡住的原因
-  assert.ok(txt.includes('她会做什么'), '缺功能开关区')
-  assert.ok(txt.includes('怎么说话'), '功能开关没按分组渲染')
-  assert.ok(txt.includes('关掉之后'), '关着的开关要说明后果')
-  assert.ok(txt.includes('收走'), '要显示这些关闭会收走哪些工具')
+  /**
+   * 功能开关：2026-11-26 起按 `FEATURE_HOME` 分到各功能页，权限页只留指路牌。
+   * 「她会做什么」整节已删——不是藏起来，是搬走了，所以这里断言它**不在**。
+   * 各页真的渲染出了开关由下面的「开关搬迁」用例覆盖。
+   */
+  assert.ok(txt.includes('功能开关已分到各页'), '权限页要指路到各功能页')
+  assert.ok(txt.includes('说话方式'), '要有去聊天页调开关的入口')
+  assert.ok(!txt.includes('她会做什么'), '功能开关不该再铺在权限页')
   // 次数限制：功能名、单位、用满提示
   assert.ok(txt.includes('次数限制'), '缺次数限制区')
   assert.ok(txt.includes('语音条'), '配额行没渲染')
@@ -1234,11 +1238,11 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
     config: {}, saveCfg: () => {}, toast: () => {}, reload: () => {}, stickers: null,
   }), rt)), ['01', '02'], '表达页编号应 01–02 连续')
 
-  /* 心情页：此刻情绪 / 3.5 衰减与基线 / 变化记录 */
+  /* 心情页：此刻情绪 / 3.5 衰减与基线 / 变化记录 / 04 心情怎么影响说话（2026-11-26 搬来的开关） */
   rt.reset()
   assert.deepEqual(ns(expand(mod.MoodTab({
     mood: null, reloadMood: () => {}, toast: () => {}, quick: async () => ({}),
-  }), rt)), ['01', '02', '03'], '心情页编号应 01–03 连续')
+  }), rt)), ['01', '02', '03', '04'], '心情页编号应 01–04 连续')
 
   /* 群聊策略页：2.2a 五张 + 2.2b 三张 + 翻聊天记录（弹窗入口），01 起连续 */
   rt.reset()
@@ -1261,6 +1265,118 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
     '什么时候接话', '插话概率', '话题与群活跃度', '静默时段与忽略词',
     '安全刹车', '连发合并', '翻聊天记录', '一轮与队列',
   ], '「所有群默认」的 8 张卡应按常用程度排')
+})
+
+/**
+ * 页内页签拆分（2026-11-27）。
+ *
+ * 记忆页 16 张、主动搭话页 11 张平铺一页要滚三屏，上面写了什么谁也记不住。
+ * 按「你此刻想干什么」各分四段，每段 ≤ 5 张。
+ *
+ * 这条断言锁两件事：
+ *   1. 每段卡片数有上限——以后往里加卡，超了就该开新页签，而不是继续往下堆；
+ *   2. 卡片总数与拆之前一致——页签是视觉分段，不是删功能。
+ *
+ * 统计用 `sectionsOf`（按 `.roost-sec` 数），**未展开**的树里子组件卡
+ * （主动页的「她在琢磨什么 / 出站策略」）还没渲染成 Sec，所以那边只数 11 张。
+ */
+test('页内页签：记忆页 / 主动搭话页各分四段，每段不超过 5 张卡且一张不少', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  /**
+   * 三级导航要"像导航"，不是一排小标签（2026-11-27 主人要求）。
+   * chip 是筛选标签的视觉，页内分区用 `.roost-subtab` 分段控件。
+   */
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(!/className: 'roost-tabs'/.test(src), '旧的 chip 页签条类名不该再用')
+  assert.equal((src.match(/className: 'roost-subtab'/g) || []).length, 4,
+    '四处页内页签（聊天 / 群聊策略 / 记忆 / 主动搭话）都用分段控件样式')
+  /** 页签包裹层带 `.roost-pane`（`display:none` 控制显隐），按它切段 */
+  const panes = (node) => {
+    const out = []
+    ;(function walk(n) {
+      if (!n || typeof n !== 'object') return
+      if (Array.isArray(n)) return n.forEach(walk)
+      if (String(n.props?.className || '').includes('roost-pane')) { out.push(n); return }
+      walk(n.props?.children)
+    })(node)
+    return out
+  }
+  /** 未展开时 pane 的子节点还是 `h(Sec)` 函数元素，先展开再数 `.roost-sec` */
+  const counts = (node) => panes(node).map((p) => sectionsOf(expand(p, rt)).length)
+
+  rt.reset()
+  const memPane = counts(mod.MemoryTab(tabProps({
+    config: {}, saveCfg: async () => ({ ok: true }), feat: null, retention: null,
+  })))
+  assert.equal(memPane.length, 4, '记忆页要分 4 段')
+  assert.deepEqual(memPane, [4, 5, 3, 4], '记忆页各段卡片数：开关与概览 / 认知 / 事实 / 召回')
+  assert.equal(memPane.reduce((a, b) => a + b, 0), 16, '记忆页 16 张卡一张都不能少')
+
+  /**
+   * 主动搭话页最后一段末尾还挂着两张子组件卡（`PurposeStatusCard` / `OutboundPolicyCard`），
+   * 它们各自内部带一个 Sec——展开后那一段是 4 张，全页合计 13 张。
+   */
+  rt.reset()
+  const awPane = counts(mod.AwakeTab(tabProps({
+    aw: null, sp: null, chats: [], config: {}, saveCfg: async () => ({ ok: true }), feat: null,
+  })))
+  assert.equal(awPane.length, 4, '主动搭话页要分 4 段')
+  assert.deepEqual(awPane, [2, 3, 4, 4], '主动搭话页各段卡片数：总开关 / 排期 / 小动作 / 出站')
+  assert.equal(awPane.reduce((a, b) => a + b, 0), 13, '主动搭话页 11 张 Sec + 2 张子组件卡，一张都不能少')
+  assert.ok(Math.max(...awPane) <= 5, '每段不超过 5 张')
+})
+
+/**
+ * 三级跳转要真的到段，不是只到页。
+ *
+ * `goTab('memory', 'facts')` 传进来的是 `subHint`，页面自己不消费的话
+ * 用户仍停在默认段——「跳转粒度到三级菜单」就成了一句空话。
+ *
+ * 有页签的两页（聊天 / 群聊策略）在 `goTab` 那条测试里已经断言过消费方式；
+ * 这里补记忆页与主动搭话页，外加「没传 subHint 时落默认段」的渲染断言。
+ */
+test('三级跳转：记忆页 / 主动搭话页也接住 subHint，默认落第一段', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  /** 两个组件都要有同样的消费句；数出现次数而不是只看包含，防止只改了一处 */
+  const guard = "if (subHint && VIEWS.some(([id]) => id === subHint)) setView(subHint)"
+  assert.equal(src.split(guard).length - 1, 3,
+    '三处 VIEWS 页签（聊天 / 记忆 / 主动搭话）都要接住 subHint')
+  for (const id of ['now', 'mind', 'facts', 'data', 'gate', 'plan', 'little', 'out']) {
+    assert.ok(src.includes(`'${id}'`), `页签 id「${id}」要在 VIEWS 里`)
+  }
+  /** 权限页指路牌要跳到段，而不是只到页 */
+  for (const chip of [
+    "['记忆 · 开关与遗忘', 'memory', 'now']",
+    "['记忆 · 事实与关系', 'memory', 'facts']",
+    "['记忆 · 召回与数据', 'memory', 'data']",
+    "['主动搭话 · 总开关', 'awake', 'gate']",
+    "['主动搭话 · 排期与机会', 'awake', 'plan']",
+  ]) {
+    assert.ok(src.includes(chip), `指路牌缺少 ${chip}`)
+  }
+
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  /** 取页签条的按钮文案：`data-on` 为 '1' 的就是当前段 */
+  const activeLabel = (node) => {
+    let hit = null
+    ;(function walk(n) {
+      if (hit || !n || typeof n !== 'object') return
+      if (Array.isArray(n)) return n.forEach(walk)
+      if (String(n.props?.className || '').includes('roost-subtab') && n.props?.['data-on'] === '1') {
+        hit = textOf(n.props.children); return
+      }
+      walk(n.props?.children)
+    })(node)
+    return hit
+  }
+  rt.reset()
+  assert.equal(activeLabel(mod.MemoryTab(tabProps({ config: {} }))), '开关与概览', '记忆页默认落第一段')
+  rt.reset()
+  assert.equal(activeLabel(mod.AwakeTab(tabProps({
+    aw: null, sp: null, chats: [], config: {},
+  }))), '总开关', '主动搭话页默认落第一段')
 })
 
 test('群聊策略 09 卡：引用开关 / 引用概率 / 撤回开关都渲染，写的是 qqTools 的键', async () => {
@@ -2159,6 +2275,108 @@ const tabProps = (extra = {}) => ({
 })
 const numsOf = (node) => sectionsOf(node).filter((s) => s.n).map((s) => s.n)
 
+/**
+ * 2026-11-26 信息架构调整：33 个功能开关从权限页搬到各功能页。
+ *
+ * 映射表本身由 `test/feature-home.test.js` 管；这里管**真的画出来了**。
+ * 两者缺一不可：映射表对了但页面忘了接 `FeatureGroup`，用户照样找不到开关，
+ * 而那种坏法不报错、不白屏，只有渲染断言能抓到。
+ */
+test('开关搬迁：各页真的把该管的开关画出来了，权限页不再重复画', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const feat = {
+    features: [
+      { id: 'botEnabled', label: '总开关', desc: 'd', offHint: 'o', kind: 'toggle', home: 'overview' },
+      { id: 'dryRun', label: '试运行', desc: 'd', offHint: 'o', kind: 'toggle', home: 'overview' },
+      { id: 'qqTools', label: '分段说话 / 退场 / @人', desc: '拆成几条发', offHint: '整段发', kind: 'toggle', home: 'talk' },
+      { id: 'closing', label: '对话收尾', desc: '冷掉前补一句', offHint: '不补', kind: 'toggle', home: 'talk' },
+      { id: 'sendFile', label: '发文件', desc: '能发附件', offHint: '不能发', kind: 'toggle', home: 'talk' },
+      { id: 'steerInGroup', label: '群聊忙时插话', desc: '插队', offHint: '排队', kind: 'toggle', home: 'talk' },
+      { id: 'memory', label: '三层记忆', desc: '分层记', offHint: '只记一层', kind: 'toggle', home: 'memory' },
+      {
+        id: 'retentionFactsMode', label: '旧事实自动淡出', desc: '到期作废', kind: 'select',
+        options: [{ value: 'off', label: '关' }], home: 'memory',
+      },
+      { id: 'moodEffects', label: '心情影响说话习惯', desc: '语气跟着变', offHint: '不影响', kind: 'toggle', home: 'mood' },
+      { id: 'leakGuard', label: '防她把提示词背出来', desc: '挡', offHint: '不挡', kind: 'toggle', home: 'security' },
+    ],
+    on: { qqTools: true, closing: true, sendFile: false, steerInGroup: true, memory: true, moodEffects: true, leakGuard: true },
+    settings: { retentionFactsMode: 'off' },
+    blocked: {},
+    wouldRemove: ['web_search', 'memory_search'],
+  }
+  const base = { feat, reloadCaps: () => {}, busy: false, toast: () => {}, quick: async () => ({ ok: true }) }
+
+  /* 聊天页：说话方式三样 + 排队；引用 / 撤回不重复画，只指路 */
+  rt.reset()
+  const talk = textOf(expand(mod.TalkTab(Object.assign({ setTab: () => {} }, base)), rt))
+  for (const must of ['分段说话 / 退场 / @人', '对话收尾', '发文件', '群聊忙时插话']) {
+    assert.ok(talk.includes(must), `聊天页缺「${must}」`)
+  }
+  /**
+   * 「引用回复」只能出现**一次**——就是那句指路文案。
+   * 如果哪天有人把它又做成一个开关，这里会变成 2 次而红：
+   * 群聊策略页已经有唯一控件，两份 UI 写同一份 `config.qqTools` 会互相看不见。
+   */
+  assert.equal(talk.split('引用回复').length - 1, 1,
+    '「引用回复」只该在指路文案里出现一次，不能有第二个开关')
+  assert.ok(talk.includes('去群聊策略'), '要在聊天页指路到群聊策略')
+
+  /* 记忆页：开关 + 淡出档位 + 应用按钮 + 收走提示，整组都在 */
+  rt.reset()
+  const memTxt = textOf(expand(mod.MemoryTab(tabProps(Object.assign({}, base, {
+    retention: {
+      ok: true, text: '会先扫一遍', facts: { enabled: true, mode: 'expire' },
+      journal: { enabled: false, mode: 'off' }, total: 9, affected: 3, purge: false,
+      expiredFacts: 0, expiredJournal: 0,
+    },
+  }))), rt))
+  for (const must of ['三层记忆', '旧事实自动淡出', '旧事实 / 旧日记自动淡出', '应用（作废，可恢复）', '这一轮会收走']) {
+    assert.ok(memTxt.includes(must), `记忆页缺「${must}」`)
+  }
+
+  /* 心情 / 安全 / 人物 / 人格 / 扩展：每个单开关页也真的出现 */
+  rt.reset()
+  assert.ok(textOf(expand(mod.MoodTab(Object.assign({ mood: null, reloadMood: () => {} }, base)), rt))
+    .includes('心情影响说话习惯'), '心情页缺「心情影响说话习惯」')
+
+  rt.reset()
+  assert.ok(textOf(expand(mod.SecurityTab(Object.assign({
+    config: {}, saveCfg: async () => ({ ok: true }), setTab: () => {},
+  }, base)), rt)).includes('防她把提示词背出来'), '安全页缺「防她把提示词背出来」')
+
+  /* 权限页：这些开关一个都不该再出现 */
+  rt.reset()
+  const caps = textOf(expand(mod.CapsTab({
+    caps: { tools: [] }, preview: null, chats: [], feat, retention: null, quota: null,
+    toast: () => {}, reload: () => {}, quick: async () => ({ ok: true }), busy: false,
+    config: { awake: { groups: [] } }, saveCfg: async () => ({ ok: true }), setupSt: null, setTab: () => {},
+  }), rt))
+  for (const must of ['分段说话 / 退场 / @人', '三层记忆', '心情影响说话习惯', '防她把提示词背出来']) {
+    assert.ok(!caps.includes(must), `权限页不该再有「${must}」`)
+  }
+  assert.ok(caps.includes('功能开关已分到各页'), '权限页要有指路牌')
+
+  /* 概览页：汇总已独立成页，不该还留一张「设置总览」卡 */
+  rt.reset()
+  const ov = textOf(expand(mod.OverviewTab({
+    st: null, setupSt: null, toast: () => {}, reload: () => {}, busy: false,
+    onGo: () => {}, logs: null,
+  }), rt))
+  assert.ok(!ov.includes('设置总览'), '概览页不该再有设置总览卡（已独立成页）')
+
+  /* 独立的「设置总览」页：运行可写 + 各域只读 + 去调 */
+  rt.reset()
+  const sum = textOf(expand(mod.SummaryTab({
+    feat, quick: async () => ({ ok: true }), toast: () => {}, reload: () => {},
+    busy: false, onGo: () => {},
+  }), rt))
+  for (const must of ['现在开着', '运行', '总开关', '试运行', '各功能现状', '说话', '记忆', '去调']) {
+    assert.ok(sum.includes(must), `设置总览页缺「${must}」`)
+  }
+})
+
 test('4.1：人物页五节 01–05，人物墙 + 详情四栏 + 原三节全保留', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
@@ -2309,7 +2527,7 @@ test('2.8：从最近会话导入只带群、不带私聊和名单里已有的',
   assert.deepEqual(mod.suggestGroupWhitelist(null, null), [])
 })
 
-test('2.8：权限页多出 07 授权名单，主人只读、群名单可批量添加', () => {
+test('2.8：权限页 06 授权名单，主人只读、群名单可批量添加', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const props = {
@@ -2322,7 +2540,7 @@ test('2.8：权限页多出 07 授权名单，主人只读、群名单可批量�
   }
   let tree
   assert.doesNotThrow(() => { tree = expand(mod.CapsTab(props), rt) }, '权限页带名单数据时不能炸')
-  assert.ok(numsOf(tree).includes('07'), '权限页要有 07 授权名单')
+  assert.ok(numsOf(tree).includes('06'), '权限页要有 06 授权名单（原 07，删掉「她会做什么」后顺延）')
   const txt = textOf(tree)
   for (const must of [
     '授权名单', '主人 / 私聊对象（框架管）', '框架里已设 1 个主人',
@@ -3364,7 +3582,8 @@ test('装/卸扩展后立即重拉扩展页清单，不等整页刷新', () => {
   /* 市场页/已安装页两条入口都要接到这个回调，否则在那一页装完仍旧不刷新 */
   assert.ok(src.includes("h(ExtSettingsBlock, { toast, part: 'installed', reloadExtPages })"))
   assert.ok(src.includes("h(ExtSettingsBlock, { toast, part: 'market', reloadExtPages })"))
-  assert.ok(src.includes('h(ExtTab, { quick, toast, extPages, setTab, reloadExtPages })'))
+  assert.ok(/h\(ExtTab, \{[\s\S]*?reloadExtPages/.test(src),
+    '已安装页要接到刷新回调')
   assert.ok(src.includes('h(ExtMarketTab, { toast, reloadExtPages })'))
   /* 三处动作各自断言，别只数出现次数（注释里写一句也能把计数凑够） */
   const between = (a, b) => {
@@ -3563,4 +3782,59 @@ test('接入页：装好之后才有「卸载重装」入口', () => {
   rt.reset()
   const empty = textOf(expand({ type: el.type, props: { ...el.props, st: { installed: false } } }, rt))
   assert.ok(!empty.includes('卸载重装'), '没装就别给卸载入口')
+})
+
+/* ---------------- 2026-11-26 面板信息架构调整：配置弹窗 + 三级跳转 ---------------- */
+
+test('设置页：配置全文收进弹窗，页面上不再铺 textarea', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const tree = expand(mod.ConfigTab({
+    config: { enabled: true, tts: {}, memory: {} },
+    save: () => {}, saveCfg: () => {}, toast: () => {},
+    stickers: null, setupSt: null, reload: () => {},
+  }), rt)
+
+  /* 整份 JSON 不该再出现在页面正文里：它现在是弹窗内容 */
+  const tags = []
+  ;(function walk(n) {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) return n.forEach(walk)
+    if (typeof n.type === 'string') tags.push(n.type)
+    walk(n.props?.children)
+  })(tree)
+  assert.equal(tags.filter((t) => t === 'textarea').length, 0, '页面上不该再有 textarea')
+
+  const txt = textOf(tree)
+  assert.ok(txt.includes('编辑配置全文'), '要有打开弹窗的入口')
+  assert.ok(txt.includes('个段'), '要给出配置段数做摘要')
+  /* 各段说明仍在页面上——它是这一页真正高频的部分 */
+  assert.ok(txt.includes('各段是干什么的'), '分段说明不能被一起收进弹窗')
+})
+
+test('设置页弹窗：有未保存改动时只提示不关；点段名会先开弹窗再定位', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("h(PageModal, { title: '配置全文', onClose: closeJson }"),
+    '配置全文要用面板同款弹窗')
+  const close = src.slice(src.indexOf('const closeJson = () => {'), src.indexOf('const doSave'))
+  assert.ok(close.includes('if (dirty)'), '有未保存改动时不能直接关')
+  assert.ok(close.includes('未保存的改动'), '要说明为什么关不掉')
+  /* jumpTo 在弹窗未开时要先开弹窗，否则「点段名」在收进弹窗后就失效了 */
+  assert.ok(src.includes('pendingJump.current = k') && src.includes('setJsonOpen(true)'),
+    '弹窗关着时点段名要先开弹窗')
+})
+
+test('三级跳转：goTab 能带子页签，且提示只对刚跳到的那一页有效', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes('const goTab = useCallback((id, sub) => {'),
+    '要有统一的二级 + 三级跳转入口')
+  assert.ok(src.includes('setTabHint(sub ? { tab:'),
+    '子页签要随跳转一起记下来')
+  assert.ok(src.includes('if (tabHint && tabHint.tab !== tab) setTabHint(null)'),
+    '切走之后要清掉提示，否则下次进页会落错页签')
+  /* 两个有页内页签的页要真接住 subHint */
+  assert.ok(src.includes("if (subHint && VIEWS.some(([id]) => id === subHint)) setView(subHint)"),
+    '聊天页要接住三级跳转')
+  assert.ok(src.includes("if (subHint && PAGE_TABS.some(([id]) => id === subHint)) setPageTab(subHint)"),
+    '群聊策略页要接住三级跳转')
 })

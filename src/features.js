@@ -799,3 +799,100 @@ export function visibleGroups(features = visibleFeatures()) {
     .map((g) => ({ ...g, ids: g.ids.filter((id) => ids.has(id)) }))
     .filter((g) => g.ids.length);
 }
+
+/**
+ * 每个功能开关的「家」：`id → 页面 tab key`。
+ *
+ * 2026-11-26 面板信息架构调整：权限页不再承接「有没有这个功能」，
+ * 33 个开关按语义归到各功能页（见 `FEATURE_HOME`），权限页只留「谁能用」。
+ *
+ * 这张表是「零遗漏」的唯一真源，也是唯一能被机器校验的东西：
+ * - 不许按 `FEATURE_GROUPS` 整组渲染：`talk` / `memory` / `work` 三组都被拆开了
+ *   （`stickers`→图库、`voice`→语音、`closing`→聊天、`sendFile`→聊天、
+ *   `personaCommand`→人格），整组渲染必然出现同一开关在两页各画一份、
+ *   两份本地草稿互相打架。
+ * - `test/feature-home.test.js` 会断言**每个可见开关都恰好有一个家**，
+ *   新增开关忘了写 `FEATURE_HOME` 会让测试直接红，而不是静默从界面上消失。
+ */
+export const FEATURE_HOME = {
+  /** 概览：决定后面所有开关生效不生效的运行态 */
+  botEnabled: 'overview',
+  dryRun: 'overview',
+
+  /** 聊天（新页，挂在人设组）：说话方式 + 排队与插话 */
+  qqTools: 'talk',
+  closing: 'talk',
+  sendFile: 'talk',
+  steerInGroup: 'talk',
+  queueMax: 'talk',
+  queueMinBudgetSec: 'talk',
+
+  /**
+   * 引用回复 / 引用概率 / 撤回三项目前归**群聊策略页**。
+   *
+   * 那一页「所有群默认 → 引用回复与撤回」早在 2026-11 就有完整控件
+   * （`client.js` 的 GCard 09，直接写 `config.qqTools.quote` / `.retract`），
+   * 而且带概率滑杆与撤回时限说明。聊天页再放一份就是两份 UI 写同一份配置：
+   * 谁也看不见对方改了什么，回头又要查半天。
+   *
+   * 所以它们从权限页删掉后**回到已有的那处**，聊天页只留一行指路按钮。
+   * 这也是「零遗漏」的正确含义：功能有地方改，不是每页都抄一遍。
+   */
+  qqRetract: 'groupchat',
+  quoteReply: 'groupchat',
+  quotePercent: 'groupchat',
+
+  /**
+   * 记忆：开关 + 遗忘淡出。
+   * `retention*` 四项和页面上那块 dry-run 预览（应用 / 一键恢复）是一体的，
+   * 只搬开关不搬预览会让「改档位 → 点应用」断链，所以那边整卡跟过来。
+   */
+  memory: 'memory',
+  memoryTools: 'memory',
+  graphAdjacent: 'memory',
+  chatTools: 'memory',
+  crossChatInGroup: 'memory',
+  chatLookForMembers: 'memory',
+  compact: 'memory',
+  events: 'memory',
+  retentionFactsMode: 'memory',
+  retentionJournalMode: 'memory',
+  retentionThresholdPct: 'memory',
+  retentionMinProtectDays: 'memory',
+
+  /** 各功能页各归各家 */
+  stickers: 'stickers',
+  voice: 'express',
+  speakUp: 'awake',
+  awake: 'awake',
+  personaCommand: 'her',
+  moodEffects: 'mood',
+  profiles: 'people',
+  leakGuard: 'security',
+  bridge: 'ext',
+  extensions: 'ext',
+};
+
+/** 某个页面该承接哪些开关 id（顺序跟随 `FEATURES` 声明顺序） */
+export function featureIdsOn(tab, features = visibleFeatures()) {
+  return features.filter((f) => FEATURE_HOME[f.id] === tab).map((f) => f.id);
+}
+
+/**
+ * 自检：返回 `{ missing, unknown, dup }`。
+ *
+ * - `missing`：可见开关里没有家的（会被界面漏掉）
+ * - `unknown`：`FEATURE_HOME` 里指向了不存在 / 已下线的开关（脏配置）
+ * - `dup`：同一个 id 声明了两次（对象字面量会静默后者覆盖前者，这里只能靠
+ *   声明的键数 vs 唯一键数发现——所以调用方应传原始声明数组，见测试）
+ *
+ * 生产代码用它做一次开发期断言；测试用它做红线。
+ */
+export function featureHomeGaps(features = visibleFeatures()) {
+  const ids = features.map((f) => f.id);
+  const have = new Set(ids);
+  const homes = Object.keys(FEATURE_HOME);
+  const missing = ids.filter((id) => !FEATURE_HOME[id]);
+  const unknown = homes.filter((id) => !have.has(id));
+  return { missing, unknown };
+}

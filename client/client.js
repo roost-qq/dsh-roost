@@ -1196,7 +1196,21 @@ window.__ModuleLoader__.load({
   box-shadow:var(--shadow-card)}
 .roost-quick-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .roost-quick-h b{font-size:13px}
-.roost-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0 0}
+/* 页内三级导航（2026-11-27）：一级是药丸底、二级是下划线，三级再做小胶囊就三层一个样，
+   看着像一排筛选标签而不是「这一页分成几块」。改成分段控件：一整条底槽 + 选中段浮起，
+   字号与点击区域都放大，位置在这一页的顶端，一眼能看出是页内分区。 */
+.roost-subtabs{display:flex;gap:2px;flex-wrap:wrap;margin:14px 0 4px;padding:3px;
+  border:1px solid var(--line-soft);border-radius:10px;
+  background:color-mix(in srgb,var(--line-soft) 45%,transparent)}
+.roost-subtab{flex:0 0 auto;padding:7px 14px;border:0;border-radius:8px;background:transparent;
+  color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font:inherit;
+  font-size:13px;font-weight:500;white-space:nowrap;
+  transition:background .15s ease,color .15s ease,box-shadow .15s ease}
+.roost-subtab:hover{color:var(--dsw-alias-label-primary,inherit);
+  background:color-mix(in srgb,var(--line-soft) 55%,transparent)}
+.roost-subtab:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.roost-subtab[data-on="1"]{color:var(--dsw-alias-label-primary,inherit);font-weight:600;
+  background:var(--roost-card-fill,var(--card-fill));box-shadow:0 1px 4px var(--tone-foam-2)}
 .roost-g-modes{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .roost-g-time{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 .roost-g-time-pair{display:inline-flex;gap:6px;align-items:center}
@@ -2687,6 +2701,96 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 设置总览（2026-11-26）：33 个功能开关的总览与直达。
+     *
+     * 为什么独立成页、而不是塞进概览：
+     * 概览回答「我卡在哪一步」（接入进度 / 会话 / 最近动态），是**运行状态**；
+     * 这一页回答「她都开着什么」，是**配置状态**。两件事混在一页，
+     * 概览会从 6 节涨到 7 节，而那张卡本身又是 6 行只读 + 一堆按钮，
+     * 比概览原有任何一节都长——放在下面就是把概览压垮。
+     *
+     * 开关本体不在这里改（除了「运行」两个总闸）：其余都是 `FEATURE_HOME`
+     * 分到各页的，这里只做汇总 + 三级跳转，避免同一开关两处渲染。
+     */
+    function SummaryTab({ feat, quick, toast, reload, busy, onGo }) {
+      const on = (id) => (feat ? (feat.on?.[id] ? '开' : '关') : '—')
+      const onCount = feat
+        ? (feat.features || []).filter((f) => feat.on?.[f.id]).length
+        : null
+      const total = (feat?.features || []).length
+
+      /**
+       * 五个域。每项 `[中文短语, featureId]`，`to`/`sub` 是三级跳转目标。
+       * 顺序照用户日常关心的顺序：怎么说话 → 记不记得 → 找不找你 → 防不防 → 扩展。
+       */
+      const DOMAINS = [
+        {
+          key: 'talk', label: '说话', to: 'talk', sub: 'say',
+          desc: '分段 / 收尾 / 附件；引用与撤回在群聊策略',
+          items: [['分段', 'qqTools'], ['收尾', 'closing'], ['发文件', 'sendFile'],
+            ['插话', 'steerInGroup'], ['语音', 'voice'], ['表情', 'stickers']],
+        },
+        {
+          key: 'memory', label: '记忆', to: 'memory', sub: 'now',
+          desc: '三层记忆、她自己翻、关系联想、上下文压缩',
+          items: [['三层', 'memory'], ['自己翻', 'memoryTools'], ['关系联想', 'graphAdjacent'],
+            ['翻记录', 'chatTools'], ['压缩', 'compact'], ['做过什么', 'events']],
+        },
+        {
+          key: 'proactive', label: '主动', to: 'awake', sub: 'gate',
+          desc: '会不会主动找你、开口前先不先想',
+          items: [['搭话', 'speakUp'], ['先想想', 'awake']],
+        },
+        {
+          key: 'guard', label: '防护', to: 'security',
+          desc: '提示词防泄露；切人格用法在人格页；熟人档案在人物页',
+          items: [['提示词', 'leakGuard'], ['切人格', 'personaCommand'], ['小档案', 'profiles'], ['心情影响', 'moodEffects']],
+        },
+        {
+          key: 'ext', label: '扩展', to: 'ext',
+          desc: '对外联动、用户扩展说明',
+          items: [['对外联动', 'bridge'], ['用户扩展', 'extensions']],
+        },
+      ]
+
+      return h('div', null,
+        h('div', { className: 'roost-note' },
+          onCount === null
+            ? '正在读开关状态…'
+            : `现在开着 ${onCount} / ${total} 个功能。下面按域列现状，点「去调」直接到那一页；`
+              + '开关本体都在各功能页，「运行」两个总闸在这里就能改。'),
+        h(Sec, {
+          n: '01', title: '运行',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } }, '关掉总开关，下面全部不生效'),
+        },
+          h(FeatureGroup, {
+            feat, quick, toast, reload, busy,
+            groups: [{ label: '', ids: ['botEnabled', 'dryRun'] }],
+          }),
+        ),
+        h(Sec, { n: '02', title: '各功能现状' },
+          h('div', { className: 'roost-list' },
+            DOMAINS.map((d) => h('div', {
+              key: d.key, className: 'roost-item',
+              style: { alignItems: 'center', gap: 10 },
+            },
+              h('b', { style: { flex: '0 0 40px', fontSize: 12.5 } }, d.label),
+              h('span', { className: 't', style: { flex: '1 1 auto', minWidth: 0 } },
+                h('span', { style: { fontSize: 12 } },
+                  d.items.map(([word, id]) => `${word} ${on(id)}`).join(' · ')),
+                h('span', { className: 'd', style: { display: 'block', marginTop: 2 } }, d.desc),
+              ),
+              h('button', {
+                type: 'button', className: 'roost-chip', style: { flex: '0 0 auto' },
+                onClick: () => { if (onGo) onGo(d.to, d.sub) },
+              }, '去调 ↗'),
+            )),
+          ),
+        ),
+      )
+    }
+
     /* ---------------- 接入 ---------------- */
 
     /**
@@ -3867,7 +3971,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function HerTab({ config, personas, mem, toast, save, reload, quick, repoSeed }) {
+    function HerTab({ config, personas, mem, toast, save, reload, quick, repoSeed, feat, reloadCaps, busy }) {
       /** 编辑区正在打开的人格 id */
       const [editId, setEditId] = useState('')
       const [raw, setRaw] = useState('')
@@ -4806,6 +4910,14 @@ window.__ModuleLoader__.load({
            * 而不是再开一个入口让人猜「治理」在哪。
            */
           govOpen ? h(GovPanel, { toast, reload, tick: 0, onAfter: () => loadRepo(true) }) : null,
+          /**
+           * 2026-11-26：`personaCommand`（聊天里用 /persona 切人格）从权限页搬来。
+           * 它是「人格清单的用法」，不是权限——放这张清单末尾，用户看完有哪些人
+           * 格顺手就知道能不能在聊天里切。
+           */
+          h('div', { style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--line-soft)' } },
+            h(FeatureGroup, { feat, quick, toast, reload: reloadCaps, busy, ids: ['personaCommand'] }),
+          ),
         ),
 
         /**
@@ -5018,7 +5130,28 @@ window.__ModuleLoader__.load({
 
     /* ---------------- 记忆（三层） ---------------- */
 
-    function MemoryTab({ mem, toast, reload, quick, busy, onPickChat, setTab, config, saveCfg }) {
+    function MemoryTab({ mem, toast, reload, quick, busy, onPickChat, setTab, config, saveCfg,
+      feat, retention, reloadCaps, subHint }) {
+      /**
+       * 页内页签（2026-11-27）：16 张卡平铺一页要滚三屏，谁也记不住上面写了什么。
+       * 按「你此刻想干什么」分四段，一段最多 5 张：
+       *   开关与概览 —— 记不记、这几天的量、按时间翻
+       *   认知与回忆 —— 她怎么想、印象沉没成什么、遗忘与翻旧账
+       *   事实与关系 —— 主流程 01–03
+       *   召回与数据 —— 主流程 04–07（旧版导入 / 召回预览 / 召回记录 / 清空）
+       * 编号仍按 01–07 接着排（页签只是视觉分段，不是新的编号体系）。
+       */
+      const VIEWS = [
+        ['now', '开关与概览'],
+        ['mind', '认知与回忆'],
+        ['facts', '事实与关系'],
+        ['data', '召回与数据'],
+      ]
+      const [view, setView] = useState('now')
+      /** 三级跳转：从权限页的指路牌 / 设置总览点过来可以直达某一段 */
+      useEffect(() => {
+        if (subHint && VIEWS.some(([id]) => id === subHint)) setView(subHint)
+      }, [subHint])
       /** 3.4 召回预览：输入一句话，走真实召回（dry），看命中与原因 */
       const [pvText, setPvText] = useState('')
       const [pvResult, setPvResult] = useState(null)
@@ -5657,6 +5790,34 @@ window.__ModuleLoader__.load({
           ),
         ),
 
+        h('div', { className: 'roost-subtabs' },
+          VIEWS.map(([id, label]) => h('button', {
+            key: id, type: 'button', className: 'roost-subtab',
+            'data-on': view === id ? '1' : '0',
+            onClick: () => setView(id),
+          }, label))),
+        /**
+         * 2026-11-26：8 个记忆相关开关从权限页搬来（`FEATURE_HOME` 里归 memory）。
+         *
+         * 放最前面、**无编号**：`memory.enabled` 关掉时下面几张全都不生效，
+         * 必须先看见；它和「记忆统计 / 星图 / 翻一翻」一样是总览入口，
+         * 不是 01–07 主流程里的一步，给编号反而像流程多了个岔路。
+         */
+        h('div', { className: 'roost-pane', style: { display: view === 'now' ? '' : 'none' } },
+        h(Sec, { title: '记忆开关' },
+          h('div', { className: 'roost-note', style: { marginBottom: 6 } },
+            '这些原来是权限页「她会做什么」里的一坨。它们决定「记不记、她能不能自己翻」，'
+            + '放在记忆页才对得上；旧事实/日记的自动淡出在下面「分层与遗忘」里。'),
+          h(FeatureGroup, {
+            feat, quick, toast, reload: reloadCaps, busy,
+            groups: [
+              { label: '记不记', ids: ['memory', 'events'] },
+              { label: '她自己能不能翻', ids: ['memoryTools', 'chatTools', 'crossChatInGroup', 'chatLookForMembers'] },
+              { label: '关联与压缩', ids: ['graphAdjacent', 'compact'] },
+            ],
+          }),
+        ),
+
         /**
          * 记忆星图：原位置只留一个入口按钮，点了才在弹窗里渲染星图。
          * 关掉弹窗即卸载组件 —— 自动旋转 / 星尘动画不再后台空转，
@@ -5665,7 +5826,7 @@ window.__ModuleLoader__.load({
          */
         /** A7：页首这几张是「总览入口」，不参与 01–07 的编号；说清就不会像漏页 */
         h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-          '下面几张（记忆统计 / 心智模型 / 记忆星图 / 分层与遗忘 / 翻一翻）是总览入口，不参与编号；从「01 事实」起才是主流程。'),
+          '下面几张（记忆开关 / 记忆统计 / 心智模型 / 记忆星图 / 分层与遗忘 / 翻一翻）是总览入口，不参与编号；从「01 事实」起才是主流程。'),
         /**
          * A2 统计快照：对齐 Hindsight /stats + timeseries 的展示形态。
          * 只读、按需拉；7 天时序用最朴素的柱状，不引图表库（零依赖铁律）。
@@ -5791,6 +5952,8 @@ window.__ModuleLoader__.load({
          * B2 心智模型：纯投影（mind.model）随时可看，落盘快照（mind.snapshot）
          * 要点「刷新快照」才写 mind-model.json——默认关逐字不变。
          */
+        ),
+        h('div', { className: 'roost-pane', style: { display: view === 'mind' ? '' : 'none' } },
         h(Sec, { title: '心智模型', right: h('button', {
           type: 'button', className: 'roost-btn', disabled: mindBusy, onClick: loadMindPreview,
         }, mindBusy ? '…' : '看当前投影') },
@@ -5974,6 +6137,63 @@ window.__ModuleLoader__.load({
               h('span', { className: 'roost-muted', style: { fontSize: 11 } }, '每层 0 = 不限；超了先按层裁、再按总数裁'),
               h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy) || !saveCfg, onClick: saveCap }, '保存容量'))
           })(),
+          /**
+           * 旧记忆淡出（2026-11-26 从权限页搬来）。
+           *
+           * 权限页原来既放「有没有这个功能」又放「谁能用」，这两件事混在一起；
+           * 而这块**操作的是事实 / 日记数据**、还带 dry-run 与应用/恢复，
+           * 是数据维护不是权限，所以整组搬来记忆页——包括下面那块预览，
+           * 只搬开关会让人改完档位找不到「应用」，等于功能残废。
+           */
+          h('div', { style: { marginTop: 18, paddingTop: 12, borderTop: '1px solid var(--line-soft)' } },
+            h('div', { className: 'cap-group-t', style: { marginBottom: 8 } }, '旧事实 / 旧日记自动淡出'),
+            h(FeatureGroup, {
+              feat, quick, toast, reload: reloadCaps, busy,
+              ids: ['retentionFactsMode', 'retentionJournalMode', 'retentionThresholdPct', 'retentionMinProtectDays'],
+            }),
+            retention && retention.ok
+              ? h('div', { style: { marginTop: 12 } },
+                  h('div', { className: 'roost-note', style: { margin: 0 } }, retention.text),
+                  h('div', { className: 'roost-note', style: { margin: 0 } },
+                    `事实：${retention.facts.enabled ? retention.facts.mode : '关'} · 日记：${retention.journal.enabled ? retention.journal.mode : '关'}；共扫 ${retention.total} 条。改档位不碰数据，要下面这个按钮才生效。`),
+                  h('div', { className: 'roost-note', style: { margin: 0 } },
+                    retention.autoSweep
+                      ? '已手动确认过一次：之后每天凌晨巩固时按当前策略自动重复。点「一键恢复」会停止自动。'
+                      : '还没点过「应用」，不会自动改动记忆。点一次之后，才会每天凌晨自动重复同一策略。'),
+                  (retention.expiredFacts || retention.expiredJournal)
+                    ? h('div', { className: 'roost-note', style: { margin: 0 } },
+                        `已作废 ${retention.expiredFacts} 条事实、${retention.expiredJournal} 条日记，可一键恢复。`)
+                    : null,
+                  h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 } },
+                    h('button', {
+                      type: 'button', className: 'roost-primary',
+                      disabled: busy || !retention.affected,
+                      onClick: async () => {
+                        const r = await quick('retention.apply')
+                        toast(r.message || (r.ok ? '应用好了' : '没改成'))
+                        reload()
+                        if (reloadCaps) reloadCaps()
+                      },
+                    }, retention.purge ? '应用（会真删，先自动备份）' : '应用（作废，可恢复）'),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      disabled: busy || !(retention.expiredFacts || retention.expiredJournal),
+                      onClick: async () => {
+                        const r = await quick('retention.restore')
+                        toast(r.message || (r.ok ? '恢复了' : '没改成'))
+                        reload()
+                        if (reloadCaps) reloadCaps()
+                      },
+                    }, '一键恢复'),
+                  ),
+                  feat && (feat.wouldRemove || []).length
+                    ? h('div', { className: 'roost-note', style: { margin: 0, marginTop: 6 } },
+                        `按现在的设置，这一轮会收走：${feat.wouldRemove.slice(0, 6).join('、')}`
+                        + (feat.wouldRemove.length > 6 ? ` …+${feat.wouldRemove.length - 6}` : ''))
+                    : null,
+                )
+              : h('div', { className: 'roost-note', style: { marginTop: 8 } }, '正在读淡出预览…'),
+          ),
         ),
 
         /**
@@ -6066,6 +6286,8 @@ window.__ModuleLoader__.load({
         ),
 
         /* ── 第一层：事实 ── */
+        ),
+        h('div', { className: 'roost-pane', style: { display: view === 'facts' ? '' : 'none' } },
         h(Sec, { n: '01', title: '事实', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '刷新') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '跨群的事实她带去任何会话；本会话特有的只在这个会话提。串场就是从这条线漏出去的，所以要分开看。'
@@ -6362,6 +6584,8 @@ window.__ModuleLoader__.load({
          * 危险操作摆在一起——一个是加法一个是减法，混在一处容易误点。
          * 现在单开一节放在危险区之前，并且默认折叠。
          */
+        ),
+        h('div', { className: 'roost-pane', style: { display: view === 'data' ? '' : 'none' } },
         h(Sec, { n: '04', title: '从旧版导入' },
           h('details', null,
             h('summary', { className: 'roost-muted', style: { fontSize: 12, cursor: 'pointer' } },
@@ -6727,6 +6951,7 @@ window.__ModuleLoader__.load({
               },
             }),
           ),
+        ),
         ),
       )
 
@@ -7766,7 +7991,7 @@ window.__ModuleLoader__.load({
         ),
       )
     }
-    function PeopleTab({ mem, toast, reload, quick, busy, setTab }) {
+    function PeopleTab({ mem, toast, reload, quick, busy, setTab, feat, reloadCaps }) {
       const profiles = mem?.profiles || []
       const events = mem?.events || []
       const gp = mem?.graph
@@ -7909,6 +8134,13 @@ window.__ModuleLoader__.load({
                 profiles.length ? '没有符合条件的人' : '还没写过人物档案。'),
           h('div', { className: 'roost-note', style: { marginTop: 8 } },
             '档案是跨群按 openid 归户的，没有群/标签维度——筛选只按「最近有没有互动」，不造假维度。'),
+          /**
+           * 2026-11-26：`profiles`（给熟人写小档案）从权限页搬来。
+           * 它管的就是这一页展示的东西「要不要自动攒」，放这里才对得上。
+           */
+          h('div', { style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--line-soft)' } },
+            h(FeatureGroup, { feat, quick, toast, reload: reloadCaps, busy, ids: ['profiles'] }),
+          ),
         ),
 
         /** 4.1 详情四栏：档案 / 关系 / 经历 / 记忆，数据与记忆页同源只是按人过滤；只读 */
@@ -8450,7 +8682,7 @@ window.__ModuleLoader__.load({
      * 「她什么时候会来找你」是**排期**——两件事混在一页，想看一眼心情
      * 得先滚过整块「这一轮算出来的机会」。拆开之后两边都变短了。
      */
-    function MoodTab({ mood, reloadMood, toast, quick, config, saveCfg }) {
+    function MoodTab({ mood, reloadMood, toast, quick, config, saveCfg, feat, reloadCaps, busy }) {
       /** 3.5：半衰期与基线草稿。null = 跟随配置，失焦提交后清空 */
       const [moodDraft, setMoodDraft] = useState(null)
       const moodCfg = config?.mood || {}
@@ -8558,6 +8790,16 @@ window.__ModuleLoader__.load({
               toast(r.message || (r.ok ? '已清空' : '清空失败'))
               reloadMood()
             },
+          }),
+        ),
+
+        /**
+         * 2026-11-26：`moodEffects` 从权限页搬来。它管的是「心情要不要影响她说话」，
+         * 放在心情页才对得上——在权限页没人会想到去那儿找。
+         */
+        h(Sec, { n: '04', title: '心情怎么影响说话' },
+          h(FeatureGroup, {
+            feat, quick, toast, reload: reloadCaps, busy, ids: ['moodEffects'],
           }),
         ),
       )
@@ -9567,7 +9809,27 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function AwakeTab({ aw, mem, sp, chats, toast, reload, reloadSp, busy, quick, config, saveCfg }) {
+    function AwakeTab({ aw, mem, sp, chats, toast, reload, reloadSp, busy, quick, config, saveCfg,
+      feat, reloadCaps, subHint }) {
+      /**
+       * 页内页签（2026-11-27）：这一页从「总闸」到「试一次」隔着 11 张卡，
+       * 配一次和天天看的混在一起。按「什么时候会来看」分四段：
+       *   总开关 —— 关了就全不生效，先看这里
+       *   排期与机会 —— 她凭什么决定今天说不说
+       *   小动作 —— 收尾 / 闹钟 / 朋友 / 群
+       *   出站与试跑 —— 真发一条，再回来看结果
+       * 编号 01–11 仍连续（跨页签），页签只做视觉分段。
+       */
+      const VIEWS = [
+        ['gate', '总开关'],
+        ['plan', '排期与机会'],
+        ['little', '小动作'],
+        ['out', '出站与试跑'],
+      ]
+      const [view, setView] = useState('gate')
+      useEffect(() => {
+        if (subHint && VIEWS.some(([id]) => id === subHint)) setView(subHint)
+      }, [subHint])
       const cfg = aw?.cfg || {}
       const opps = aw?.lastOpportunities || []
       const groups = aw?.groups || []
@@ -9674,6 +9936,27 @@ window.__ModuleLoader__.load({
          * 默认开——未显式写 false 就是开，和后端 purposeEnabled() 同一口径。
          */
         h(PurposeEngineBanner, { config, saveCfg, toast, reload }),
+        h('div', { className: 'roost-subtabs' },
+          VIEWS.map(([id, label]) => h('button', {
+            key: id, type: 'button', className: 'roost-subtab',
+            'data-on': view === id ? '1' : '0',
+            onClick: () => setView(id),
+          }, label))),
+        /**
+         * 2026-11-26：`speakUp` / `awake` 从权限页搬来。
+         *
+         * 它们是「主动」的总闸与判断层——关掉 `speakUp`，下面所有卡都不生效。
+         * 所以放页面最顶、且**不参与 01–11 编号**：它不是一个流程步骤，是前置开关。
+         */
+        h('div', { className: 'roost-pane', style: { display: view === 'gate' ? '' : 'none' } },
+        h(Sec, {
+          title: '主动找你的总开关',
+          right: h('span', { className: 'roost-note', style: { margin: 0 } }, '关掉它，下面的排期与机会都不生效'),
+        },
+          h(FeatureGroup, {
+            feat, quick, toast, reload: reloadCaps, busy, ids: ['speakUp', 'awake'],
+          }),
+        ),
         h(Sec, {
           title: '互动召回',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadWake }, '刷新'),
@@ -9707,6 +9990,8 @@ window.__ModuleLoader__.load({
               : '读取互动召回状态…'),
           h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: runWakeNow }, '立刻走一次（仍守官方额度）'),
         ),
+        ),
+        h('div', { className: 'roost-pane', style: { display: view === 'plan' ? '' : 'none' } },
         h(Sec, { n: '01', title: '这一轮算出来的机会', right: h('button', { type: 'button', className: 'roost-btn', onClick: reload }, '重算') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '不是"到点就发"，是"到点问她要不要说"。她自己可以选不说——那不算失败，也不占当天的额度。'),
@@ -9733,7 +10018,7 @@ window.__ModuleLoader__.load({
               )
             : h('div', { className: 'roost-empty' },
                 cfg.enabled === false
-                  ? '主动说话关着（去「权限 → 她会做什么」打开「先想想要不要开口」）'
+                  ? '主动说话关着（在上面「主动找你的总开关」里打开「先想想要不要开口」）'
                   : '现在没有值得开口的理由 —— 这是正常的，不是坏了。'),
           h('div', { className: 'roost-note' },
             `清醒时段 ${cfg.awakeFrom ?? 8}–${cfg.awakeTo ?? 23} 点 · 沉默超过 ${cfg.missAfterHours ?? 6} 小时算「想你」 · 随性每天最多 ${cfg.casualPerDay ?? 1} 次`),
@@ -9870,6 +10155,8 @@ window.__ModuleLoader__.load({
          * 它决定的是「这段聊完了没有、什么时候可以再开口」，属于**开口时机**，
          * 不是「记住了什么」。放回主动搭话这一页之后，记忆页只剩纯数据。
          */
+        ),
+        h('div', { className: 'roost-pane', style: { display: view === 'little' ? '' : 'none' } },
         h(Sec, {
           n: '04',
           title: '对话收尾',
@@ -10135,6 +10422,8 @@ window.__ModuleLoader__.load({
           ),
         ),
 
+        ),
+        h('div', { className: 'roost-pane', style: { display: view === 'out' ? '' : 'none' } },
         h(Sec, { n: '08', title: '现在试一次' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '私聊直接问一次要不要说；群里跑一遍四道门。真发出去会出现在 QQ 上。'),
@@ -10202,6 +10491,7 @@ window.__ModuleLoader__.load({
         /** 09：主动发言出站策略（P3 完整移植，平级独立块） */
         h(OutboundPolicyCard, { toast }),
         /** 自驱引擎已拆到独立 tab（人设组），不再塞在这一页末尾 */
+        ),
       )
     }
 
@@ -11120,8 +11410,288 @@ window.__ModuleLoader__.load({
         .map((c) => (c.chatId + ' ' + String(c.title || '').replace(/\s+/g, ' ').trim()).trim())
     }
 
+    /**
+     * 功能开关组：一个页面「这一页该管哪些开关」的唯一渲染入口。
+     *
+     * 2026-11-26 之前，33 个开关只长在权限页 Sec 02 里（一整坨平铺），
+     * 用户想关「语音条」得先知道它归权限管。现在按 `f.home`（后端下发，
+     * 真源在 `src/features.js` 的 `FEATURE_HOME`）分到各功能页，
+     * **每个开关只在一处渲染**——同一组不在两页各画一份，
+     * 否则两份本地草稿 + 两次 patch 会互相覆盖。
+     *
+     * 为什么 `featDraft` 放在组件内部而不是提到 RoostPage：
+     * 草稿是「正在敲的那个数」的临时态，跟页面同生命周期就够了；
+     * 提到顶层反而要给它做 key 清理，多一处能忘的地方。
+     *
+     * 参数：
+     * - `tab`    按 `f.home === tab` 自动取全部（最常用）
+     * - `ids`    显式指定（按 id 拆组时用，顺序照给）
+     * - `groups` 分小节：`[{ label, ids }]`，给记忆页这种「开关 / 遗忘」两类用
+     */
+    function FeatureGroup({ feat, tab, ids, groups, title, desc, quick, toast, reload, busy }) {
+      /** 数值 / 下拉项的编辑草稿：敲字期间不发 patch，失焦或回车才提交 */
+      const [draft, setDraft] = useState({})
+
+      const toggleFeat = async (id, on) => {
+        const r = await quick('features.patch', { id, on })
+        toast(r.message || (r.ok ? '改好了，下一条消息生效' : '没改成'))
+        reload()
+      }
+
+      const setFeatValue = async (id, value) => {
+        const r = await quick('features.patch', { id, value })
+        toast(r.message || (r.ok ? '已保存' : '没改成'))
+        setDraft((d) => {
+          const n = { ...d }
+          delete n[id]
+          return n
+        })
+        reload()
+      }
+
+      if (!feat) return h('div', { className: 'roost-empty' }, '正在读功能开关…')
+
+      const all = feat.features || []
+      const pick = (list) => (list
+        ? list.map((id) => all.find((f) => f.id === id)).filter(Boolean)
+        : all.filter((f) => f.home === tab))
+
+      const plan = groups && groups.length
+        ? (() => {
+            /**
+             * 显式分组时，**没被任何组点到名的开关自动落进「其他」**。
+             *
+             * 这样以后给这一页新增一个开关（`FEATURE_HOME` 指到这里），
+             * 就算没人回来改这份分组清单，它也会出现在页面上，
+             * 而不是静默消失——分组是视觉问题，漏项是功能问题。
+             */
+            const covered = new Set(groups.flatMap((g) => g.ids || []))
+            const rest = all.filter((f) => f.home === tab && !covered.has(f.id))
+            return [
+              ...groups.map((g) => ({ label: g.label, items: pick(g.ids) })),
+              ...(rest.length ? [{ label: '其他', items: rest }] : []),
+            ]
+          })()
+        : [{ label: '', items: pick(ids) }]
+
+      const renderRow = (f) => {
+        const kind = f.kind || 'toggle'
+        const isToggle = kind === 'toggle'
+        const on = !!feat.on?.[f.id]
+        const blocked = !on && feat.blocked?.[f.id]
+        /** 非布尔项的当前值来自 `feat.settings`，不来自 `feat.on` */
+        const cur = feat.settings?.[f.id] ?? f.default
+        const curDraft = draft[f.id]
+
+        let control
+        if (isToggle) {
+          control = h(Switch, {
+            on,
+            disabled: busy || !!blocked,
+            title: blocked || '',
+            label: f.label || f.id,
+            onToggle: (next) => toggleFeat(f.id, next),
+          })
+        } else if (kind === 'select') {
+          /** 当前值不在预设选项里 = 用户填过「自定义」 */
+          const known = (f.options || []).some((o) => String(o.value) === String(cur))
+          const opts = [
+            ...(f.options || []).map((o) =>
+              h('option', { key: String(o.value), value: String(o.value) }, o.label)),
+            ...(f.custom ? [h('option', { key: '__custom', value: '__custom' }, '自定义…')] : []),
+            ...(!known && !f.custom
+              ? [h('option', { key: '__cur', value: String(cur) }, String(cur))]
+              : []),
+          ]
+          control = h('div', { className: 'cap-ctl' },
+            h(Dropdown, {
+              className: 'roost-input',
+              style: { width: '100%', padding: '3px 8px', fontSize: 11.5 },
+              value: curDraft !== undefined ? String(curDraft)
+                : (known ? String(cur) : (f.custom ? '__custom' : String(cur))),
+              disabled: busy,
+              onChange: (e) => {
+                const v = e.target.value
+                if (v === '__custom') {
+                  setDraft((d) => ({ ...d, [f.id]: '__custom' }))
+                  return
+                }
+                setFeatValue(f.id, v)
+              },
+            }, opts),
+            (f.custom && (curDraft === '__custom' || (!known && curDraft === undefined)))
+              ? h('input', {
+                  type: 'number', min: f.min, max: f.max,
+                  defaultValue: known ? '' : String(cur),
+                  disabled: busy,
+                  onKeyDown: (e) => { if (e.key === 'Enter') e.target.blur() },
+                  onBlur: (e) => {
+                    const v = String(e.target.value ?? '').trim()
+                    if (v) setFeatValue(f.id, v)
+                  },
+                })
+              : null,
+          )
+        } else {
+          /** number：编辑期用草稿，失焦 / 回车才提交 */
+          control = h('input', {
+            type: 'number',
+            className: 'cap-num',
+            min: f.min,
+            max: f.max,
+            value: curDraft !== undefined ? curDraft : String(cur ?? ''),
+            disabled: busy,
+            onChange: (e) => setDraft((d) => ({ ...d, [f.id]: e.target.value })),
+            onKeyDown: (e) => { if (e.key === 'Enter') e.target.blur() },
+            onBlur: (e) => {
+              const v = String(e.target.value ?? '').trim()
+              const clear = () => setDraft((d) => {
+                const n = { ...d }; delete n[f.id]; return n
+              })
+              /**
+               * 清空输入框 = 放弃这次编辑，**不能发 patch**。
+               *
+               * 后端 `normalizeSetting` 现在会拒空值（返回 400），
+               * 但更早在前端挡掉能少一次无谓请求和一句报错 toast。
+               * 以前这里把 `''` 提交上去，`Number('')` 是 0，
+               * 会把 `queueMax` 静默改成 0（关掉排队）。
+               */
+              if (!v) return clear()
+              /**
+               * 按数值比较：'02' / '2 ' 和 2 是同一个值，不必多发一次 patch。
+               * 但 `cur` 若是空串 / null（后端异常返回），`Number(cur)` 会得 0——
+               * 那时用户真想填 0 会被误判成「没改」而丢掉提交，所以先判 cur 是否有效。
+               */
+              const curValid = cur !== '' && cur !== null && cur !== undefined
+              if (v === String(cur ?? '') || (curValid && Number(v) === Number(cur))) return clear()
+              setFeatValue(f.id, v)
+            },
+          })
+        }
+
+        return h('div', { key: f.id, className: 'cap-row' },
+          control,
+          h('div', { className: 'cap-row-b' },
+            h('div', null, f.label, f.risky ? ' 🔴' : ''),
+            h('div', { className: 'roost-note', style: { margin: 0 } }, f.desc),
+            isToggle && !on
+              ? h('div', { className: 'roost-note', style: { margin: 0 } }, `关掉之后：${f.offHint}`)
+              : null,
+            !isToggle
+              ? h('div', { className: 'roost-note', style: { margin: 0 } },
+                  `当前 ${cur}${f.max !== undefined ? ` · 可填 ${f.min}–${f.max}` : ''}`)
+              : null,
+            blocked ? h('div', { className: 'roost-note', style: { margin: 0 } }, `⚠️ ${blocked}`) : null,
+          ),
+        )
+      }
+
+      const shownPlan = plan.filter((g) => g.items.length)
+      if (!shownPlan.length) return h('div', { className: 'roost-empty' }, '这一页暂时没有可调的开关')
+
+      return h('div', null,
+        title ? h('div', { className: 'cap-group-t' }, title) : null,
+        desc ? h('div', { className: 'roost-note', style: { marginBottom: 6 } }, desc) : null,
+        ...shownPlan.map((g) => h('div', { key: g.label || 'all', className: 'cap-group' },
+          g.label ? h('div', { className: 'cap-group-t' }, g.label) : null,
+          h('div', { className: 'cap-group-b' }, ...g.items.map(renderRow)),
+        )),
+      )
+    }
+
+    /**
+     * 聊天页（2026-11-26）：她**怎么把一句话说出去**。
+     *
+     * 这些开关原来是权限页「她会做什么」里的一坨。用户在权限页找「引用回复」
+     * 本来就不顺手，而它们既不属于人格（不是她是谁）、也不属于记忆
+     * （不是她记得什么）、更不属于群聊策略（那是「接不接」不是「怎么说」），
+     * 是 33 个开关里唯一没有归属页的一域，所以单开一页挂在「人设」组。
+     *
+     * 页内两个页签照群聊策略页的做法（`PAGE_TABS` + `display:none`）：
+     * 只切显示、不卸载，草稿和滚动位置都不会丢。
+     */
+    function TalkTab({ feat, quick, toast, reload, busy, subHint, setTab }) {
+      const VIEWS = [['say', '说话方式'], ['queue', '排队与插话']]
+      const [view, setView] = useState('say')
+      /** 三级跳转：别的页点「去调这一段」可以直达某个页签（见 RoostPage 的 `goTab`） */
+      useEffect(() => {
+        if (subHint && VIEWS.some(([id]) => id === subHint)) setView(subHint)
+      }, [subHint])
+
+      /**
+       * 说话方式只放三样。引用回复 / 引用概率 / 撤回**不在这儿**：
+       * 群聊策略页「所有群默认」的最后一张卡早就有这三个控件，还带概率滑杆
+       * 与撤回时限说明。这边再画一份就是两份 UI 写同一份 `config.qqTools`，
+       * 谁也看不见对方改了什么——所以这里只留一行指路。
+       */
+      const SAY = ['qqTools', 'closing', 'sendFile']
+      const QUEUE = ['steerInGroup', 'queueMax', 'queueMinBudgetSec']
+      /**
+       * 兜底：`FEATURE_HOME` 以后新增的 talk 开关如果没被上面两个清单点到名，
+       * 一律挂到「排队与插话」末尾，宁可位置不理想也不能从界面上消失。
+       */
+      const covered = new Set([...SAY, ...QUEUE])
+      const rest = (feat?.features || [])
+        .filter((f) => f.home === 'talk' && !covered.has(f.id))
+        .map((f) => f.id)
+
+      return h('div', null,
+        h('div', { className: 'roost-note' },
+          '这几个开关原来在「权限 → 她会做什么」里。它们管的是「怎么把一句话说出去」，'
+          + '和「谁能用什么工具」是两件事，所以搬到这一页。改完都是下一条消息生效。'),
+        h('div', { className: 'roost-subtabs' },
+          VIEWS.map(([id, label]) => h('button', {
+            key: id, type: 'button', className: 'roost-subtab',
+            'data-on': view === id ? '1' : '0',
+            onClick: () => setView(id),
+          }, label))),
+        h('div', { className: 'roost-pane', style: { display: view === 'say' ? '' : 'none' } },
+          h(Sec, {
+            n: '01', title: '说话方式',
+            right: h('span', { className: 'roost-note', style: { margin: 0 } }, '分段 · 收尾 · 附件'),
+          },
+            h(FeatureGroup, {
+              feat, quick, toast, reload, busy,
+              groups: [
+                { label: '分段与退场', ids: ['qqTools'] },
+                { label: '收尾与附件', ids: ['closing', 'sendFile'] },
+              ],
+            }),
+            /**
+             * 引用 / 撤回不重复渲染，只指路。写成 `roost-note` + 一个 chip，
+             * 而不是再开一张卡：那两项在群聊策略页已经有完整控件与说明。
+             */
+            h('div', {
+              className: 'roost-note',
+              style: { marginTop: 14, paddingTop: 10, borderTop: '1px solid var(--line-soft)' },
+            },
+              '「引用回复 / 引用概率 / 说错了能自己撤回」在群聊策略页的最后一张卡——'
+              + '那边有概率滑杆和撤回时限说明，改的是同一份配置，这里不再放第二份。',
+              h('button', {
+                type: 'button', className: 'roost-chip',
+                style: { marginLeft: 8 },
+                onClick: () => { if (setTab) setTab('groupchat') },
+              }, '去群聊策略 ↗'),
+            ),
+          )),
+        h('div', { className: 'roost-pane', style: { display: view === 'queue' ? '' : 'none' } },
+          h(Sec, {
+            n: '02', title: '排队与插话',
+            right: h('span', { className: 'roost-note', style: { margin: 0 } }, '只在消息来不及回时起作用'),
+          },
+            h('div', { className: 'roost-note' },
+              '她正忙着回上一条时又来一条，是排队、插话还是先放着——这一组决定这个。'
+              + '平时不用管，觉得「回得太慢 / 老被打断」再来调。'),
+            h(FeatureGroup, {
+              feat, quick, toast, reload, busy,
+              groups: [{ label: '', ids: [...QUEUE, ...rest] }],
+            }),
+          )),
+      )
+    }
+
     function CapsTab({ caps, preview, chats, feat, retention, quota, toast, reload, quick, busy,
-      config, saveCfg, setupSt, setTab }) {
+      config, saveCfg, setupSt, setTab, goTab }) {
       /**
        * 工具面板是**弹窗**，不是页面上的一节。
        *
@@ -11496,11 +12066,11 @@ window.__ModuleLoader__.load({
         reload()
       }
 
-      const featList = (feat && feat.features) || []
-      /** 数值 / 下拉项没有「开着 / 关着」，算进来会让右上角那个数字虚高 */
-      const toggleList = featList.filter((f) => (f.kind || 'toggle') === 'toggle')
-      const featOnCount = toggleList.filter((f) => feat.on?.[f.id]).length
-      const featOffCount = toggleList.length - featOnCount
+      /**
+       * 2026-11-26：`featList` / `featOnCount` / `featOffCount` 随「她会做什么」
+       * 那一节一起删了——33 个开关已分到各功能页，权限页不再统计「开着几个」。
+       * 开关本身由各页的 `FeatureGroup` 渲染。
+       */
 
       const results = (preview && preview.results) || []
       const byBucket = Object.fromEntries(results.map((r) => [r.bucket, r]))
@@ -11632,220 +12202,53 @@ window.__ModuleLoader__.load({
             : null,
         ),
 
-        h(Sec, {
-          n: '02', title: '她会做什么',
-          right: h('span', { className: 'roost-note', style: { margin: 0 } },
-            feat ? `开着 ${featOnCount} 个 · 关着 ${featOffCount} 个` : ''),
-        },
-          h('div', { className: 'roost-note' },
-            '这些是「有没有这个功能」，和下面的「谁能用」是两层：这里关掉，谁的调不出来。'),
-          /** 两页分属两个进程，用户调「她怎么聊天」最容易走错页（§16.4-1） */
-          h('div', { className: 'roost-note' },
-            '接话策略、防吵、冷却在「设置 → roostHost.decide」；这一页管记忆、心情、主动和扩展。'),
-          /**
-           * A10（第二轮对照）：开关全留在本页，另加一层「按功能分组 → 细调页」的导航。
-           * 只增不减：权限页仍是这批开关的正门，细调页是并列入口，不是搬家。
-           * 只给有明确对应页的组做按钮；「干不干活 / 高级」就在本页调，不乱指路。
-           */
-          h('div', { className: 'cap-group' },
-            h('div', { className: 'cap-group-t' }, '按功能分组 · 去对应页细调'),
-            h('div', { className: 'roost-note', style: { marginBottom: 8 } },
-              '下面的开关在这一页就能改，不用跑别处；这里只是给「想细调」的人一个直达入口。'
-              + '怎么说话 → 表达（语音 / 表情包），记不记得 → 记忆，消息来不及回 → 群聊策略，会不会主动找你 → 主动搭话。'),
-            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-              ...[
-                ['语音', 'express'],
-                ['表情包', 'stickers'],
-                ['记忆', 'memory'],
-                ['群聊策略', 'groupchat'],
-                ['主动搭话', 'awake'],
-              ].map(([label, to]) => h('button', {
-                key: to, type: 'button', className: 'roost-btn',
-                onClick: () => {
-                  if (setTab) setTab(to)
-                  toast(`已切到「${label}」；开关仍留在权限页，改完随时回来`)
-                },
-              }, `细调：${label} ↗`)),
-            ),
+        /**
+         * 2026-11-26：33 个功能开关按 `FEATURE_HOME`（`src/features.js`）搬到各功能页，
+         * 权限页只剩「谁能用」。这里留一张指路牌，**不占分节编号**——
+         * 它不是一个功能分节，只是导航。
+         *
+         * 按钮用 `.roost-chip` 而不是 `.roost-btn`：一屏 11 个主按钮会喧宾夺主，
+         * 灰底小胶囊更像「目录」而不是「操作」。
+         */
+        h('div', { className: 'cap-group' },
+          h('div', { className: 'cap-group-t' }, '功能开关已分到各页'),
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '「有没有这个功能」不再在权限页调：运行态在概览，说话方式在聊天，'
+            + '记忆在记忆页，主动搭话在主动搭话页……这一页只管「谁能用」。'
+            + '下面按你常调的顺序排，点一下直达。'),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+            ...[
+              ['总开关 / 试运行', 'summary'],
+              ['说话方式', 'talk', 'say'],
+              ['排队与插话', 'talk', 'queue'],
+              /** 记忆页四段：开关 / 事实 / 召回各一条，别让人进去再自己翻页签 */
+              ['记忆 · 开关与遗忘', 'memory', 'now'],
+              ['记忆 · 事实与关系', 'memory', 'facts'],
+              ['记忆 · 召回与数据', 'memory', 'data'],
+              ['主动搭话 · 总开关', 'awake', 'gate'],
+              ['主动搭话 · 排期与机会', 'awake', 'plan'],
+              /** 引用 / 撤回的唯一控件在群聊策略「所有群默认」那一页签 */
+              ['引用 / 撤回', 'groupchat', 'all'],
+              ['语音', 'express'],
+              ['图库', 'stickers'],
+              ['心情', 'mood'],
+              ['人物', 'people'],
+              ['人格', 'her'],
+              ['安全防护', 'security'],
+              ['扩展', 'ext'],
+            ].map(([label, to, sub]) => h('button', {
+              key: to + (sub || ''), type: 'button', className: 'roost-chip',
+              onClick: () => {
+                if (goTab) goTab(to, sub)
+                else if (setTab) setTab(to)
+                toast(`已切到「${label}」`)
+              },
+            }, `${label} ↗`)),
           ),
-          feat
-            ? (feat.groups || []).map((g) => {
-                const items = (feat.features || []).filter((f) => (g.ids || []).includes(f.id))
-                if (!items.length) return null
-                /** 高级组用原生 details 默认收起：新开关多了不能一上来把人淹没（§16.5-4） */
-                return h(g.advanced ? 'details' : 'div', { key: g.id, className: 'cap-group' },
-                  h(g.advanced ? 'summary' : 'div', { className: 'cap-group-t' },
-                    g.advanced ? `${g.label} · ${items.length} 项，点开看看` : g.label),
-                  h('div', { className: 'cap-group-b' },
-                    items.map((f) => {
-                      const kind = f.kind || 'toggle'
-                      const isToggle = kind === 'toggle'
-                      const on = !!feat.on?.[f.id]
-                      const blocked = !on && feat.blocked?.[f.id]
-                      /** 非布尔项的当前值来自 `feat.settings`，不来自 `feat.on` */
-                      const cur = feat.settings?.[f.id] ?? f.default
-                      const draft = featDraft[f.id]
-
-                      let control
-                      if (isToggle) {
-                        control = h(Switch, {
-                          on,
-                          disabled: busy || !!blocked,
-                          title: blocked || '',
-                          label: f.label || f.id,
-                          onToggle: (next) => toggleFeat(f.id, next),
-                        })
-                      } else if (kind === 'select') {
-                        /** 当前值不在预设选项里 = 用户填过「自定义」 */
-                        const known = (f.options || []).some((o) => String(o.value) === String(cur))
-                        const opts = [
-                          ...(f.options || []).map((o) =>
-                            h('option', { key: String(o.value), value: String(o.value) }, o.label)),
-                          ...(f.custom ? [h('option', { key: '__custom', value: '__custom' }, '自定义…')] : []),
-                          ...(!known && !f.custom
-                            ? [h('option', { key: '__cur', value: String(cur) }, String(cur))]
-                            : []),
-                        ]
-                        control = h('div', { className: 'cap-ctl' },
-                          h(Dropdown, {
-                            className: 'roost-input',
-                            style: { width: '100%', padding: '3px 8px', fontSize: 11.5 },
-                            value: draft !== undefined ? String(draft)
-                              : (known ? String(cur) : (f.custom ? '__custom' : String(cur))),
-                            disabled: busy,
-                            onChange: (e) => {
-                              const v = e.target.value
-                              if (v === '__custom') {
-                                setFeatDraft((d) => ({ ...d, [f.id]: '__custom' }))
-                                return
-                              }
-                              setFeatValue(f.id, v)
-                            },
-                          }, opts),
-                          (f.custom && (draft === '__custom' || (!known && draft === undefined)))
-                            ? h('input', {
-                                type: 'number', min: f.min, max: f.max,
-                                defaultValue: known ? '' : String(cur),
-                                disabled: busy,
-                                onKeyDown: (e) => { if (e.key === 'Enter') e.target.blur() },
-                                onBlur: (e) => {
-                                  const v = String(e.target.value ?? '').trim()
-                                  if (v) setFeatValue(f.id, v)
-                                },
-                              })
-                            : null,
-                        )
-                      } else {
-                        /** number：编辑期用草稿，失焦 / 回车才提交 */
-                        control = h('input', {
-                          type: 'number',
-                          className: 'cap-num',
-                          min: f.min,
-                          max: f.max,
-                          value: draft !== undefined ? draft : String(cur ?? ''),
-                          disabled: busy,
-                          onChange: (e) => setFeatDraft((d) => ({ ...d, [f.id]: e.target.value })),
-                          onKeyDown: (e) => { if (e.key === 'Enter') e.target.blur() },
-                          onBlur: (e) => {
-                            const v = String(e.target.value ?? '').trim()
-                            const clear = () => setFeatDraft((d) => {
-                              const n = { ...d }; delete n[f.id]; return n
-                            })
-                            /**
-                             * 清空输入框 = 放弃这次编辑，**不能发 patch**。
-                             *
-                             * 后端 `normalizeSetting` 现在会拒空值（返回 400），
-                             * 但更早在前端挡掉能少一次无谓请求和一句报错 toast。
-                             * 以前这里把 `''` 提交上去，`Number('')` 是 0，
-                             * 会把 `queueMax` 静默改成 0（关掉排队）。
-                             */
-                            if (!v) return clear()
-                            /**
-                             * 按数值比较：'02' / '2 ' 和 2 是同一个值，不必多发一次 patch。
-                             * 但 `cur` 若是空串 / null（后端异常返回），`Number(cur)` 会得 0——
-                             * 那时用户真想填 0 会被误判成「没改」而丢掉提交，所以先判 cur 是否有效。
-                             */
-                            const curValid = cur !== '' && cur !== null && cur !== undefined
-                            if (v === String(cur ?? '') || (curValid && Number(v) === Number(cur))) return clear()
-                            setFeatValue(f.id, v)
-                          },
-                        })
-                      }
-
-                      return h('div', { key: f.id, className: 'cap-row' },
-                        control,
-                        h('div', { className: 'cap-row-b' },
-                          h('div', null, f.label, f.risky ? ' 🔴' : ''),
-                          h('div', { className: 'roost-note', style: { margin: 0 } }, f.desc),
-                          isToggle && !on
-                            ? h('div', { className: 'roost-note', style: { margin: 0 } }, `关掉之后：${f.offHint}`)
-                            : null,
-                          !isToggle
-                            ? h('div', { className: 'roost-note', style: { margin: 0 } },
-                                `当前 ${cur}${f.max !== undefined ? ` · 可填 ${f.min}–${f.max}` : ''}`)
-                            : null,
-                          blocked ? h('div', { className: 'roost-note', style: { margin: 0 } }, `⚠️ ${blocked}`) : null,
-                        ),
-                      )
-                    }),
-                  ),
-                )
-              })
-            : h('div', { className: 'roost-empty' }, '正在读功能开关…'),
-          /**
-           * D11：影响已存数据的开关必须先给 dry-run 预览，用户确认了才动数据。
-           * 「默认开」开的只是策略档位，没点「应用」前盘上一条记忆都不会变。
-           */
-          retention && retention.ok
-            ? h('div', { className: 'cap-group' },
-                h('div', { className: 'cap-group-t' }, '旧记忆淡出 · 先看会动到什么'),
-                h('div', { className: 'cap-group-b' },
-                  h('div', { className: 'roost-note', style: { margin: 0 } }, retention.text),
-                  h('div', { className: 'roost-note', style: { margin: 0 } },
-                    `事实：${retention.facts.enabled ? retention.facts.mode : '关'} · 日记：${retention.journal.enabled ? retention.journal.mode : '关'}；共扫 ${retention.total} 条。改档位不碰数据，要下面这个按钮才生效。`),
-                  h('div', { className: 'roost-note', style: { margin: 0 } },
-                    retention.autoSweep
-                      ? '已手动确认过一次：之后每天凌晨巩固时按当前策略自动重复。点「一键恢复」会停止自动。'
-                      : '还没点过「应用」，不会自动改动记忆。点一次之后，才会每天凌晨自动重复同一策略。'),
-                  (retention.expiredFacts || retention.expiredJournal)
-                    ? h('div', { className: 'roost-note', style: { margin: 0 } },
-                        `已作废 ${retention.expiredFacts} 条事实、${retention.expiredJournal} 条日记，可一键恢复。`)
-                    : null,
-                  h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-                    h('button', {
-                      type: 'button', className: 'roost-primary',
-                      disabled: busy || !retention.affected,
-                      onClick: async () => {
-                        const r = await quick('retention.apply')
-                        toast(r.message || (r.ok ? '应用好了' : '没改成'))
-                        reload()
-                      },
-                    }, retention.purge ? '应用（会真删，先自动备份）' : '应用（作废，可恢复）'),
-                    h('button', {
-                      type: 'button', className: 'roost-btn',
-                      disabled: busy || !(retention.expiredFacts || retention.expiredJournal),
-                      onClick: async () => {
-                        const r = await quick('retention.restore')
-                        toast(r.message || (r.ok ? '恢复了' : '没改成'))
-                        reload()
-                      },
-                    }, '一键恢复'),
-                  ),
-                ),
-              )
-            : null,
-          feat && (feat.wouldRemove || []).length
-            ? h('div', { className: 'roost-note' },
-                `按现在的设置，这一轮会收走：${listOf(feat.wouldRemove, 6)}`)
-            : null,
-          h('div', { className: 'roost-note' },
-            '带 config 的开关和「设置」页是同一份，在哪儿改都一样；发文件那个存在能力策略里。'),
-          h('div', { className: 'roost-note' },
-            '她记了什么、能清哪些：看左侧「记忆」页；人物档案、经历、召回日志都归到那边查看和清空。'),
         ),
 
         h(Sec, {
-          n: '03', title: '五个档位',
+          n: '02', title: '五个档位',
           right: h('span', { className: 'roost-note', style: { margin: 0 } }, `工具池 ${pool.length} 个`),
         },
           /**
@@ -11924,7 +12327,7 @@ window.__ModuleLoader__.load({
         ),
 
         h(Sec, {
-          n: '04', title: '工具清单',
+          n: '03', title: '工具清单',
           right: h('span', { className: 'roost-note', style: { margin: 0 } },
             h('button', {
               type: 'button',
@@ -11954,7 +12357,7 @@ window.__ModuleLoader__.load({
         ),
 
         h(Sec, {
-          n: '05', title: '分群例外',
+          n: '04', title: '分群例外',
           right: h('span', { className: 'roost-note', style: { margin: 0 } }, '只配例外'),
         },
           h('div', { className: 'roost-note' },
@@ -12011,7 +12414,7 @@ window.__ModuleLoader__.load({
          * 前面的都决定「能不能」，这一节决定「一天能几次」——
          * 前者是主人每天要看的，后者是配一次就不动的，所以放末尾。
          */
-        h(Sec, { n: '06', title: '次数限制',
+        h(Sec, { n: '05', title: '次数限制',
           right: h('span', { className: 'roost-note', style: { margin: 0, display: 'inline-flex', alignItems: 'center', gap: '6px' } },
             '按',
             h(Dropdown, {
@@ -12066,7 +12469,7 @@ window.__ModuleLoader__.load({
          * 绝不放一个改了不生效的编辑框；群白名单是自己的 awake.groups，
          * 才做批量添加与实时统计。
          */
-        h(Sec, { n: '07', title: '授权名单',
+        h(Sec, { n: '06', title: '授权名单',
           right: h('span', { className: 'roost-note', style: { margin: 0 } },
             '群归这里管 · 主人归框架面板') },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
@@ -12538,6 +12941,8 @@ window.__ModuleLoader__.load({
     function GroupChatTab({
       config, saveCfg, saveAll, toast, setTab, chats,
       decisions = null, loadDecisions = () => {},
+      /** 三级跳转：权限页「引用 / 撤回」直达 `all`（所有群默认）页签 */
+      subHint = null,
     }) {
       const decide = config?.roostHost?.decide || {}
       const merge = config?.roostHost?.merge || {}
@@ -12562,6 +12967,10 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false)
       /** 页签只控制显示，状态不进 URL / localStorage */
       const [pageTab, setPageTab] = useState('single')
+      /** 三级跳转落地：只认 PAGE_TABS 里真实存在的页签，认不出就留在默认页 */
+      useEffect(() => {
+        if (subHint && PAGE_TABS.some(([id]) => id === subHint)) setPageTab(subHint)
+      }, [subHint])
       /** null = 跟随后端值；编辑中才有内容，失焦提交后清空 */
       const [wordsDraft, setWordsDraft] = useState(null)
       /** 感兴趣的话题（一行一个），和忽略词同一套草稿语义 */
@@ -12750,9 +13159,9 @@ window.__ModuleLoader__.load({
               on: decide.silent === true, label: '一键静默', disabled: busy,
               onToggle: (v) => setDecide('silent', v),
             }))),
-        h('div', { className: 'roost-tabs' },
+        h('div', { className: 'roost-subtabs' },
           PAGE_TABS.map(([id, label]) => h('button', {
-            key: id, type: 'button', className: 'roost-chip',
+            key: id, type: 'button', className: 'roost-subtab',
             'data-on': pageTab === id ? '1' : '0',
             onClick: () => setPageTab(id),
           }, label))),
@@ -19183,6 +19592,17 @@ window.__ModuleLoader__.load({
       /** 上次与服务端对齐时的 JSON。和当前 cfgJson 不同 = 草稿已过期。用 state：改了要能触发重渲染 */
       const [baseline, setBaseline] = useState(cfgJson)
       const taRef = useRef(null)
+      /**
+       * 2026-11-26：整份 JSON 从「铺在页面上」改成**弹窗编辑**。
+       *
+       * 一屏 240px 高的 textarea 叠在设置页中间，页面看着像代码编辑器；
+       * 而真正高频的只有上面那张「各段是干什么的」——点段名去改一个键。
+       * 收进弹窗后：页面回到「看说明 + 一个入口」，弹窗打开就是全屏编辑。
+       * 逻辑（draft / baseline / stale / doSave）一个字没改，只是换了宿主。
+       */
+      const [jsonOpen, setJsonOpen] = useState(false)
+      /** 点段名时弹窗还没开：先记下要看哪段，等 textarea 挂上再定位 */
+      const pendingJump = useRef('')
 
       /**
        * 外部配置变了（比如上面刚保存了工作区）：没动过草稿就跟上，动过就保留。
@@ -19215,7 +19635,15 @@ window.__ModuleLoader__.load({
        */
       const jumpTo = (k) => {
         const ta = taRef.current
-        if (!ta) return
+        /**
+         * 弹窗还没开（用户在「各段是干什么的」里点的）：
+         * 先开弹窗并把目标段记下，等 textarea 挂载后由下面的 effect 完成定位。
+         */
+        if (!ta) {
+          pendingJump.current = k
+          setJsonOpen(true)
+          return
+        }
         const needle = '"' + k + '"'
         const i = draft.indexOf(needle)
         if (i < 0) {
@@ -19227,6 +19655,29 @@ window.__ModuleLoader__.load({
         // 11.5px × 1.6 ≈ 18.4px 行高；滚到中间偏上，前后都能看见
         const line = draft.slice(0, i).split('\n').length - 1
         ta.scrollTop = Math.max(0, line * 18.4 - ta.clientHeight / 2)
+      }
+
+      /** 弹窗挂载后再定位：`taRef` 要等 DOM 出来才有值 */
+      useEffect(() => {
+        if (!jsonOpen || !pendingJump.current) return undefined
+        const k = pendingJump.current
+        pendingJump.current = ''
+        const t = setTimeout(() => jumpTo(k), 0)
+        return () => clearTimeout(t)
+      }, [jsonOpen])
+
+      /**
+       * 关闭弹窗。
+       *
+       * 有未保存改动时**只提示、不关**（照人格页正文编辑弹窗的规矩）：
+       * 遮罩一点就丢一整屏手工改的 JSON，比多问一句难受得多。
+       */
+      const closeJson = () => {
+        if (dirty) {
+          toast('配置有未保存的改动：先「保存」，或点「还原」丢掉再关')
+          return
+        }
+        setJsonOpen(false)
       }
 
       /**
@@ -19291,6 +19742,46 @@ window.__ModuleLoader__.load({
 
       return h('div', null,
         /**
+         * 配置全文弹窗（2026-11-26 从页面正文搬进来）。
+         *
+         * `PageModal` 本身就是 920px 宽的遮罩层，textarea 给 420px 高，
+         * 比原来页面上那块 240px 的更好用；逻辑（draft / baseline / stale /
+         * doSave）全部原样搬进来，没有重写一行保存逻辑。
+         */
+        jsonOpen
+          ? h(PageModal, { title: '配置全文', onClose: closeJson },
+              err ? h('div', { style: { color: 'var(--bad)', fontSize: 12, marginBottom: 6 } }, err) : null,
+              stale
+                ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)', marginBottom: 6, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                    h('span', null, '配置在别处改过了，直接保存会把它盖回去。'),
+                    h('button', { type: 'button', className: 'roost-btn', onClick: reloadDraft }, '重新载入'),
+                    h('button', { type: 'button', className: 'roost-btn', onClick: keepMine }, '仍用我的草稿'))
+                : null,
+              h('textarea', {
+                ref: taRef,
+                className: 'roost-input',
+                style: {
+                  minHeight: 420, width: '100%', boxSizing: 'border-box',
+                  fontFamily: 'ui-monospace,Menlo,Consolas,monospace',
+                  fontSize: 11.5, lineHeight: 1.6, resize: 'vertical',
+                },
+                value: draft,
+                spellCheck: false,
+                onChange: (e) => { setDraft(e.target.value); setDirty(true) },
+              }),
+              h('div', { className: 'roost-note' },
+                '密钥显示成 ******。原样提交回来不会覆盖真密钥，只有填了新的才会改。'),
+              h('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 10 } },
+                h('button', { type: 'button', className: 'roost-btn', onClick: reloadDraft }, '还原'),
+                h('button', {
+                  type: 'button', className: 'roost-primary', onClick: doSave,
+                  disabled: stale,
+                  title: stale ? '配置在别处改过了，先选「重新载入」或「仍用我的草稿」' : '',
+                }, '保存'),
+              ),
+            )
+          : null,
+        /**
          * 2026-11-12：模型 / 更新 / 反馈 / 语音 / 表情包各自独立成页，
          * 这里只剩「这台机器怎么配」——配置全文、各段说明。
          * 2.7：工作区卡片挪进「首次设置」，这里按原位置留一行链接（只增不减）。
@@ -19305,31 +19796,22 @@ window.__ModuleLoader__.load({
             '工作区目录和名字在「首次设置」页里改——那是装机时定一次的事，跟本页的配置全文不是一个使用频率。改完要重启会话才挂上新工作区。'),
         ),
 
-        h(Sec, { n: '02', title: '配置全文', right: h('div', { style: { display: 'flex', gap: 8 } },
-          h('button', { type: 'button', className: 'roost-btn', onClick: reloadDraft }, '还原'),
-          h('button', {
-            type: 'button', className: 'roost-primary', onClick: doSave,
-            disabled: stale,
-            title: stale ? '配置在别处改过了，先选「重新载入」或「仍用我的草稿」' : '',
-          }, '保存'),
-        ) },
-          err ? h('div', { style: { color: 'var(--bad)', fontSize: 12, marginBottom: 6 } }, err) : null,
-          stale
-            ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)', marginBottom: 6, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-                h('span', null, '配置在别处改过了，直接保存会把它盖回去。'),
-                h('button', { type: 'button', className: 'roost-btn', onClick: reloadDraft }, '重新载入'),
-                h('button', { type: 'button', className: 'roost-btn', onClick: keepMine }, '仍用我的草稿'))
+        h(Sec, { n: '02', title: '配置全文',
+          right: h('button', {
+            type: 'button', className: 'roost-primary',
+            onClick: () => setJsonOpen(true),
+          }, '编辑配置全文 ↗'),
+        },
+          h('div', { className: 'roost-note', style: { margin: 0 } },
+            `整份 config.json 都在这里改${config ? `：${Object.keys(config).length} 个段` : ''}。`
+            + '内容太长，已经收进弹窗；下面「各段是干什么的」点一下会直接开弹窗并跳到那一段。'),
+          dirty
+            ? h('div', { className: 'roost-note', style: { color: 'var(--warn, #b8860b)', margin: 0 } },
+                '弹窗里还有未保存的改动。')
             : null,
-          h('textarea', {
-            ref: taRef,
-            className: 'roost-input',
-            style: { minHeight: 240, fontFamily: 'ui-monospace,Menlo,Consolas,monospace', fontSize: 11.5, lineHeight: 1.6, resize: 'vertical' },
-            value: draft,
-            spellCheck: false,
-            onChange: (e) => { setDraft(e.target.value); setDirty(true) },
-          }),
-          h('div', { className: 'roost-note' },
-            '密钥显示成 ******。原样提交回来不会覆盖真密钥，只有填了新的才会改。'),
+          err
+            ? h('div', { style: { color: 'var(--bad)', fontSize: 12, marginTop: 6 } }, err)
+            : null,
         ),
 
         h(Sec, { n: '03', title: '各段是干什么的' },
@@ -22071,8 +22553,20 @@ window.__ModuleLoader__.load({
     }
 
 
-    function ExpressTab({ config, stickers, saveCfg, toast, reload, part = 'all' }) {
+    function ExpressTab({ config, stickers, saveCfg, toast, reload, part = 'all',
+      feat, reloadCaps, quick, busy }) {
       return h('div', null,
+        /**
+         * 2026-11-26：`voice`（语音条总开关）从权限页搬来。
+         *
+         * 只挂在 `part === 'voice'` 的语音页上：图库页（`part === 'sticker'`）
+         * 有自己的「启用表情包」开关，语音条不该出现在那儿。
+         * 用**无编号**分节，避免打乱下面 TtsCard / AsrCard 的 01/02 编号。
+         */
+        part === 'voice'
+          ? h(Sec, { title: '语音条总开关' },
+              h(FeatureGroup, { feat, quick, toast, reload: reloadCaps, busy, ids: ['voice'] }))
+          : null,
         part === 'sticker' ? null : h(TtsCard, { config, saveCfg, toast, reload }),
         /** A3：听语音只在独立的「语音」页出现；老入口 part='all' 行为不变 */
         part === 'voice' ? h(AsrCard, { toast }) : null,
@@ -22111,7 +22605,7 @@ window.__ModuleLoader__.load({
      * `security` 下被点的那一个键，不会把 `ssrf.allowHosts` 顶掉。
      * 关掉「危险命令确认」是降安全等级的动作，先弹确认框再提交。
      */
-    function SecurityTab({ config, saveCfg, toast, setTab }) {
+    function SecurityTab({ config, saveCfg, toast, setTab, feat, reloadCaps, quick, busy }) {
       const s = config?.security || {}
       const ssrf = s.ssrf || {}
       const hosts = Array.isArray(ssrf.allowHosts) ? ssrf.allowHosts : []
@@ -22227,6 +22721,14 @@ window.__ModuleLoader__.load({
           h('div', { className: 'roost-note' },
             '这一页的开关直接写服务端配置（深合并，只改被点的那一个键）；'
             + '「配置全文」仍可看到同一个 security 段，两边读的是同一份 —— 改完立刻生效，不用重启。'),
+        ),
+
+        /**
+         * 2026-11-26：`leakGuard`（防她把提示词背出来）从权限页搬来。
+         * 它是一道防护，不是权限——放安全页才对得上「防护」这个组。
+         */
+        h(Sec, { n: '04', title: '提示词防泄露' },
+          h(FeatureGroup, { feat, quick, toast, reload: reloadCaps, busy, ids: ['leakGuard'] }),
         ),
         askOff ? h(ConfirmModal, {
           title: '关掉危险命令确认？',
@@ -22987,12 +23489,19 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ExtTab({ quick, toast, extPages, setTab, reloadExtPages }) {
+    function ExtTab({ quick, toast, extPages, setTab, reloadExtPages, feat, reloadCaps, busy }) {
       return h('div', null,
         h(ExtSettingsBlock, { toast, part: 'installed', reloadExtPages }),
         h(ExtPagesIndexCard, { extPages, setTab }),
         h(ExtCapsBlock, { quick, toast }),
         h(ExtWizardBlock, { toast }),
+        /**
+         * 2026-11-26：`bridge`（对外联动）与 `extensions`（用户扩展）从权限页搬来。
+         * 两者都是「扩展这一层要不要开」，放已安装页末尾，紧挨着它们影响的列表。
+         */
+        h(Sec, { title: '对外联动与用户扩展' },
+          h(FeatureGroup, { feat, quick, toast, reload: reloadCaps, busy, ids: ['bridge', 'extensions'] }),
+        ),
       )
     }
 
@@ -23693,6 +24202,14 @@ window.__ModuleLoader__.load({
     const TABS = [
       ['overview', '概览'],
       /**
+       * 设置总览（2026-11-26）：33 个功能开关的现状与直达。
+       *
+       * 为什么独立一页而不是概览里的第 7 节：概览答「我卡在哪一步」（运行状态），
+       * 这页答「她都开着什么」（配置状态）。那张汇总卡本身有 6 行只读 + 按钮，
+       * 比概览任何一节都长，塞进去会把概览压垮。
+       */
+      ['summary', '设置总览'],
+      /**
        * 个性化（2026-11-19）：菜单顺序 / 显示隐藏 / 强调色 / 动效。
        *
        * 为什么不放「系统」组：系统组已经 11 页，是全站最重的一组；而这几项
@@ -23702,6 +24219,16 @@ window.__ModuleLoader__.load({
       ['personalize', '个性化'],
       /* 人设：她是谁、心情如何、什么时候开口、记得什么 */
       ['her', '人格'],
+      /**
+       * 聊天（2026-11-26）：她**怎么说话**——分段 / 撤回 / 引用 / 收尾，以及
+       * 消息来不及回时的插话与排队。
+       *
+       * 为什么单开一页而不是塞进人格页：这些开关原来是权限页 Sec 02 的一坨，
+       * 用户要关「引用回复」得先知道它归「权限」；而在语义上它们既不属于
+       * 人格（不是她是谁），也不属于记忆（不是她记得什么），更没有别的页
+       * 承接——是 33 个开关搬迁里唯一没有归属页的一域，所以新开一页。
+       */
+      ['talk', '聊天'],
       /**
        * 资料：她的名字 / 简介 / 头像 / 菜单，以及「她能不能自己改」。
        *
@@ -23950,8 +24477,10 @@ window.__ModuleLoader__.load({
      */
     const TAB_ALIAS = {
       overview: '概览 首页 总览 现在 状态 卡在哪',
+      summary: '设置总览 功能开关 汇总 开着什么 全貌 一览 都开了什么 总闸',
       personalize: '个性化 外观 主题 颜色 强调色 卡片 背景 透明度 菜单 页签 顺序 隐藏 显示 布局 自定义 动画',
       her: '人格 人设 角色 名字 自称',
+      talk: '聊天 怎么说话 说话方式 分段 拆条 退场 撤回 引用 引用概率 收尾 发文件 插话 串行 排队 缓冲 急事',
       profile: '资料 改资料 昵称 头像 简介 签名 菜单 换名字 换头像 自我表达 她能不能自己改',
       mood: '心情 情绪 状态 衰减',
       awake: '主动搭话 主动 唤醒 互动召回 机会',
@@ -24013,8 +24542,8 @@ window.__ModuleLoader__.load({
     }
 
     const NAV_GROUPS = [
-      { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview', 'personalize'] },
-      { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'profile', 'mood', 'awake', 'autotelic', 'memory', 'people'] },
+      { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview', 'summary', 'personalize'] },
+      { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'talk', 'profile', 'mood', 'awake', 'autotelic', 'memory', 'people'] },
       /**
        * 表达：她怎么"出声"——说话（语音合成）、表情包、发帖。
        *
@@ -24455,6 +24984,28 @@ window.__ModuleLoader__.load({
         try { localStorage.setItem('roost.tab', next) } catch {}
       }, [])
       /**
+       * 三级跳转：`goTab('talk', 'queue')` 直接落到聊天页的「排队与插话」页签。
+       *
+       * 为什么需要第二个参数：页内页签是组件**内部** state（聊天页的 `view`、
+       * 群聊策略的 `pageTab`），`setTab` 只切二级页，落进去永远停在默认页签。
+       * 权限页的指路牌、概览的「去调」都靠它一步到位，而不是「跳过去再自己找」。
+       *
+       * `sub` 只对声明了页内页签的页有意义；传了不认识的子页签，
+       * 目标组件会自己忽略（各自 `VIEWS.some(...)` 校验），不会卡在空页。
+       */
+      const [tabHint, setTabHint] = useState(null)
+      const goTab = useCallback((id, sub) => {
+        setTabHint(sub ? { tab: LEGACY_CH_TABS[id] ? 'ch-api' : id, sub } : null)
+        setTab(id)
+      }, [setTab])
+      /**
+       * 提示只对「刚跳到的那一页」有效：用户随手切走再回来，
+       * 不该莫名其妙落在上次那个页签上。
+       */
+      useEffect(() => {
+        if (tabHint && tabHint.tab !== tab) setTabHint(null)
+      }, [tab, tabHint])
+      /**
        * Alt+K 打开全局查找；Esc 关；↑↓ 选择；回车跳转。
        * 只在面板里监听（卸载即移除），不污染宿主页面。
        */
@@ -24839,18 +25390,38 @@ window.__ModuleLoader__.load({
             })
         }
 
+        /**
+         * 设置总览页只读 `features.get`（一次请求），不需要整份 `loadCaps`。
+         * 用 `!capFeat` 判空：数据已经有了就不必重拉。
+         */
+        if (tab === 'summary' && !capFeat) once('feat', loadFeatOnly)
+        /**
+         * 聊天页与权限页共用 `features.get` 那一份快照：
+         * 从聊天页直达也要能读到开关（否则页面会停在「正在读功能开关…」）。
+         */
+        if (tab === 'talk') once('caps', loadCaps)
         if (tab === 'caps') {
           once('caps', loadCaps)
           /** 2.8 名单节读 config；直接停在权限页刷新也要拉一次 */
           if (!config) once('config', loadConfig)
         }
         /** 人物 / 备份共用 /memory 那一份快照；直接从这两页进也要拉一次 */
-        if (tab === 'memory' || tab === 'people' || tab === 'backup') once('memory', () => loadMemory())
+        if (tab === 'memory' || tab === 'people' || tab === 'backup') {
+          once('memory', () => loadMemory())
+          /**
+           * 记忆页现在还承接 12 个功能开关与旧记忆淡出预览（2026-11-26 从权限页搬来），
+           * 这两样都在 `loadCaps` 那一批里。不一起拉，页面会卡在「正在读功能开关…」。
+           * 人物页只多一个 `profiles` 开关，`backup` 不需要，别为它多跑 6 个请求。
+           */
+          if (tab === 'memory' || tab === 'people') once('caps', loadCaps)
+        }
         if (tab === 'her') {
           once('her', loadHer)
           // 名字输入框读 config；「本群」下拉要 mem.chatId——都主动拉一次
           if (!config) once('config', loadConfig)
           if (!mem) once('memory', () => loadMemory())
+          /** 人格清单末尾承接 `personaCommand` 开关（2026-11-26 从权限页搬来） */
+          once('caps', loadCaps)
         }
         /**
          * 心情页的数据**全部**来自 `/mood`，而它挂在 `her` 上。
@@ -24862,6 +25433,8 @@ window.__ModuleLoader__.load({
          */
         if (tab === 'mood') {
           if (!her?.mood) once('her', loadHer)
+          /** 心情页 04 节承接 `moodEffects` 开关，数据在 loadCaps 那批里 */
+          once('caps', loadCaps)
         }
         /**
          * 表达页：语音卡片读 `config.tts`、表情包卡片读 `/stickers`（挂在 `her` 上）。
@@ -24873,6 +25446,8 @@ window.__ModuleLoader__.load({
         if (tab === 'express' || tab === 'stickers') {
           if (!config) once('config', loadConfig)
           if (!her?.stickers) once('her', loadHer)
+          /** 语音页承接 `voice` 开关（2026-11-26 从权限页搬来）；图库页已有同名开关不用 */
+          if (tab === 'express') once('caps', loadCaps)
         }
         /**
          * 模型页：「视觉能力」那一行读写 `config.roostHost.vision`。
@@ -24895,9 +25470,15 @@ window.__ModuleLoader__.load({
          * 用户点白名单框没反应、开关点不动，只有状态字按默认值写着「已开启」。
          */
         if (tab === 'security' && !config) once('config', loadConfig)
+        /** 04 节承接 `leakGuard` 开关（2026-11-26 从权限页搬来） */
+        if (tab === 'security') once('caps', loadCaps)
+        /** 扩展页末尾承接 `bridge` / `extensions` 两个开关（2026-11-26 从权限页搬来） */
+        if (tab === 'ext') once('caps', loadCaps)
         if (tab === 'awake') {
           // 授权状态在 /memory 里、chatId 列表在 /chats 里，这一页两样都要用
           once('awake', loadAwake)
+          /** 总开关那节承接 `speakUp` / `awake`（2026-11-26 从权限页搬来） */
+          once('caps', loadCaps)
           /**
            * 判的是**字段**不是对象：`loadHer` 即使三个接口全失败也会 setHer，
            * 对象非空但里面全是 null。只看 `!her` 的话，插件刚起时一次 503
@@ -25039,8 +25620,18 @@ window.__ModuleLoader__.load({
        * `resolvePolicy()`。前端自己展开 `*` / `group:x` 的话，迟早和后台算出两套结果，
        * 那就是"面板说没有、实际有"这类最伤信任的 bug。
        */
-      const loadCaps = useCallback(async () => {
-        /** 进来先记序号：这之后如果点了页头开关，这次 `features.get` 的结果就作废 */
+      /**
+       * 概览页专用：只要 `features.get` 的开关状态。
+       *
+       * `loadCaps` 一次打 6 个接口（策略 / 试算 / 会话 / 功能 / 配额 / 淡出预览），
+       * 概览的「设置总览」卡只需要 `on`，没必要为首屏多压 5 个请求。
+       */
+      const loadFeatOnly = useCallback(async () => {
+        const f = await quick('features.get')
+        setCapFeat(f.ok === false ? null : f)
+      }, [quick])
+
+      const loadCaps = useCallback(async () => {        /** 进来先记序号：这之后如果点了页头开关，这次 `features.get` 的结果就作废 */
         const featSeqAtStart = featSeq.current
         const r = await quick('capabilities.get')
         if (r.ok === false) {
@@ -25300,7 +25891,14 @@ window.__ModuleLoader__.load({
         },
           h(RenderBoundary, { key: 'tab:' + tab },
             h('div', { className: 'roost-body-inner' + (['overview', 'memory', 'people'].includes(tab) ? ' is-data-view' : '') },
-            tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: setTab, logs }) : null,
+            tab === 'overview' ? h(OverviewTab, { st, setupSt, toast, reload: loadStatus, busy, run, onGo: goTab, logs }) : null,
+          /**
+           * 设置总览（2026-11-26）：开关现状 + 三级跳转。
+           * 只有「运行」两个总闸在这里可写，其余都在各功能页。
+           */
+          tab === 'summary' ? h(SummaryTab, {
+            feat: capFeat, quick, toast, reload: loadFeatOnly, busy, onGo: goTab,
+          }) : null,
           /** 个性化：偏好状态在 RoostPage（`uiPref`），这里只传下去 */
           tab === 'personalize' ? h(PersonalizeTab, { uiPref, setPrefs, toast, extPages }) : null,
           tab === 'setup' ? h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }) : null,
@@ -25312,21 +25910,37 @@ window.__ModuleLoader__.load({
                 h(SetupTab, { st: setupSt, reload: loadStatus, toast, busy, run, reg, onSaved: loadSetupMeta, saveCfg }))
             : null,
           /** A6：安全防护独立页；5.14 起开关可写（深合并到同一个 security 段） */
-          tab === 'security' ? h(SecurityTab, { config, saveCfg, toast, setTab }) : null,
+          tab === 'security' ? h(SecurityTab, {
+            config, saveCfg, toast, setTab, feat: capFeat, reloadCaps: loadCaps, quick, busy,
+          }) : null,
           tab === 'her'
             ? h(HerTab, {
                 config,
                 personas: her?.personas ?? null,
                 mem, toast, save: saveCfg, reload: loadHer, quick,
+                /** 2026-11-26：`personaCommand` 开关从权限页搬来 */
+                feat: capFeat, reloadCaps: loadCaps, busy,
               })
             : null,
+          /**
+           * 聊天页（2026-11-26）：开关数据复用 `capFeat`（`features.get` 一次下发），
+           * 不再单独请求——同一份数据在两个页面各拉一次会出现「这边开了那边没变」。
+           */
+          tab === 'talk' ? h(TalkTab, {
+            feat: capFeat, quick, toast, reload: loadCaps, busy, setTab,
+            /** 三级跳转：从权限页 / 概览点「说话方式」直达 say 页签 */
+            subHint: tabHint && tabHint.tab === 'talk' ? tabHint.sub : null,
+          }) : null,
           tab === 'caps' ? h(CapsTab, {
             caps, preview: capPreview, chats: capChats, feat: capFeat,
             retention: capRetention, quota: capQuota, toast, reload: loadCaps, quick, busy,
             /** 2.8 名单要读 config.awake.groups / 写回整份，还要展示框架侧主人状态 */
-            config, saveCfg, setupSt, setTab,
+            config, saveCfg, setupSt, setTab, goTab,
           }) : null,
-          tab === 'ext' ? h(ExtTab, { quick, toast, extPages, setTab, reloadExtPages }) : null,
+          tab === 'ext' ? h(ExtTab, {
+            quick, toast, extPages, setTab, reloadExtPages,
+            feat: capFeat, reloadCaps: loadCaps, busy,
+          }) : null,
           tab === 'ext-market' ? h(ExtMarketTab, { toast, reloadExtPages }) : null,
           tab === 'ext-api' ? h(ExtApiTab, { toast }) : null,
           /** 6.1：扩展声明的页面。tab key 形如 `ext:<id>`，不在静态 TABS 里 */
@@ -25345,16 +25959,33 @@ window.__ModuleLoader__.load({
                 } : null,
               })
             : null,
-          tab === 'memory' ? h(MemoryTab, { mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat, setTab, config, saveCfg }) : null,
+          /**
+           * 记忆页（2026-11-26）：12 个开关 + 旧记忆淡出的 dry-run 从权限页搬来，
+           * 与 `mem` 同一份页面、各拉各的数据（`loadCaps` 提供 features.get / features.preview）。
+           */
+          tab === 'memory' ? h(MemoryTab, {
+            mem, toast, reload: loadMemory, quick, busy, onPickChat: pickChat, setTab, config, saveCfg,
+            feat: capFeat, retention: capRetention, reloadCaps: loadCaps,
+            /** 权限页指路牌 / 设置总览可以直达某一段（开关与概览 / 认知 / 事实 / 召回） */
+            subHint: tabHint && tabHint.tab === 'memory' ? tabHint.sub : null,
+          }) : null,
           /** 2.3：与记忆页并列的两个入口，同一份 mem，不复制状态 */
-          tab === 'people' ? h(PeopleTab, { mem, toast, reload: loadMemory, quick, busy, setTab }) : null,
+          tab === 'people' ? h(PeopleTab, {
+            mem, toast, reload: loadMemory, quick, busy, setTab,
+            feat: capFeat, reloadCaps: loadCaps,
+          }) : null,
           tab === 'backup' ? h(BackupTab, { mem, toast, reload: loadMemory, quick, busy, setTab, config, saveCfg }) : null,
           /** 2026-11-12 新增：心情从「主动搭话」拆出，表达/模型从「设置」拆出 */
-          tab === 'mood' ? h(MoodTab, { mood: her?.mood ?? null, reloadMood: loadHer, toast, quick, config, saveCfg }) : null,
+          tab === 'mood' ? h(MoodTab, {
+            mood: her?.mood ?? null, reloadMood: loadHer, toast, quick, config, saveCfg,
+            feat: capFeat, reloadCaps: loadCaps, busy,
+          }) : null,
           tab === 'express'
             ? h(ExpressTab, {
                 config, stickers: her?.stickers ?? null,
                 saveCfg, toast, reload: loadHer, part: 'voice',
+                /** 2026-11-26：语音条总开关从权限页搬来 */
+                feat: capFeat, reloadCaps: loadCaps, quick, busy,
               })
             : null,
           /** 表情包：从「表达」里拆出来的那一半（2026-11-13），tab key 新增，不动老的 */
@@ -25380,6 +26011,10 @@ window.__ModuleLoader__.load({
                 toast, reload: loadAwake, reloadSp: loadAwake, busy, quick,
                 /** 4.6 互动召回的开关要读写 config.wakeup */
                 config, saveCfg,
+                /** 2026-11-26：`speakUp` / `awake` 总开关从权限页搬来 */
+                feat: capFeat, reloadCaps: loadCaps,
+                /** 三级跳转：总开关 / 排期与机会 / 小动作 / 出站与试跑 */
+                subHint: tabHint && tabHint.tab === 'awake' ? tabHint.sub : null,
               })
             : null,
           /** 自驱引擎独立页：与主动搭话分开，默认全关的日常不占主动页位置 */
@@ -25406,7 +26041,11 @@ window.__ModuleLoader__.load({
           tab === 'chats' ? h(ChatsTab, { chats, reload: loadChats, toast }) : null,
           /** 群聊策略：四个页签；默认页 01–08 按功能常用程度排，09 单群覆写、10 决策链 */
           tab === 'groupchat'
-            ? h(GroupChatTab, { config, saveCfg, saveAll, toast, setTab, chats, decisions, loadDecisions })
+            ? h(GroupChatTab, {
+              config, saveCfg, saveAll, toast, setTab, chats, decisions, loadDecisions,
+              /** 权限页「引用 / 撤回」直达「所有群默认」页签 */
+              subHint: tabHint && tabHint.tab === 'groupchat' ? tabHint.sub : null,
+            })
             : null,
           /** 群管：禁言 / 踢人 / 入群审批。协议侧 group.* 是 message scope，装了就能用 */
           tab === 'groupadmin' ? h(GroupAdminTab, { chats, toast }) : null,
@@ -25622,6 +26261,16 @@ window.__ModuleLoader__.load({
     exports.ChannelPolicyTab = ChannelPolicyTab
     /** 频道下拉的候选抽取（子频道 chatId → 纯 guildId + 去重），测试直接断言 */
     exports.guildChoicesOf = guildChoicesOf
+    /**
+     * 2026-11-26：开关搬迁后的两个新件，导出给测试盯住「真的画出来了」。
+     * 映射表（`FEATURE_HOME`）写对了但页面忘了接 `FeatureGroup` 时，
+     * 代码不报错、页面也不白屏，只是开关悄悄没了——只有渲染断言能抓到。
+     */
+    exports.TalkTab = TalkTab
+    exports.SummaryTab = SummaryTab
+    exports.OverviewTab = OverviewTab
+    exports.FeatureGroup = FeatureGroup
+    exports.SecurityTab = SecurityTab
     exports.CapsTab = CapsTab
     exports.ToolsModal = ToolsModal
     /**
