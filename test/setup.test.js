@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, existsSync, readFileSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -27,8 +27,8 @@ function makeRoost({ port = 15210 } = {}) {
   return dir;
 }
 
-function makeSetup(dir, { token = '', installer = null, dataDir = null, setCfg = null } = {}) {
-  const cfg = { server: { port: 17321, token }, setup: { roostDir: dir, version: 'v0.8.6' } };
+function makeSetup(dir, { token = '', installer = null, dataDir = null, setCfg = null, setupCfg = {} } = {}) {
+  const cfg = { server: { port: 17321, token }, setup: { roostDir: dir, version: 'v0.8.6', ...setupCfg } };
   return createSetup({
     cfgOf: () => cfg,
     setCfg: setCfg || (() => {}),
@@ -97,6 +97,23 @@ test('移除 ai-chat：detect 不再探测 ai-chat 插件，Roost 探测照常',
     assert.ok(Array.isArray(st.bots));
     assert.equal(typeof st.hasBot, 'boolean');
     assert.equal(typeof st.hasCreds, 'boolean');
+  });
+});
+
+/**
+ * 接入页那颗开关的状态来源。
+ *
+ * 前端不能自己读 `config.setup.verifyIdentity` 原值——没写过这个键的用户
+ * 拿到的是 `undefined`，界面上开关会是个空档。所以由 `detect()` 回**生效值**，
+ * 这条钉住那个归一（只有显式 `true` 才算开）。
+ */
+test('detect: 回探活身份校验的生效值（默认关，配成 true 才是开）', async () => {
+  const dir = makeRoost();
+  await withFetch(async () => okRes({}), async () => {
+    const off = await makeSetup(dir).detect();
+    assert.equal(off.verifyIdentity, false, '没写过这个键时要显示成关');
+    const on = await makeSetup(dir, { setupCfg: { verifyIdentity: true } }).detect();
+    assert.equal(on.verifyIdentity, true, '配成 true 才是开');
   });
 });
 
@@ -317,9 +334,108 @@ test('身份指纹：与框架同口径（sha256 前 12 位），路径写法不
   }
 });
 
+test('身份指纹: 软链目录与真实目录算出同一个值', (t) => {
+  const real = mkdtempSync(join(tmpdir(), 'roost-real-'));
+  const link = join(tmpdir(), `roost-link-${process.pid}-${Date.now()}`);
+  try {
+    // Windows 上目录 symlink 需要开发者模式或管理员权限，junction 不需要
+    symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch {
+    t.skip('当前环境建不了目录链接');
+    return;
+  }
+  /**
+   * 框架那边 `ROOT` 来自 `import.meta.dirname`，ESM 加载器默认把软链解析成
+   * 真实路径；插件这边拿到的是用户填的原始字符串。不归一就两边哈希不等，
+   * 现象是「面板在浏览器里明明开着，接入页第 2 步永远卡在进行中」。
+   */
+  assert.equal(healthDirHash(link), healthDirHash(real), '软链必须折成真实路径');
+});
+
+test('探活: dirHash 对不上，但 pid 是本目录心跳新鲜的实例 → 认', async () => {
+  const dir = makeRoost();
+  const beat = 'a'.repeat(19) + 'f';
+  mkdirSync(join(dir, 'data', 'instance-beats'), { recursive: true });
+  writeFileSync(join(dir, 'data', 'instance-beats', `${beat}.beat`), '', 'utf8');
+  writeFileSync(
+    join(dir, 'data', 'instances.json'),
+    JSON.stringify({ abc: { pid: 424242, beat: `${beat}.beat`, at: Date.now() } }),
+    'utf8',
+  );
+  const setup = makeSetup(dir, { setupCfg: { verifyIdentity: true } });
+  await withFetch(
+    async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ok: true, bots: [{ id: 'main', state: 'online' }], online: 1, total: 1,
+          pid: 424242, dirHash: healthDirHash(join(dir, 'another-roost')),
+        }),
+    }),
+    async () => {
+      /**
+       * 同一份 Roost 的两种路径视图（软链 / 绑定挂载 / 大小写）。realpath 折不到
+       * 一起时，用「这个 pid 就是本目录实例表里那条心跳新鲜的记录」来确认身份。
+       */
+      assert.equal(await setup.isRunning(), true, '同一进程的另一种路径视图必须认');
+    },
+  );
+});
+
+test('探活: dirHash 对不上、本目录又没有实例表 → 仍然拒', async () => {
+  // makeRoost 只造了 data/ports.json，没有 instances.json —— 即「没有正面证据」
+  const dir = makeRoost();
+  const setup = makeSetup(dir, { setupCfg: { verifyIdentity: true } });
+  await withFetch(
+    async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ok: true, bots: [{ id: 'main', state: 'online' }], online: 1, total: 1,
+          pid: 424242, dirHash: healthDirHash(join(dir, 'another-roost')),
+        }),
+    }),
+    async () => {
+      /**
+       * 这条钉的是一个真实踩到的坑：本机常年另有一份 Roost 跑在 15210，
+       * 而新装的目录还没写过实例表。若兜底用宽松版（表缺失=放过），
+       * 就会把别处的 Roost 认成本目录的，「卸载重装」直接停不下来。
+       */
+      assert.equal(await setup.isRunning(), false, '没有正面证据就不能放过');
+    },
+  );
+});
+
+test('探活: 默认不校验身份 —— dirHash 对不上也认', async () => {
+  const dir = makeRoost();
+  const setup = makeSetup(dir); // 不传 setupCfg = 默认 verifyIdentity:false
+  await withFetch(
+    async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ok: true, bots: [{ id: 'main', state: 'online' }], online: 1, total: 1,
+          pid: 424242, dirHash: healthDirHash(join(dir, 'another-roost')),
+        }),
+    }),
+    async () => {
+      /**
+       * 普通用户只装一份 Roost，身份校验防的场景他碰不到，却要承担误判代价
+       * （软链 / PRoot 路径视图不同 → 面板在开着却永远判「没在跑」）。
+       * 所以默认只认「端口上有合法 Roost」。要防多实例串台，把
+       * `setup.verifyIdentity` 打开。
+       */
+      assert.equal(await setup.isRunning(), true, '默认关闭校验时必须认，不能卡住接入');
+    },
+  );
+});
+
 test('探活: 另一目录的 Roost 占着端口，不算本目录在跑', async () => {
   const dir = makeRoost();
-  const setup = makeSetup(dir);
+  const setup = makeSetup(dir, { setupCfg: { verifyIdentity: true } });
   const foreignHash = healthDirHash(join(dir, 'another-roost'));
   await withFetch(
     async () => ({
@@ -364,7 +480,7 @@ test('探活: 老框架没有 dirHash，pid 不在本目录实例表里就不认
     JSON.stringify({ 1: { pid: 999999999, at: Date.now() } }),
     'utf8',
   );
-  const setup = makeSetup(dir);
+  const setup = makeSetup(dir, { setupCfg: { verifyIdentity: true } });
   await withFetch(
     async () => ({
       ok: true,
@@ -410,7 +526,7 @@ test('探活: 带了 pid 但不在本目录实例表里，仍然不认', async (
     JSON.stringify({ 102056878: { pid: 999999999, at: Date.now() } }),
     'utf8',
   );
-  const setup = makeSetup(dir);
+  const setup = makeSetup(dir, { setupCfg: { verifyIdentity: true } });
   await withFetch(async () => okRes({ bots: [{ id: 'main', state: 'online' }], online: 1, total: 1, pid: 123456789 }), async () => {
     assert.equal(await setup.isRunning(), false, '明确带了对不上的 pid 仍要拒绝');
   });
@@ -420,7 +536,7 @@ test('探活: pid 给了但不是合法整数，不能当成「缺失」放过',
   const dir = makeRoost();
   mkdirSync(join(dir, 'data'), { recursive: true });
   writeFileSync(join(dir, 'data', 'instances.json'), JSON.stringify({ 1: { pid: 999999999, at: Date.now() } }), 'utf8');
-  const setup = makeSetup(dir);
+  const setup = makeSetup(dir, { setupCfg: { verifyIdentity: true } });
   for (const bad of ['123456789', 0, -1, 1.5]) {
     await withFetch(async () => okRes({ bots: [{ id: 'main', state: 'online' }], online: 1, total: 1, pid: bad }), async () => {
       assert.equal(await setup.isRunning(), false, `pid=${JSON.stringify(bad)} 是无效身份，不能放过`);
@@ -608,13 +724,20 @@ test('只卸载: 一项都不勾就是清空，目录还在（之后能原地装
   assert.deepEqual(readdirSync(dir), [], '里面什么都别剩');
 });
 
-test('卸载 / 重装: 关不掉 Roost 时一个文件都不动', async () => {
+test('卸载: 端口上另有 Roost 在应答，不阻塞本目录卸载', async () => {
   const dir = makeFullRoost();
-  /** 面板一直应答「在跑」，实例表里没有 pid → stopOnce 认为停不下来 */
+  /**
+   * 本目录实例表里没有活记录（makeFullRoost 不带 pid），而端口上有东西一直
+   * 应答 —— 典型场景是**本机另跑着一份 Roost**（开发实例 / 自用实例）。
+   *
+   * 以前这里 return ok:false「停不下来」，于是只要有第二份 Roost，
+   * 「卸载重装」就完全用不了。真正会被占用的只有本目录的进程，而它已不在
+   * 实例表里；文件真被占的话 `detachDir` 的 rename 会抛错并回滚。
+   */
   const setup = makeSetup(dir, { dataDir: spareDataDir(), installer: fakeInstaller() });
   await withFetch(async () => okRes({ bots: [], online: 0, total: 0 }), async () => {
-    await assert.rejects(() => setup.reinstall({ keep: [] }), /停不下来/);
+    const r = await setup.reinstall({ keep: [] });
+    assert.equal(r.ok, true, '端口上别人的应答不该拦住卸载');
   });
-  assert.equal(readFileSync(join(dir, 'src', 'main.js'), 'utf8'), '// stub\n', '没停下就不能动文件');
-  assert.equal(readFileSync(join(dir, 'config', 'bots', 'main.json'), 'utf8'), 'kept:config');
+  assert.match(readFileSync(join(dir, 'src', 'main.js'), 'utf8'), /fresh 9\.9\.9/, '程序文件要被换成新版');
 });

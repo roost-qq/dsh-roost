@@ -15,7 +15,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer as createNetServer } from 'node:net';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, renameSync, statSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, renameSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createLease } from './lease.js';
@@ -138,17 +138,45 @@ function alivePid(pid) {
 }
 
 /**
- * `/healthz` 身份指纹。口径必须与框架 `src/web/server.js` 的 `healthDirHash`
- * 完全一致：路径规范化后取 sha256 前 12 位。
+ * `/healthz` 身份指纹。口径与框架 `src/web/server.js` 的 `healthDirHash`
+ * 一致：路径规范化后取 sha256 前 12 位。
  *
- * 规范化两件事（框架侧同样处理）：`resolve` 去掉尾斜杠 / `.` / `..`，
- * Windows 盘符统一大写。任何一边改了算法，探活就会全部判成「别家的 Roost」，
- * 所以两边各有一条测试钉死同一口径。
+ * 规范化三件事：
+ *   · `realpath` —— 把符号链接 / junction / 相对路径 / `.` `..` 折成真实路径；
+ *   · `resolve` 兜底 —— 目录还不存在时（第一次安装）拿不到真实路径，
+ *     退回纯字符串归一，行为与旧版一致；
+ *   · Windows 盘符统一大写。
+ *
+ * **为什么必须 realpath**：框架那边 `ROOT` 来自 `import.meta.dirname`，Node 的
+ * ESM 加载器默认解析符号链接，所以它算出的哈希**天然是真实路径**的。插件这边
+ * 拿的是用户在面板里填的原始字符串——只要它是一条软链（dsh-go 的 PRoot 环境、
+ * 用户自己做的 junction、包管理器建的 link），两边算出的哈希就不等，
+ * 于是 Roost 明明在跑却被判成「别家的 Roost」，接入页第 2 步永远卡在「进行中」。
+ * 2026-11 手机端反馈的正是这个现象。
+ *
+ * 只加 realpath **不改变**与框架的口径：框架侧输入本来就是真实路径。
+ * 任何一边改了算法，探活就会全部判成「别家的 Roost」，所以两边各有一条
+ * 测试钉死同一口径。
  */
 export function healthDirHash(dir) {
-  const normalized = resolve(String(dir || ''))
-    .replace(/^([a-z]):/, (_, drive) => drive.toUpperCase() + ':');
-  return createHash('sha256').update(normalized).digest('hex').slice(0, 12);
+  return createHash('sha256').update(normalizeDir(dir)).digest('hex').slice(0, 12);
+}
+
+/**
+ * 路径归一：真实路径优先，取不到退回字符串归一。
+ *
+ * 导出是为了让测试能直接断言「软链与真实目录算出同一个值」，
+ * 而不必去猜哈希背后到底用了哪种归一方式。
+ */
+export function normalizeDir(dir) {
+  const raw = String(dir || '');
+  let p;
+  try {
+    p = realpathSync(raw);
+  } catch {
+    p = resolve(raw);
+  }
+  return p.replace(/^([a-z]):/, (_, drive) => drive.toUpperCase() + ':');
 }
 
 /** 框架实例表里的心跳文件名（20 位小写十六进制 + .beat） */
@@ -223,6 +251,36 @@ function pidInLocalInstances(pid, dir) {
     if (Number(rec?.pid) !== pid) return false;
     const fresh = beatFresh(rec, dir);
     return fresh === null ? alivePid(pid) : fresh;
+  });
+}
+
+/**
+ * **严格版**：只有在本目录实例表里**明确命中**这条 pid、且心跳新鲜，才认。
+ *
+ * 与 `pidInLocalInstances()` 的区别只在「拿不到证据时怎么办」：
+ *   · `pidInLocalInstances()` —— 表缺失 / 为空 / 没 pid 一律**放过**。
+ *     那是给「老框架 healthz 压根不带身份」用的降级路径，宁可认错也不能把
+ *     在跑的 Roost 判成没跑（用户会卡在第一步，或去点第二次启动）。
+ *   · 本函数 —— 一律**不放过**。它只在「已经有一个 dirHash，而且明确对不上」
+ *     时被调用，那时默认结论就是「不是本目录的实例」，必须拿到正面证据才能翻案。
+ *
+ * 为什么要心跳而不是只看 pid：pid 会被系统复用给别的程序，本目录曾经起过
+ * Roost、留下一条记录、之后那个 pid 被别的 Roost 捡走——只看 pid 就会把
+ * 别人认成自己。心跳文件是本目录框架每 10 秒刷的，别人刷不到它。
+ */
+function pidOwnedHere(pid, dir) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  let data;
+  try {
+    data = JSON.parse(readFileSync(join(dir, 'data', 'instances.json'), 'utf8'));
+  } catch {
+    return false; // 读不到实例表 = 没有正面证据
+  }
+  const recs = data && typeof data === 'object' ? Object.values(data) : [];
+  return recs.some((rec) => {
+    if (Number(rec?.pid) !== pid) return false;
+    // 必须是「明确新鲜」；老记录没有 beat 字段（fresh === null）在这里不算证据
+    return beatFresh(rec, dir) === true;
   });
 }
 
@@ -339,6 +397,23 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
    * 没探到东西时置回 null，退回「按配置算」。
    */
   let activePort = null;
+
+  /**
+   * 最近一轮探活的逐端口结果 `[{port, why, ...}]`。
+   *
+   * 只在 `panelHealth()` 里重置，由 `healthAt()` 逐个端口追加。用途单一：
+   * 探活失败时把「到底卡在哪一步」说清楚，见 `probeHint()`。不做任何判定，
+   * 所以它出错也不会影响探活本身。
+   */
+  let probeTrail = [];
+
+  /**
+   * 上一次为「代码根不一致但放行」记日志的那个 dirHash。
+   *
+   * `panelHealth()` 会被面板频繁调用，同一个不一致会反复出现；不按哈希去重
+   * 的话日志几秒钟就刷满一屏，真正要看的那条反而被淹掉。
+   */
+  let lastMismatch = '';
 
   /**
    * 当前在用的 Roost 目录。
@@ -605,6 +680,7 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
    * 所以判定「在跑」是「拿到合法 body」，不是「HTTP 200」。
    */
   async function panelHealth() {
+    probeTrail = [];
     for (const port of portCandidates()) {
       const body = await healthAt(port);
       if (body) {
@@ -623,9 +699,22 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
 
   /** 问某个端口上的面板。应答了但不是本框架的东西（没有 bots 字段）返回 null */
   async function healthAt(port) {
+    /**
+     * 记一笔「这个端口为什么不算数」。
+     *
+     * 探活失败时用户只看到一句「等了 20 秒面板还没起来」，而这句话背后可能是
+     * 五六种完全不同的原因：端口没绑上、被别的服务占着、是另一份 Roost、
+     * 1.5 秒超时……最后一种是**偶发**的，前面几种是**稳态**的，处理方式差很远。
+     * 不把原因带出去，用户（和排查的人）只能靠猜。2026-11 手机端那次反馈就是
+     * 卡在这里：面板在浏览器里开着，接入页却一直说没起来。
+     */
+    const note = (why, extra) => {
+      probeTrail.push({ port, why, ...extra });
+      return null;
+    };
     try {
       const r = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(1500) });
-      if (r.status !== 200 && r.status !== 503) return null;
+      if (r.status !== 200 && r.status !== 503) return note(`HTTP ${r.status}`);
       /**
        * 用 `text()` + JSON.parse，不用 `json()`：测试里替换掉的 fetch 假响应
        * 往往只实现 text()，调 json() 会直接 TypeError，症状是「Roost 明明在跑
@@ -637,7 +726,33 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
         body = raw ? JSON.parse(raw) : null;
       } catch {}
       // 端口被别的 HTTP 服务占着时会返回别的 JSON，靠 bots 字段认出来
-      if (!body || !Array.isArray(body.bots)) return null;
+      if (!body || !Array.isArray(body.bots)) return note('不是 Roost（没有 bots 字段）');
+      /**
+       * 身份校验：**默认不做**（`setup.verifyIdentity === false`）。
+       *
+       * 这一步防的只有一种事：同一台机器上跑着两份以上不同目录的 Roost，
+       * 候选端口上那份不是配置要的那份。认错了会把配置、密钥、机器人列表
+       * 串到另一份实例上。
+       *
+       * 但普通用户只装一份，压根碰不到这个场景，却要承担它的误判代价：
+       * 只要两边算出的代码根不同（软链、PRoot 的挂载前缀、大小写），
+       * Roost 明明在跑也被判成「没在跑」，接入页第 2 步永远卡在「进行中」。
+       * 2026-11 手机端反馈的就是这个。所以默认关，出问题再开。
+       *
+       * 关着的时候**不是完全不看**：发现哈希不一致仍然记一条日志（按哈希去重），
+       * 排查「配置莫名串了」时有据可查，但不阻塞用户。
+       */
+      if (cfgOf().setup?.verifyIdentity !== true) {
+        const mine = healthDirHash(dirOf());
+        if (body.dirHash && body.dirHash !== mine && lastMismatch !== body.dirHash) {
+          lastMismatch = body.dirHash;
+          log(
+            `端口 ${port} 上的 Roost 自报代码根 ${body.dirHash}，与配置目录算出的 ${mine} 不同；` +
+            `已按配置放行（setup.verifyIdentity=false）`,
+          );
+        }
+        return body;
+      }
       /**
        * 再认身份：**端口上这份 Roost 是不是配置目录那份？**
        *
@@ -646,18 +761,72 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
        * `api()` / `webuiUrl()` 全打到那份实例，配置、密钥、机器人列表跟着串，
        * 界面还看起来一切正常。
        *
-       * 新框架回 `dirHash`（代码根哈希），不匹配一律不认。老框架没有这个
-       * 字段，退回 `pid` + 本目录实例表，见 `pidInLocalInstances()`。
+       * 新框架回 `dirHash`（代码根哈希），老框架没有这个字段，退回 `pid` +
+       * 本目录实例表，见 `pidInLocalInstances()`。
        */
       if (body.dirHash) {
-        if (body.dirHash !== healthDirHash(dirOf())) return null;
+        const mine = healthDirHash(dirOf());
+        if (body.dirHash !== mine) {
+          /**
+           * 哈希不一致有**两**种可能，必须分开处理：
+           *
+           *   ① 真的是另一份 Roost 占着端口 → 必须拒，否则配置全串；
+           *   ② 同一份 Roost，但两边看到的路径字符串不同 —— 软链 / junction /
+           *      绑定挂载 / 大小写差异。`healthDirHash` 已经 realpath 归一，
+           *      能消掉①以外的绝大多数；但 PRoot 那种「不同前缀同一份文件」
+           *      的挂载，realpath 也折不到一起。
+           *
+           * ② 判错的代价是用户永远卡在「没在跑」（2026-11 手机端反馈），
+           * 比①判错更难自查。所以这里用**文件系统级证据**复核：这个 pid
+           * 是不是本目录实例表里那条**心跳新鲜**的记录？是 → 说明进程确实是
+           * 本目录起的，只是它自报的代码根与配置字符串不是同一个写法，认它。
+           *
+           * 注意这里用的是 `pidOwnedHere()`（严格版，拿不到证据就不放过），
+           * **不是** `pidInLocalInstances()`。后者在实例表为空时返回 true，
+           * 用它兜底会把「本机另一处跑的 Roost」也认成本目录的——本机 15210
+           * 常年跑着一份开发实例，一测就露馅。
+           */
+          if (!pidOwnedHere(body.pid, dirOf())) {
+            return note('身份不符（是另一份 Roost）', { got: body.dirHash, want: mine });
+          }
+        }
       } else if (!pidInLocalInstances(body.pid, dirOf())) {
-        return null;
+        return note('pid 不在本目录实例表');
       }
       return body;
-    } catch {
-      return null;
+    } catch (e) {
+      const name = e?.name || '';
+      if (name === 'TimeoutError' || name === 'AbortError') return note('超时（1.5 秒没应答）');
+      return note(`连不上（${e?.code || e?.message || 'error'}）`);
     }
+  }
+
+  /**
+   * 把 `probeTrail` 翻译成一句用户能照着做的话。
+   *
+   * 只说**最有用**的那一条，不罗列全部：手机上没人会看五行端口明细，
+   * 但「端口上有 Roost、只是身份没对上」和「端口上压根没东西」要能一眼分开。
+   */
+  function probeHint() {
+    if (!probeTrail.length) return '';
+    const foreign = probeTrail.find((x) => x.why.startsWith('身份不符'));
+    if (foreign) {
+      return (
+        `端口 ${foreign.port} 上有 Roost 在应答，但它自报的代码根和配置里的目录不是同一处` +
+        `（${foreign.got} ≠ ${foreign.want}）。要么把配置里的目录改成真实绝对路径，` +
+        `要么关掉「校验探活身份」（setup.verifyIdentity）再试。`
+      );
+    }
+    const notRoost = probeTrail.find((x) => x.why.startsWith('不是 Roost') || x.why.startsWith('HTTP '));
+    if (notRoost) {
+      return `端口 ${notRoost.port} 被别的程序占着（${notRoost.why}），换个端口再启动。`;
+    }
+    const timeout = probeTrail.find((x) => x.why.startsWith('超时'));
+    if (timeout) {
+      return `端口 ${timeout.port} 有服务但 1.5 秒没应答完，机器负载高时偶发，稍等再点一次。`;
+    }
+    const ports = [...new Set(probeTrail.map((x) => x.port))].join('、');
+    return `端口 ${ports} 上都没有服务应答，说明进程没绑上端口——去目录里手动跑 node src/main.js 看报什么错。`;
   }
 
   /** 面板进程还活着吗（机器人上没上线不影响这个判断） */
@@ -796,6 +965,14 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
       dshUrl: `http://127.0.0.1:${cfgOf().server.port}`,
       /** 启动 DSH 时是否自动拉起 Roost（面板开关的状态来源） */
       roostAutoStart: Boolean(cfgOf().roostHost?.autoStart),
+      /**
+       * 探活是否校验身份（接入页那颗开关的状态来源）。
+       *
+       * 默认 false，见 `setup.verifyIdentity` 的说明。这里回的是**生效值**
+       * 而不是原样透传配置——用户没写过这个键时也要显示成「关」，
+       * 否则开关在界面上会是个 undefined 的空档。
+       */
+      verifyIdentity: cfgOf().setup?.verifyIdentity === true,
       busy,
     };
   }
@@ -1318,7 +1495,13 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
 
     if (!panel) {
       killChild();
-      throw new Error('等了 20 秒面板还没起来，进程已结束。去目录里手动跑 node src/main.js 看报什么错');
+      /**
+       * 这句以前是固定的「去目录里手动跑 node src/main.js 看报什么错」——
+       * 用户照做之后看到的仍是同一句，因为真正的原因（端口上有 Roost 但身份
+       * 没对上）根本不在进程日志里。`probeHint()` 把逐端口结果翻译成一句
+       * 能指路的话，进程已 kill 的情况下这是唯一还在手上的证据。
+       */
+      throw new Error(`等了 20 秒面板还没起来，进程已结束。${probeHint()}`);
     }
     // 面板活着，机器人没连上：留着进程，把状态如实返回
     const verdict = startVerdict(panel);
@@ -1404,12 +1587,25 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
     }
 
     const left = liveRoostPids().map((x) => `PID ${x.pid}`).join('、');
-    return {
-      ok: false,
-      message: left
-        ? `停不下来：${left} 还活着。可能是别的用户开的，或者需要管理员权限`
-        : '面板还在应答，但实例表里没有对应记录。它可能是别的程序占着这个端口',
-    };
+    if (left) {
+      return {
+        ok: false,
+        message: `停不下来：${left} 还活着。可能是别的用户开的，或者需要管理员权限`,
+      };
+    }
+    /**
+     * 本目录实例表里已经没有活记录了，端口上却还有东西在应答 —— 那不是本目录
+     * 这份（本机另跑着一份 Roost，或者单纯是别的服务占着候选端口）。
+     *
+     * **不能因此拦住卸载**。以前这里 return ok:false，理由是「怕文件被占着动
+     * 不了」；但真正会被占的只有本目录的进程，而它已经不在实例表里了。
+     * 端口上那份别人的 Roost 反倒会因为这条报错让本目录永远卸不掉——本机
+     * 15210 常驻一份开发实例时，「卸载重装」就完全用不了。
+     *
+     * 文件真被占用的话，下一步 `detachDir()` 的 rename 会自己抛错并回滚，
+     * 比这里瞎猜准得多。
+     */
+    return { ok: true, message: '已停止（端口上另有服务在应答，不是本目录这份）' };
   }
 
   /**

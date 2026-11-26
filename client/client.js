@@ -3608,6 +3608,12 @@ window.__ModuleLoader__.load({
         h(DepsBlock, { info: depsInfo, busy: depsBusy, onCheck: () => loadDeps(true) }),
 
         /**
+         * 探活身份校验：紧跟着「组件版本」，都是「Roost 到底起没起来」这条线上的事。
+         * 普通用户默认关着就行，别把它做成显眼的推荐项。
+         */
+        h(ProbeIdentityCard, { st: s, saveCfg, toast, reload }),
+
+        /**
          * 2.7：工作区卡片从「设置」挪到这里（本体，控件一个没少）。
          * 不带编号徽标——这页的 1–6 是接入步骤的圆圈号，再排一个 01
          * 会被读成第 7 步；跟「常见卡点」一样只留标题。
@@ -17126,6 +17132,79 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 探活身份校验开关（接入页）。
+     *
+     * 这个开关**不是给普通用户用的**——它防的场景是「同一台机器上跑着两份以上
+     * 不同目录的 Roost，探活认到了另一份」，普通用户只有一份，永远碰不到。
+     * 但它的误判代价很难自查：界面上只会显示「没在跑」，用户看不出是插件
+     * 不认那份 Roost，还是 Roost 真没起来。2026-11 手机端（dsh-go / PRoot）
+     * 反馈的「面板开着却永远卡在第 2 步」就是这一类，根因是两边算出的
+     * 代码根路径形态不同（软链 / PRoot 路径视图），哈希自然不等。
+     *
+     * 所以默认关，出问题的用户能在**撞见问题的那一页**就地关掉，
+     * 而不是被指去改 JSON。开关存的是 `setup.verifyIdentity`，
+     * 后端每轮探活现读，存完立刻生效，不用重启。
+     */
+    function ProbeIdentityCard({ st, saveCfg, toast, reload }) {
+      const [busy, setBusy] = useState(false)
+      /**
+       * 乐观值：点完到 `reload()` 回来之间，开关要先动。
+       * `null` = 跟随后端；否则是用户刚点的那个值。
+       * 保存失败退回 `null`，让开关弹回真实状态，不留假象。
+       */
+      const [pending, setPending] = useState(null)
+      const on = pending === null ? Boolean(st?.verifyIdentity) : pending
+
+      const toggle = async (next) => {
+        if (!saveCfg) return toast('配置不可写，没存上')
+        setPending(next); setBusy(true)
+        try {
+          const r = await saveCfg({ setup: { verifyIdentity: next } })
+          if (r && r.ok === false) {
+            setPending(null)
+            return toast(r.message || '没存上')
+          }
+          toast(next
+            ? '已开启：探活时会核对目录，不符就当作没在跑'
+            : '已关闭：只要端口上有 Roost 应答就当它在跑')
+          if (reload) await reload()
+          setPending(null)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h(Sec, {
+        title: '探活身份校验',
+        right: h('span', { className: 'roost-note', style: { margin: 0 } },
+          on ? '已开启（严格）' : '默认关闭'),
+      },
+        h('div', {
+          style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
+        },
+          h(Switch, {
+            on, disabled: busy, label: '探活身份校验',
+            title: on ? '点一下关掉（按端口判断）' : '点一下开启（核对目录）',
+            onToggle: toggle,
+          }),
+          h('span', { style: { fontSize: 12.5 } },
+            on
+              ? '核对端口上这份 Roost 是不是配置目录那份，不符就当作没在跑'
+              : '只要候选端口上有 Roost 应答，就当它在跑'),
+        ),
+        h('div', { className: 'roost-note', style: { marginTop: 8 } },
+          '只有「同一台机器上跑着两份以上 Roost」才需要开：候选端口上那份可能不是你要的那份，'
+          + '认错了会把配置、密钥、机器人列表串过去。只装一份就关着。'),
+        h('div', { className: 'roost-note', style: { marginTop: 4 } },
+          '⚠️ 手机端（dsh-go / PRoot）、或「Roost 目录」填的是软链 / 相对路径时，'
+          + '两边算出的路径形态可能不同——开了会出现「面板明明开着，这里却说没在跑」。'
+          + '碰到就关掉：关掉只影响「是不是同一份」的判断，不影响能不能连上。'),
+        h('div', { className: 'roost-note', style: { marginTop: 4 } },
+          '存完立刻生效，不用重启：它只影响上面第 2 步「启动 Roost」判「起没起来」的口径。'),
+      )
+    }
+
+    /**
      * 语音合成（TTS）设置卡片。
      *
      * 为什么不再让用户去「配置全文」里手改 JSON：`tts` 段有十几个字段，
@@ -26250,6 +26329,8 @@ window.__ModuleLoader__.load({
     exports.ConfigTab = ConfigTab
     exports.WorkspaceCard = WorkspaceCard
     exports.DepsBlock = DepsBlock
+    /** 接入页那颗「探活身份校验」开关：渲染测试要直接看开 / 关两种文案 */
+    exports.ProbeIdentityCard = ProbeIdentityCard
     exports.SetupWizard = SetupWizard
     exports.HerTab = HerTab
     /** 5.2：排障页筛选的渲染测试要直接渲染它 */
