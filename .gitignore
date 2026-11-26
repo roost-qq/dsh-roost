@@ -30,3 +30,4 @@ __pycache__/
 /docs/交接-*.md
 /docs/实施进度.md
 /docs/原型-*.html
+/docs/*迁移*.md

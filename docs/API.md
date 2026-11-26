@@ -119,7 +119,7 @@
 - `core:write`（**敏感**：面板发放要二次确认）
 - `agent:write`（**敏感**：面板发放要二次确认）
 
-最小授权默认 `message:write` + `state:read`；敏感 scope 需要单独勾选确认。
+最小授权默认 `memory:write` + `state:read`；敏感 scope 需要单独勾选确认。
 
 ## 6. 端点
 

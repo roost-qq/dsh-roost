@@ -889,8 +889,8 @@ stickers/
 ```
 src/
   host.js        插件入口：起服务、会话映射、面板接口、记忆工具挂载
-  server.js      HTTP /inbound（鉴权、立刻 200、回话）
-  inbound.js     payload → 给 AI 看的一段话
+  server.js      HTTP 固定服务：/health、/capabilities、/tts 与 /v1 控制面
+  inbound.js     payload → 给 AI 看的一段话（模块仍在，2026-11-12 起不再走 HTTP /inbound）
   turn.js        跑一轮：投递 + 从 session/event 等结果
   sessions.js    chatId → DSH 会话（存盘）
   permissions.js 权限：谁在说话、能用什么工具
@@ -898,7 +898,7 @@ src/
   capability-store.js capabilities.json 的读写，每轮观察工具池的新增/失效
   features.js    功能开关：11 项「有没有这个功能」→ 关掉之后该收走哪些工具
   quota.js       次数配额：固定窗口 + 幂等去重，默认不限（填了数字才算）
-  setup.js       一键流程：下载解压、写配置、起停、装插件、配适配器
+  setup.js       一键流程：下载解压、写配置、起停 Roost、一键直连
   config.js      配置读写（默认值 + 合并）
   memory.js      三层记忆第一层：跨群/本群事实
   journal.js     日记：三级衰减 + FTS5 关键词 + 可选向量检索（RRF 融合）
@@ -927,7 +927,7 @@ client/
 cordis.patch.yml 两档 agent preset（私聊 / 群聊）
 personas/        内置人格镜像（8 份）+ index.json（生成物）。权威源在独立仓库 dsh-roost-personas
 scripts/         生成人格索引、dry-run、同步 GitHub
-docs/            设计文档、调研、和 Aurabot 的对比
+docs/            使用手册、API、接入说明、功能说明；设计/调研/对比类不入库
 ```
 
 **核心技术点**：DSH 没有「发一句返回一句」的接口，是事件驱动的。`turn.js` 监听 `session/event`，收 `assistant/message`（可能来多次，取最后一次）和 `turn/end`（`reason.kind === 'completed'` 才算说完）。
