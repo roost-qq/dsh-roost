@@ -28,11 +28,30 @@ test('真实泄露：英文判断 + 中文正文，只留中文那句', () => {
   assert.equal(r2.text, '美服这局也太热闹了', '切掉最后一个元话语句之前的所有内容');
 });
 
-test('整条英文思考（两句以上元话语）判沉默；单句英文回答保留', () => {
+test('整条英文：强信号才判沉默，普通元话语保留', () => {
+  /** 强信号（在替自己决定开不开口）+ 短 → 思考 */
   assert.equal(stripThinkingPrefix('I should reply to this. Let me check the context.'), '');
-  /** **我们对 aurabot 的偏离**：它会把这句也切掉，我们保——可能被要求用英文回话 */
+  assert.equal(stripThinkingPrefix('Not addressed to me. Silence.'), '');
+  assert.equal(stripThinkingPrefix('Silence.'), '', '单句强信号也拦——它就是「不说话」的意思');
+
+  /**
+   * **误杀修复（2026-11-26）**：这两句都含元话语，但一句是正常英文回答。
+   * 使用者说「用英文说」时这类输出最常见，旧判据（元话语句 ≥2）会整条拦掉。
+   */
+  assert.equal(stripThinkingPrefix('Let me check. I think it\'s done.'), 'Let me check. I think it\'s done.');
   assert.equal(stripThinkingPrefix('I think this works.'), 'I think this works.');
   assert.equal(stripThinkingPrefix('Sure, done.'), 'Sure, done.');
+  /** `skip` / `ignore` 在正常英文里也是正文——它们只算弱信号，别据此整条拦 */
+  assert.equal(stripThinkingPrefix('Skip this one.'), 'Skip this one.');
+  assert.equal(stripThinkingPrefix('I\'ll ignore that.'), 'I\'ll ignore that.');
+
+  /** 长英文段落不当思考：可能是翻译或正经解释，里面出现这些词只是内容 */
+  const long = 'Please note that we should ignore the noise. '
+    + 'The silence in the room was complete. '
+    + 'No reply came from either side. '
+    + 'One line of text was all that remained. '
+    + 'Everyone left before midnight.';
+  assert.equal(stripThinkingPrefix(long), long, '超过 3 句就是正文，不按思考切');
 });
 
 test('中文元话语：只有很短的一条才当思考', () => {

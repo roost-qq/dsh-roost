@@ -37,8 +37,27 @@ const CJK = /[\u4e00-\u9fff]/;
 /**
  * 思考/草稿里的高频英文元话语。只认整句（以 `. ! ?` 结尾），避免正文里
  * 偶尔出现的英文词被误判。
+ *
+ * 这是**弱信号**：`let me` / `i think` / `i'll` 正常英文对话也在用，只能用来
+ * 定位「思考的前缀在哪结束」，不能单独当「这是思考」的证据（见 `STRONG_META`）。
  */
 const META_WORDS = /(?:not addressed|silence|i could|i should|i need|i think|i'll|i will|let me|reply|draft|final|one line|\d+ lines?|no reply|skip|ignore)/i;
+
+/**
+ * 强信号：**在替自己决定「这轮要不要开口」**，正常英文对话几乎不出现。
+ *
+ * 为什么要把两档分开：整条没有中文时，旧判据是「元话语句 ≥2 就当思考」，
+ * 于是 `Let me check. I think it's done.`（一句正常回答）会被整条拦掉——
+ * 使用者让「用英文说」的时候，这类句子是最常见的输出。
+ *
+ * 真正的思考泄露长这样：`Not addressed to me. Silence.` —— 同样两句，
+ * 但每句都在替自己下判断。差别不在「元话语几句」，而在**是不是在决定开不开口**。
+ *
+ * `skip` / `ignore` 故意**不**在强信号里：英文正文里「Skip this one.」
+ * 「I'll ignore that.」都是正常话；模型真想跳过会写 `<<skip>>`（动作层已摘，
+ * 走不到这里）。宁可漏一条英文脏话，也不吞一条正常英文。
+ */
+const STRONG_META = /(?:not addressed|silence|no reply|don'?t reply|i should(?:n'?t)? (?:reply|respond|say)|should i (?:reply|respond|say)|i could (?:react|reply|say)|do i need to (?:reply|respond)|one line|\d+ lines?)/i;
 
 /**
  * 中文元话语：只认句首或标点后，且要求整条很短（≤40 字），避免误伤
@@ -105,9 +124,13 @@ export function stripThinkingPrefix(text) {
   if (!s.trim()) return '';
 
   let last = null;
-  let metaCount = 0;
+  /** 英文句数 / 其中带强信号的句数（见 `STRONG_META` 的注释） */
+  let sentences = 0;
+  let strong = 0;
   for (const m of s.matchAll(EN_SENTENCE)) {
-    if (META_WORDS.test(m[0])) { last = m; metaCount++; }
+    sentences++;
+    if (STRONG_META.test(m[0])) strong++;
+    if (META_WORDS.test(m[0])) last = m;
   }
 
   // 中文元话语：整条都是判断时直接当思考，不保留。
@@ -123,13 +146,17 @@ export function stripThinkingPrefix(text) {
   /**
    * 整条没有中文：**别一律当思考**。
    *
-   * 我们的使用者可能直接说「翻成英文」「what's your name」，模型回一句
-   * `I think it's fine.` 是正常回答。只有同时满足下面任一条才判成思考：
-   *   · 元话语句 ≥2（一句判断 + 一句计划，典型推理形态）；
-   *   · 出现 `[沉默]` / `[silence]`（人在思考里替自己下结论）。
+   * 我们的使用者可能直接说「翻成英文」「what's your name」，模型整条用英文回
+   * 是正常回答——`Let me check. I think it's done.` 两句都是元话语，但它就是
+   * 一句人话。旧判据「元话语句 ≥2 就拦」在这种场景下必然误杀。
+   *
+   * 所以改看**强信号**（`STRONG_META`：在替自己决定开不开口），再加一条长度
+   * 限制——英文段落超过 3 句就不当思考：那可能是翻译、是长篇解释，里面出现
+   * `silence` / `ignore` 只是内容本身。
    */
   if (!hasCJK) {
-    if (metaCount >= 2 || /\[\s*(?:沉默|silence)\s*\]/i.test(s)) return '';
+    if (strong >= 1 && sentences <= 3) return '';
+    if (/\[\s*(?:沉默|silence)\s*\]/i.test(s)) return '';
     return s;
   }
 

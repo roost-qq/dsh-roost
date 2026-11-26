@@ -8622,6 +8622,31 @@ export function apply(ctx) {
     }
 
     /**
+     * **扩展补充的上下文**（order 895，排在人格与所有规则之前）。
+     *
+     * 为什么这么早：它是「参考资料」，不该压过人格（905）和权限（906）、
+     * 安全边界（910）。扩展能读到的外部内容（网页、群消息）可能带指令，
+     * 排在前面等于让它们只影响她「知道什么」，不影响她「怎么说话、能做什么」。
+     *
+     * 只追加、只读：改不了人格、改不了别的段，也没法删掉宿主的规则
+     * （`ext-prompt.js` 头注释有三道约束的说明）。
+     *
+     * 代码位置也放在 900 之前：注册顺序不等于注入顺序（那由 `order` 定），
+     * 但读代码的人按 895 → 900 → 901 的顺序看，和实际拼装顺序一致。
+     */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-ext-context',
+          order: 895,
+          text: () => extPromptContexts.render(chat.chatId),
+        }),
+      );
+    } catch (e) {
+      log.debug('挂扩展上下文失败：', e.message);
+    }
+
+    /**
      * 插件推过来的系统提示词。
      *
      * **必须用**：动作标记（skip / remember / image / button）的契约写在里面，
@@ -8636,28 +8661,6 @@ export function apply(ctx) {
      *
      * order 900：排在人格（905）前面，先立规矩再谈性格。
      */
-    /**
-     * **扩展补充的上下文**（order 895，排在人格与所有规则之前）。
-     *
-     * 为什么这么早：它是「参考资料」，不该压过人格（905）和权限（906）、
-     * 安全边界（910）。扩展能读到的外部内容（网页、群消息）可能带指令，
-     * 排在前面等于让它们只影响她「知道什么」，不影响她「怎么说话、能做什么」。
-     *
-     * 只追加、只读：改不了人格、改不了别的段，也没法删掉宿主的规则
-     * （`ext-prompt.js` 头注释有三道约束的说明）。
-     */
-    try {
-      offs.push(
-        agent.ctx.systemPrompt.context({
-          name: 'roost-ext-context',
-          order: 895,
-          text: () => extPromptContexts.render(chat.chatId),
-        }),
-      );
-    } catch (e) {
-      log.debug('挂扩展上下文失败：', e.message);
-    }
-
     const sid0 = agent?.session?.id;
     /** 契约来源只报一次：每轮都打会把日志刷满，而这件事一个进程里不会变 */
     let contractLogged = false;
