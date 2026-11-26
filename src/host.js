@@ -2114,21 +2114,31 @@ export function apply(ctx) {
   let reminderBusy = false;
 
   /**
-   * 小闹钟到点：把系统提醒投进主人私聊的**真会话**，由她自己决定说不说。
-   * 走 awake.compose（内部已处理会话/工具/投递），不直接 sendOut。
-   * 成功/放弃由 store.remove / store.fail 收场；失败重试 15min 窗口 / 5min 间隔。
+   * 小闹钟到点：把系统提醒投进**设闹钟那个私聊**的真会话，让她自己决定说不说；
+   * 她真说了之后，必须**再经 `sendOut` 投递到 QQ**。
+   *
+   * 为什么两步都要：真会话注入只让文本落在 DSH 会话窗口（所以「dsh 会显示」），
+   * 而 DSH 本身没有 QQ 通道（app.asar 里没有 openapi.qq.com 客户端），
+   * 不补 `sendOut` 就是用户看到的「qq 电脑跟 qq 手机都接收不到」。
+   *
+   * 老记录没有 `chatId` 时回落主人；成功/放弃由 store.remove / store.fail 收场，
+   * 失败重试 15min 窗口 / 5min 间隔。
    */
   async function fireReminder(r) {
     const owner = ownerId();
     if (!owner) return { ok: false, why: '没配主人 openid' };
-    const text = `【系统提醒，不是主人说的话】你之前给自己定的小闹钟到时间了：${r.atText}「${r.note}」。现在可以主动找主人说这件事；如果觉得现在不适合打扰，就只回 <<skip>>。`;
+    /** 目标 = 设这条闹钟的私聊；老记录回落主人 */
+    const target = String(r.chatId || owner);
+    const isOwner = target === owner;
+    const who = isOwner ? '主人' : '对方';
+    const text = `【系统提醒，不是主人说的话】你之前给自己定的小闹钟到时间了：${r.atText}「${r.note}」。现在可以主动找${who}说这件事；如果觉得现在不适合打扰，就只回 <<skip>>。`;
     /**
      * 4 分钟兜底超时，会话轮 settle 后 clearTimeout 并 unref。
      *
      * **必须走真会话注入，不能用 awake.compose**：compose 只生成文本不投递，
      * 拿完就丢等于闹钟白响。照主动搭话成熟范式（host.js:1720-1745）：
      * agentFor → mount → waitFor → 收窄工具 → turns.run。她的回复由 turn/end
-     * 正常落地（她自己决定说不说），不是宿主替她发——正是对方 pushToSession 语义。
+     * 正常落地（她自己决定说不说），不是宿主替她发。
      */
     let timer = null;
     const timeout = new Promise((resolve) => {
@@ -2140,21 +2150,38 @@ export function apply(ctx) {
       result = await Promise.race([
         (async () => {
           try {
-            if (turnQueue?.isBusy(owner)) return { ok: false, why: '主人会话正忙，这轮让位' };
-            const chat = { kind: 'c2c', chatId: owner, sessionKey: owner, name: '小闹钟', preset: 'roost-private' };
+            if (turnQueue?.isBusy(target)) return { ok: false, why: '这个私聊正忙，这轮让位' };
+            const chat = { kind: 'c2c', chatId: target, sessionKey: target, name: '小闹钟', preset: 'roost-private' };
             const { agent } = await agentFor(chat);
             mount(agent, chat);
             /** 工具异步挂载：等挂完再开轮，否则第一轮工具清单是空的 */
             await qqToolRegistry.waitFor(agent);
-            /** 宿主发起的轮次必须同时收工具 + 套人格限制，别让 edit/write 从这条漏出去 */
+            /**
+             * 宿主发起的轮次必须同时收工具 + 套人格限制，别让 edit/write 从这条漏出去。
+             * 权限按「目标是不是主人」分档：非主人的私聊只给聊天档，绝不给 owner 全套工具。
+             */
+            const bucket = isOwner ? 'owner' : 'member';
             const cut = restrictTurnTools(agent, {
-              mode: 'all', bucket: 'owner', chatId: chat.chatId,
+              mode: isOwner ? 'all' : 'chat', bucket, chatId: chat.chatId,
               personaTools: personaToolsFor(chat), denyExtra: AWAKE_DENY_TOOLS,
             });
             try {
-              const r = await withOwnerSpeaker(agent, () =>
+              const raw = await withSpeaker(agent, { chatId: target, bucket }, () =>
                 turns.run(agent, text, { source: { kind: 'roost-reminder' } }));
-              return { ok: r !== false && r !== null };
+              const rawText = String(raw ?? '');
+              /** 她决定不说：这条就到这里，别投递、也别重试 */
+              if (/<<\s*skip\s*>>/i.test(rawText)) return { ok: true, skipped: true };
+              /** 去掉 <<image: #N>> 之类的标记，只留真要说的话 */
+              const said = rawText.replace(/<<[^>]*>>/g, '').trim();
+              if (!said) return { ok: true, skipped: true };
+              /**
+               * 补投递：这一句已经在 DSH 会话里显示过，现在把它真正发到 QQ。
+               * 成功判据以 `sendOut` 的返回为准——以前是「模型吐了字就算成功」，
+               * 于是面板记「已触发」而用户一条都没收到。
+               */
+              const sent = await sendOut({ scene: 'c2c', target, text: said });
+              if (!sent?.ok) return { ok: false, why: sent?.message || '没发出去', code: sent?.code };
+              return { ok: true, sent: true };
             } finally { try { cut.off?.(); } catch {} }
           } catch (e) { return { ok: false, why: e?.message || String(e) }; }
         })(),
@@ -2165,7 +2192,7 @@ export function apply(ctx) {
     }
     if (result.ok) {
       reminderStore.remove(r.id);
-      log.info(`小闹钟触发：${r.atText} ${r.note}`);
+      log.info(`小闹钟触发：${r.atText} ${r.note}${result.skipped ? '（她决定不说）' : '（已投递）'}`);
       return { ok: true };
     }
     if (cfg.speakUp?.reminderRetry === false) {
@@ -3733,13 +3760,13 @@ export function apply(ctx) {
    * 临时塞一份「主人私聊」的身份，跑完还原；原来有就还原，没有就删掉——
    * 不留残留，否则下一次真人消息会被这条假身份盖住。
    */
-  async function withOwnerSpeaker(agent, fn) {
+  async function withSpeaker(agent, { chatId = ownerId(), bucket = 'owner' } = {}, fn) {
     const sid = agent?.session?.id ?? agent?.sessionId ?? '';
     if (!sid) return fn();
     const prev = speaker.get(sid);
     speaker.set(sid, {
-      payload: { chat: { chatId: ownerId(), kind: 'c2c' } },
-      bucket: 'owner',
+      payload: { chat: { chatId, kind: 'c2c' } },
+      bucket,
       system: prev?.system || '',
     });
     try {
@@ -3748,6 +3775,16 @@ export function apply(ctx) {
       if (prev) speaker.set(sid, prev);
       else speaker.delete(sid);
     }
+  }
+
+  /**
+   * 主人私聊身份的快捷方式。
+   *
+   * 主动搭话 / 觉醒 / 巩固这些宿主发起的轮次都固定按主人算；
+   * 小闹钟要按「设闹钟的那个私聊」注入，所以单独给了 `withSpeaker`。
+   */
+  async function withOwnerSpeaker(agent, fn) {
+    return withSpeaker(agent, { chatId: ownerId(), bucket: 'owner' }, fn);
   }
 
   /**
@@ -7663,19 +7700,23 @@ export function apply(ctx) {
           return { ...c, openid: c.senderId, hasPayload: Boolean(c.payload) };
         },
         /**
-         * 小闹钟（A1）：只在主人私聊可用，且面板开关开着；关着如实拒绝。
-         * 传函数不传实例——开关随时可切，工具内部每次现取。
+         * 小闹钟（A1）：任意私聊都能用（能私聊进来的都在主人白名单里），
+         * 面板开关关着时如实拒绝。传函数不传实例——开关随时可切，工具内部每次现取。
          */
         reminderOf: {
           gate: (c) => {
-            const owner = ownerId();
-            const isOwnerPrivate = c?.kind === 'c2c' && !!owner && String(c.senderId || '') === owner;
-            if (!isOwnerPrivate) return { ok: false, message: '只有主人能在私聊里用小闹钟' };
+            const chatId = String(c?.chatId || c?.senderId || '').trim();
+            /** 只认私聊；群聊的 chatId 是群 openid，到点会给整个群发消息，不能放 */
+            if (c?.kind !== 'c2c' || !chatId) return { ok: false, message: '小闹钟只能在私聊里用' };
             if (masterOff()) return { ok: false, message: '插件总开关没开启' };
             if (!remindersOn()) return { ok: false, message: '小闹钟没开启（去「主动搭话」页打开）' };
             return { ok: true };
           },
-          add: (at, note) => reminderStore.add(at, note, { limit: cfg.speakUp?.reminderLimit ?? 5 }),
+          /** `chatId` = 设闹钟的这个私聊，到点就投给它 */
+          add: (at, note, chatId) => reminderStore.add(at, note, {
+            limit: cfg.speakUp?.reminderLimit ?? 5,
+            chatId: String(chatId || '').trim(),
+          }),
           close: (id) => reminderStore.close(id),
         },
         /** 她自己写提案（A5）：工具与面板共用 writeProposal，格式不漂移 */
@@ -14364,6 +14405,58 @@ export function apply(ctx) {
       }),
 
       /**
+       * 接入页「配置主人」：在框架里绑定/解绑主人（写 config/bots/<id>.json 的 owners）。
+       *
+       * 和上面的 /owner/aliases 不是一回事：
+       *   - /owner/aliases 写 dsh-roost 自己的 config，只影响 DSH 这边判档（频道 id 用）
+       *   - 这里写框架的 owners，是「谁能指挥这台机器」的事实源（QQ openid）
+       *
+       * 只在框架支持 /api/owners/add|remove 时可用；旧框架前端会降级为跳转面板。
+       * ownerCache/ownersApiCache 在 setup.bindOwner 里失效，下次读取立刻跟上。
+       */
+      route('/setup/owner/bind', async (req, res) => {
+        if (req.method !== 'POST') return send(res, 405, { ok: false, message: '只支持 POST' });
+        try {
+          /** 宿主可能已经预读了 body 到 req.body，必须走 bodyOf 而不是直接读流 */
+          const body = await bodyOf(req);
+          if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            return send(res, 400, { ok: false, message: '参数要是一个对象' });
+          }
+          const openid = String(body.openid ?? '').trim();
+          const remove = body.remove === true;
+          /** 框架的 owners 是 QQ openid（hex 16-64 位），不是频道 id —— 格式不对早点拒 */
+          if (!/^[0-9A-Fa-f]{16,64}$/.test(openid)) {
+            return send(res, 400, { ok: false, message: 'openid 格式不对（16-64 位十六进制）' });
+          }
+          if (!(await setup.ownersApiSupported())) {
+            return send(res, 426, {
+              ok: false,
+              code: 'OWNERS_API_UNSUPPORTED',
+              message: '框架版本不支持面板内绑定主人，请升级到 v1.1.17+，或去框架面板设主人',
+            });
+          }
+          /**
+           * 最后一个主人不能解绑：清空后认领码复活，群里任何人都能 /claim 抢主人。
+           * roostOwners() 不去重——同一人在两个 bot 各有一条时，解绑一条仍有另一条，不算「最后」。
+           */
+          if (remove) {
+            const current = setup.roostOwners ? setup.roostOwners() : [];
+            if (current.length === 1 && current[0] === openid) {
+              return send(res, 400, {
+                ok: false,
+                code: 'LAST_OWNER',
+                message: '不能解绑最后一个主人：清空后认领码会复活，群里任何人都能抢先认领',
+              });
+            }
+          }
+          const r = await setup.bindOwner(openid, remove);
+          send(res, 200, { ok: true, result: r });
+        } catch (e) {
+          send(res, 502, { ok: false, message: `绑定失败：${e?.message || e}` });
+        }
+      }),
+
+      /**
        * 「把机器人加进频道」的链接。
        *
        * **不在这里画二维码**（2026-11-17 主人决定）：这条链接在浏览器里打开后，
@@ -16124,7 +16217,14 @@ export function apply(ctx) {
           return send(res, r.ok ? 200 : 400, r);
         }
         if (!remindersOn()) return send(res, 409, { ok: false, message: '小闹钟没开启（去「主动搭话」页打开）' });
-        const r = reminderStore.add(body?.at, body?.note, { limit: cfg.speakUp?.reminderLimit ?? 5 });
+        /**
+         * 面板代设是主人从自己面板点的，目标默认主人私聊；
+         * 想指定别的私聊就显式传 `chatId`（面板目前不传）。
+         */
+        const r = reminderStore.add(body?.at, body?.note, {
+          limit: cfg.speakUp?.reminderLimit ?? 5,
+          chatId: String(body?.chatId || ownerId() || '').trim(),
+        });
         return send(res, r.ok ? 200 : 400, r);
       }),
 

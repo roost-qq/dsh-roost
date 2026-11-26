@@ -18,6 +18,48 @@ test('时间解析：严格格式、拒绝溢出日期、格式化回原文', ()
   assert.ok(parseReminderTime('2026-11-26T17:30') > 0, 'T 分隔也认');
 });
 
+test('相对时间：分钟后 / 半小时后 / 小时 / 秒，中文数字都认', () => {
+  const base = new Date('2026-11-26T10:00:00').getTime();
+  assert.equal(parseReminderTime('一分钟后', base) - base, 60_000);
+  assert.equal(parseReminderTime('1分钟后', base) - base, 60_000);
+  assert.equal(parseReminderTime('五分钟', base) - base, 5 * 60_000, '不带「后」也认');
+  assert.equal(parseReminderTime('半小时后', base) - base, 30 * 60_000);
+  assert.equal(parseReminderTime('半个小时', base) - base, 30 * 60_000);
+  assert.equal(parseReminderTime('两小时', base) - base, 2 * 60 * 60_000);
+  assert.equal(parseReminderTime('二十五分钟后', base) - base, 25 * 60_000, '几十的中文数字');
+  assert.equal(parseReminderTime('30秒后', base) - base, 30_000);
+  assert.equal(parseReminderTime('abc', base), 0, '认不出来就是 0');
+  assert.equal(parseReminderTime('0分钟后', base), 0, '0 分钟不算');
+});
+
+test('chatId：设在哪条私聊就记在哪，老记录回落空串', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rem-'));
+  try {
+    const file = join(dir, 'reminders.json');
+    const now = new Date('2026-11-25T00:00:00').getTime();
+    const s = createReminderStore({ file, now: () => now, newId: () => 'id1' });
+    const r = s.add('2026-11-26 10:00', '叫她来', { at: now, chatId: 'openid-B' });
+    assert.equal(r.ok, true);
+    assert.equal(s.list(now)[0].chatId, 'openid-B', '落盘并读回');
+
+    /** 老记录（没有 chatId）读出来是空串，由 fireReminder 回落主人 */
+    writeFileSync(file, JSON.stringify([{ id: 'old', at: now + 60_000, note: '老提醒' }]), 'utf8');
+    assert.equal(s.list(now)[0].chatId, '');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('相对时间入参：add 用注入的 now 当基准', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rem-'));
+  try {
+    const file = join(dir, 'reminders.json');
+    const now = new Date('2026-11-25T23:59:30').getTime();
+    const s = createReminderStore({ file, now: () => now, newId: () => 'id1' });
+    const r = s.add('一分钟后', '跨午夜也要对', { at: now, chatId: 'openid-B' });
+    assert.equal(r.ok, true);
+    assert.equal(s.list(now)[0].at, now + 60_000);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('normalizeReminder：脏数据丢掉，字段钳制', () => {
   assert.equal(normalizeReminder(null), null);
   assert.equal(normalizeReminder({ id: '', at: 1, note: 'x' }), null);
