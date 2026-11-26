@@ -81,7 +81,15 @@ export function createExtRules({ log = () => {}, isEnabled = () => true } = {}) 
       const next = [];
       for (let i = 0; i < input.length; i++) {
         const raw = input[i];
-        const text = String((typeof raw === 'string' ? raw : raw?.text) ?? '').trim();
+        /**
+         * 换行压成空格。
+         *
+         * 这批规则是逐条拼成 `- ...` 的 bullet 列表：正文里带一个换行，第二行
+         * 就不再是同一颗 bullet，看起来像**另起一段的独立指令**（模型会当新段落
+         * 处理，权重也不同）。规则本来就该是一句话，压平不损语义；
+         * 压平后再量长度，300 字的额度才和真正注入的字符数一致。
+         */
+        const text = String((typeof raw === 'string' ? raw : raw?.text) ?? '').replace(/\s+/g, ' ').trim();
         const kind = String((typeof raw === 'string' ? '' : raw?.kind) ?? 'all').trim().toLowerCase() || 'all';
         if (!text) continue;
         if (!RULE_KINDS.includes(kind)) {

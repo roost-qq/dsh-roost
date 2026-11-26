@@ -159,3 +159,36 @@ test('已经带「-」的条目不再叠一个（双横线会被当成上一条�
   assert.doesNotMatch(out, /- - /);
   assert.match(out, /\n- 没带横线的一句/);
 });
+
+test('换行被压成空格：不然第二行会像另起一段的独立指令', () => {
+  const s = mk();
+  s.set('ext-a', [
+    '第一句\n第二句',
+    { text: '  多  空格\n\n第三行  ', kind: 'all' },
+    '带\r\n回车',
+  ]);
+
+  const out = s.render('private');
+  /** 每条规则必须是**一行** bullet：正文里不该再有换行 */
+  const bullets = out.split('\n').filter((l) => l.startsWith('- '));
+  assert.equal(bullets.length, 3, '三条规则应该正好三行');
+  assert.match(out, /- 第一句 第二句/);
+  assert.match(out, /- 多 空格 第三行/);
+  assert.match(out, /- 带 回车/);
+  /** 存进去的就是会被注入的，`list()` 不能给回原文 */
+  assert.equal(s.list('ext-a')[0].text, '第一句 第二句');
+});
+
+test('长度按压平后的算：400 字符里 200 个换行不算字数，真写长了才拦', () => {
+  const s = mk();
+  /** 200 字 + 200 个换行 = 400 字符；压平（换行变一个空格再 trim）后 200 字，应该收 */
+  const padded = `${'一'.repeat(200)}${'\n'.repeat(200)}`;
+  assert.equal(padded.length, 400);
+  assert.equal(s.set('ext-a', [padded]).ok, true, '换行不是内容，不该占额度');
+  assert.equal(s.list('ext-a')[0].text.length, 200, '尾部的空白被 trim 掉，只剩 200 个字');
+
+  const tooLong = '一'.repeat(MAX_RULE_CHARS + 1);
+  const r = s.set('ext-a', [tooLong]);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /单条最多/);
+});

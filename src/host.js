@@ -3318,12 +3318,13 @@ export function apply(ctx) {
   const extPromptContexts = createExtPromptContexts({
     log: (m) => log.info(m),
     /**
-     * 停用 / 卸载的扩展不再注入（2026-11-26 主人指出）。
+     * 吊销 / 卸载的扩展不再注入（2026-11-26 主人指出）。
      *
-     * 面板「停用」只让令牌失效，已注册进内存的段落原本仍每轮拼进 system prompt
-     * ——「停用了可她还知道那些事」。判据与 `verify()` 共用 `extEnabledOf`：
-     * 现读 `api-clients.json`（那边本来就没有缓存），面板停用、直接改文件、
-     * 卸载三条路径都覆盖得到。
+     * 面板上对扩展令牌的操作只有**吊销**（删记录），另外 `verify()` 本来就跳过
+     * `enabled: false` 的记录（手工改 `api-clients.json` 会用到）。不管哪条，
+     * 已注册进内存的段落原本仍每轮拼进 system prompt——「撤掉了可她还知道那些事」。
+     * `extEnabledOf` 的判据和 `verify()` 逐字一致（记录存在且 `enabled !== false`），
+     * 现读 `api-clients.json`（那边本来就没有缓存），吊销、卸载、手工停用都覆盖得到。
      */
     isEnabled: extEnabledOf(extClientStore),
   });
@@ -8863,9 +8864,15 @@ export function apply(ctx) {
           name: 'roost-ext-rules',
           order: 906.5,
           text: () => {
-            /** 频道（guild）按群算：那边的约束和群聊基本是一套 */
-            const k = chat?.kind === 'group' || chat?.kind === 'guild' ? 'group' : 'private';
-            return extRules.render(k);
+            /**
+             * 频道（guild）按群算：那边的约束和群聊基本是一套。
+             *
+             * 类型映射走 `sceneOfKind`，别在这里另写一份 `kind === 'group' || kind === 'guild'`
+             * ——实际取值是 `c2c` / `dm` / `group` / `guild` / `agent`，没有 `private` 这个词，
+             * 散落着判断迟早有人写成 `kind === 'private'`，然后私聊规则永远不生效。
+             */
+            const scene = sceneOfKind(chat?.kind);
+            return extRules.render(scene === 'group' ? 'group' : 'private');
           },
         }),
       );

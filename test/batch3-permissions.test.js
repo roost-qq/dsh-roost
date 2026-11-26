@@ -160,6 +160,16 @@ test('guard 真的挂到 systemPrompt.context：name / order / text 都是运行
     assert.ok(extRulesCtx.order > 906, '扩展规则不能排到权限之前');
     assert.ok(extRulesCtx.order < 910, '扩展规则压不过安全边界');
     assert.equal(extRulesCtx.text(), '', '没有扩展提交规则时返回空串');
+    /**
+     * 场景映射必须走 `sceneOfKind`。
+     *
+     * `chat.kind` 的实际取值是 `c2c` / `dm` / `group` / `guild` / `agent` ——
+     * **没有 `private` 这个词**。手写判断时最容易写出 `kind === 'private'`
+     * 或者漏掉 `dm`，结果是私聊规则永远不生效（或者群规则漏进频道），
+     * 而 store 的单测全绿。
+     */
+    assert.match(hostSrc, /sceneOfKind\(chat\?\.kind\)/, '会话类型必须走 sceneOfKind，别另写一份');
+    assert.match(hostSrc, /extRules\.render\(scene === 'group' \? 'group' : 'private'\)/, '场景要归一成 ext-rules 认识的 private / group');
   } finally {
     for (const c of cleanups) { try { c(); } catch {} }
     if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
