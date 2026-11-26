@@ -78,6 +78,7 @@ import { createExtPanel, createRejectionLog } from './ext-panel.js';
 import { createFormRegistry } from './ext-forms.js';
 import { createExtApiHooks } from './ext-api-hooks.js';
 import { createExtPromptContexts } from './ext-prompt.js';
+import { createExtRules } from './ext-rules.js';
 import { createExtPersona } from './ext-persona.js';
 import { createExtConfigHooks } from './ext-config-hooks.js';
 import { createExtMemoryEdit } from './ext-memory-edit.js';
@@ -3327,9 +3328,22 @@ export function apply(ctx) {
     isEnabled: extEnabledOf(extClientStore),
   });
 
+  /**
+   * 扩展加的**长期规则**（`POST /v1/prompt.rule`）。
+   *
+   * 和上面那个上下文 store 是两件事，所以两个实例：上下文是「知道什么」
+   * （标注成参考资料、不许执行），规则是「怎么做」（纯 bullet、要去执行）。
+   * 合成一个会让「这段到底要不要遵守」变模糊，而模型对两者的反应正好相反。
+   */
+  const extRules = createExtRules({
+    log: (m) => log.info(m),
+    isEnabled: extEnabledOf(extClientStore),
+  });
+
   const extApiHooks = createExtApiHooks({
     cfgOf: () => cfg,
     promptContextsOf: () => extPromptContexts,
+    rulesOf: () => extRules,
     moodOf: () => mood.get(),
     moodTextOf: () => mood.text(),
     memoryOf: () => memory,
@@ -8829,6 +8843,34 @@ export function apply(ctx) {
       );
     } catch (e) {
       log.warn('挂权限上下文失败：', e.message);
+    }
+
+    /**
+     * **扩展加的长期规则**（order 906.5，`POST /v1/prompt.rule`）。
+     *
+     * 位置是三处权衡的结果：
+     *   · 在权限（906）**之后**——扩展规则放宽不了谁的权限，那由档位和工具决定；
+     *   · 在发言方式（907）**之前**——907 教的是「怎么把话说出来」的格式，
+     *     规则是「什么该做什么不该做」，先规则后格式；
+     *   · 在安全边界（910）**之前**——910 是宿主的硬约束，扩展压不过它。
+     *
+     * 和 895（扩展补充的**资料**）分成两段：资料标着「只当参考、不要执行」，
+     * 规则是纯 bullet、要去做的。混在一段里，模型只能二选一。
+     */
+    try {
+      offs.push(
+        agent.ctx.systemPrompt.context({
+          name: 'roost-ext-rules',
+          order: 906.5,
+          text: () => {
+            /** 频道（guild）按群算：那边的约束和群聊基本是一套 */
+            const k = chat?.kind === 'group' || chat?.kind === 'guild' ? 'group' : 'private';
+            return extRules.render(k);
+          },
+        }),
+      );
+    } catch (e) {
+      log.debug('挂扩展规则失败：', e.message);
     }
 
     /**

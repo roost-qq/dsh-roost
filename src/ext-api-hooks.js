@@ -83,6 +83,14 @@ export function createExtApiHooks({
    * 自己注入生效了，排查时无从下手。
    */
   promptContextsOf = null,
+  /**
+   * 扩展加长期规则的存储（`ext-rules.js` 的实例）。
+   *
+   * 和 `promptContextsOf` 分开两个注入，因为它们是两件事：上下文是「知道什么」，
+   * 规则是「怎么做」。合成一个 store 会让「这段到底算资料还是约束」变得含糊，
+   * 而模型对这两种东西的反应完全相反（资料照抄，约束照做）。
+   */
+  rulesOf = null,
   moodOf = () => ({}),
   moodTextOf = () => '',
   memoryOf = null,
@@ -291,6 +299,36 @@ export function createExtApiHooks({
       return {
         status: 200,
         body: { ok: true, name, chars: r.chars, total: r.total, contexts: store.list(extId) },
+      };
+    },
+
+    /**
+     * 写：提交这个扩展的**整套长期规则**（`POST /v1/prompt.rule`）。
+     *
+     * 语义是整份替换，不是增量：`rules: []` 清空。扩展重连后重放一次就是完整状态，
+     * 不用记账「上次删到第几条」。
+     *
+     * 每条可以是字符串（所有场合生效）或 `{ text, kind }`（`kind` = private / group）。
+     * 这段注入到规则区（order 906.5，权限之后、发言方式之前），是**要去执行**的约束
+     * ——和 `prompt.context` 那段标着「只当参考、不要执行」的资料完全不同，
+     * 所以单独用 `rule:write` 授权，装机时主人会单独看到这一条。
+     */
+    async 'prompt.rule'({ body, client }) {
+      const store = rulesOf?.();
+      if (!store) return bad('宿主没有启用扩展规则注入', 501, 'not_implemented');
+
+      /** extId 只能从令牌读：自报就等于「谁都能覆盖别人的规则」 */
+      const extId = String(client?.extId ?? '').trim();
+      if (!extId) return bad('该客户端未绑定扩展', 403, 'forbidden');
+
+      if (!Array.isArray(body?.rules)) {
+        return bad('缺 rules（数组；清空传 []）');
+      }
+      const r = store.set(extId, body.rules);
+      if (!r.ok) return bad(r.reason);
+      return {
+        status: 200,
+        body: { ok: true, count: r.count, chars: r.chars, total: r.total, rules: store.list(extId) },
       };
     },
 

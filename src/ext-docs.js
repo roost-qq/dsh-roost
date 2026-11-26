@@ -66,6 +66,7 @@ const ROUTE_NOTES = {
   'POST /v1/session.ensure': '确保会话存在',
   'POST /v1/session.configure': '切人格 / 设模型 / 清覆盖：`{ chatId?, senderId?, persona?, model?, clear? }`。`chatId` 改**这个会话**，`senderId`（**发送者 openid**）改**这个人**（走到哪都用他那一套，优先级高于会话），都不传才是全局。`model` 只能按会话配，和 `senderId` 一起用会 400',
   'POST /v1/prompt.context': '往她的 system prompt 尾部加一段**参考资料**（只追加、改不了人格与规则）：`{ name?, text, chatId?, action? }`。`text` 传空串或 `action:"clear"` 删掉这一段；单段 ≤2000 字、一个扩展最多 8 段、合计 ≤6000 字。不产生消息、不进记忆，宿主重启后要重新注册',
+  'POST /v1/prompt.rule': '提交这个扩展的**整套长期规则**（整份替换，`rules: []` 清空）：`{ rules: ["所有场合都生效的一句", { text: "只在私聊", kind: "private" }] }`。`kind` 可选 `all`（默认）/ `private` / `group`（频道也算）；单条 ≤300 字、最多 20 条、合计 ≤3000 字。这是**要去执行**的约束（排在权限之后、安全边界之前），和 `prompt.context` 的「只当参考」不是一回事；宿主重启后要重新提交',
   'GET /v1/personas': '列出人格库里有哪些人格、当前用哪个；`?chatId=` 看该会话实际生效的那个，`?senderId=`（**发送者 openid**）看**这个人**实际生效的那个。响应带 `byChat` 与 `bySender` 两层覆盖（不返回正文）',
   'GET /v1/personas/read': '读一份人格的正文（`?id=`），写回时原样传 `raw`',
   'POST /v1/personas/save': '改写一份**已存在**的人格正文（整份替换，不做分节合并）；不存在回 404',

@@ -147,6 +147,19 @@ test('guard 真的挂到 systemPrompt.context：name / order / text 都是运行
      */
     const hostSrc = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
     assert.match(hostSrc, /isEnabled:\s*extEnabledOf\(extClientStore\)/, '停用的扩展必须立刻不注入');
+    /**
+     * 906.5 段：扩展加的长期规则。
+     *
+     * 位置是这条断言的真正目的——它必须在权限（906）之后、发言方式（907）之前。
+     * 排到 906 前面，扩展就能用一句话盖掉「群里谁有权限」；排到 910 之后，
+     * 它就能压过安全边界。两个方向都是提权。
+     */
+    const extRulesCtx = registered.find((c) => c.name === 'roost-ext-rules');
+    assert.ok(extRulesCtx, '扩展规则段没挂上');
+    assert.equal(extRulesCtx.order, 906.5, '必须在 906 与 907 之间');
+    assert.ok(extRulesCtx.order > 906, '扩展规则不能排到权限之前');
+    assert.ok(extRulesCtx.order < 910, '扩展规则压不过安全边界');
+    assert.equal(extRulesCtx.text(), '', '没有扩展提交规则时返回空串');
   } finally {
     for (const c of cleanups) { try { c(); } catch {} }
     if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;

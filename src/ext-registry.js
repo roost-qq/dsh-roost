@@ -55,7 +55,7 @@ export const EXT_DEFAULT_SCOPES = Object.freeze(['memory:write', 'state:read']);
 export const EXT_ALLOWED_SCOPES = Object.freeze([
   'message:write', 'say:write', 'state:read', 'context:read',
   'memory:read', 'memory:write', 'proactive:write', 'session:write',
-  'prompt:write', 'config:write', 'group:write', 'agent:write', 'core:write',
+  'prompt:write', 'config:write', 'group:write', 'agent:write', 'core:write', 'rule:write',
   /**
    * 下面五个覆盖**面板 API（`/quick`）里的管理面**（2026-11-21）。
    *
@@ -69,7 +69,7 @@ export const EXT_ALLOWED_SCOPES = Object.freeze([
 /** 会对外产生可见动作（说话 / 刷屏 / 改人格 / 开会话 / 改配置 / 管群）的 scope，安装时必须主人点头。 */
 export const EXT_SENSITIVE_SCOPES = Object.freeze([
   'message:write', 'say:write', 'proactive:write', 'session:write', 'prompt:write', 'agent:write',
-  'config:write', 'group:write', 'core:write',
+  'config:write', 'group:write', 'core:write', 'rule:write',
   /** 新增的五个都是敏感项：安装时逐条列出、二次确认 */
   'groups:read', 'model:write', 'host:maintenance', 'memory:purge', 'ext:manage',
 ]);
