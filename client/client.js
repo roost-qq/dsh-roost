@@ -2803,7 +2803,7 @@ window.__ModuleLoader__.load({
      * effect，永远只能测到「读着…」——第一版就因此把 `d.framework`（未定义）
      * 写进了渲染分支却没人发现。给 props 就能直接渲染断言。
      */
-    function DepsBlock({ info, busy, onCheck }) {
+    function DepsBlock({ info, busy, onCheck, autoUpdate, fw, fwBusy, onToggleAuto, onApply, running }) {
       const row = (k, label) => {
         const v = info?.[k] || {}
         return h('div', { style: { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap', marginBottom: 6 } },
@@ -2812,11 +2812,55 @@ window.__ModuleLoader__.load({
           v.latest ? h('span', { className: 'roost-note', style: { margin: 0 } }, '→ v' + v.latest) : null,
           v.hasUpdate
             ? h(Pill, { tone: 'warn' }, '有更新')
-            : v.latest
-              ? h('span', { className: 'roost-note', style: { margin: 0 } }, '已是最新')
-              : h('span', { className: 'roost-note', style: { margin: 0 } }, '查不到最新版'),
+            : fw?.needsRestart
+              ? h(Pill, { tone: 'warn' }, '待重启生效')
+              : v.latest
+                ? h('span', { className: 'roost-note', style: { margin: 0 } }, '已是最新')
+                : h('span', { className: 'roost-note', style: { margin: 0 } }, '查不到最新版'),
         )
       }
+
+      /**
+       * 框架自带更新区。
+       *
+       * 状态来自框架启动时的自检（不是这里现场打 GitHub）：`fw` 为 null 表示
+       * 还在读；`Fw` 没在跑时按钮禁用，因为框架的 check/apply 接口都要求活着。
+       * 装完**不重启**，所以 `needsRestart` 时给的是「重启后才生效」常驻提示。
+       */
+      const updateBlock = h('div', { style: { marginTop: 10, borderTop: '1px solid var(--color-border-tertiary)', paddingTop: 10 } },
+        h('div', { style: { fontSize: 13, fontWeight: 500, marginBottom: 6 } }, '框架自更新'),
+        h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5 } },
+          h('input', {
+            type: 'checkbox', checked: autoUpdate === true,
+            onChange: (e) => onToggleAuto?.(Boolean(e.target.checked)),
+          }), '检测到新版自动更新（默认关）'),
+        h('div', { className: 'roost-note', style: { margin: '6px 0 0' } },
+          'Roost 启动时检查一次；开启后检查到新版会自动装。装完不会自动重启，需要手动重启框架才生效。'),
+        fw?.needsRestart
+          ? h('div', { style: { marginTop: 8 } }, h(Pill, { tone: 'warn' }, '已更新，需手动重启框架才生效'))
+          : null,
+        fw?.error
+          ? h('div', { className: 'roost-note', style: { margin: '6px 0 0' } }, fw.error)
+          : null,
+        h('div', { style: { marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+          h('button', {
+            type: 'button', className: 'roost-btn',
+            disabled: Boolean(fwBusy || !running || fw?.needsRestart),
+            onClick: onApply,
+          }, fwBusy ? '更新中…' : '立即更新框架'),
+          !running
+            ? h('span', { className: 'roost-note', style: { margin: 0 } }, 'Roost 没在跑，先启动再更新')
+            : fw?.pending
+              ? h('span', { className: 'roost-note', style: { margin: 0 } }, '框架刚启动，还在检查…')
+                : fw?.hasUpdate
+                  ? h('span', { className: 'roost-note', style: { margin: 0 } }, `检测到新版 v${fw.latest || ''}`)
+                  : fw?.needsRestart
+                    ? h('span', { className: 'roost-note', style: { margin: 0 } }, `当前 v${fw.current} · 待重启生效`)
+                    : fw?.current
+                      ? h('span', { className: 'roost-note', style: { margin: 0 } }, `当前 v${fw.current} · 已是最新`)
+                      : null,
+        ),
+      )
 
       return h(Sec, {
         title: '组件版本',
@@ -2833,12 +2877,13 @@ window.__ModuleLoader__.load({
                 row('framework', 'Roost 框架'),
                 info.framework?.hasUpdate
                   ? h('div', { className: 'roost-note' },
-                      '框架有新版：下载 tar 包解压覆盖原目录（data/ 里的机器人配置和记忆不受影响），然后重启 Roost。')
+                      '框架有新版：可以点下面的「立即更新框架」触发框架自带更新（等价于下载 tar 包解压覆盖原目录，data/ 里的机器人配置和记忆不受影响），完事手动重启 Roost。')
                   : null,
                 info.framework?.error
                   ? h('div', { className: 'roost-note' },
                       '最新版查不到多半是网络或 GitHub 抖动，不影响使用；点「重新检查」再试一次。')
                   : null,
+                updateBlock,
               ),
       )
     }
@@ -2933,6 +2978,39 @@ window.__ModuleLoader__.load({
       }
       /** 进页查一次（服务端有半小时缓存，不会每点一次都打 GitHub） */
       useEffect(() => { loadDeps(false) }, [])
+
+      /** 框架自更新：状态读框架快照，开关走 saveCfg，手动装走 /apply */
+      const [fwUpdate, setFwUpdate] = useState(null)
+      const [fwBusy, setFwBusy] = useState(false)
+      const loadFwUpdate = async () => {
+        setFwBusy(true)
+        try {
+          const r = await get('/setup/framework-update')
+          setFwUpdate(r && r.ok !== false ? r : { error: r?.error || r?.message || '读不到框架更新状态' })
+        } catch (e) {
+          setFwUpdate({ error: e?.message || '读不到框架更新状态' })
+        } finally {
+          setFwBusy(false)
+        }
+      }
+      useEffect(() => { loadFwUpdate() }, [])
+      const applyFwUpdate = async () => {
+        setFwBusy(true)
+        try {
+          const r = await post('/setup/framework-update/apply', {})
+          toast(r?.ok ? (r.message || '框架已更新，记得手动重启') : (r?.error || r?.message || '没更新成'))
+          await loadFwUpdate()
+        } catch (e) {
+          toast('没更新成：' + (e?.message || e))
+        } finally {
+          setFwBusy(false)
+        }
+      }
+      const toggleFrameworkAuto = async (v) => {
+        const r = await saveCfg({ setup: { frameworkAutoUpdate: v } })
+        if (r && r.ok === false) toast(r.message || '没存上')
+        else { toast(v ? '已开：下次 Roost 启动检测到新版会自动更新' : '已关自动更新'); reload?.() }
+      }
       const locked = Boolean(work) || Boolean(busy)
 
       /**
@@ -3682,7 +3760,12 @@ window.__ModuleLoader__.load({
           ),
         ),
 
-        h(DepsBlock, { info: depsInfo, busy: depsBusy, onCheck: () => loadDeps(true) }),
+        h(DepsBlock, {
+          info: depsInfo, busy: depsBusy, onCheck: () => loadDeps(true),
+          autoUpdate: s.frameworkAutoUpdate === true,
+          fw: fwUpdate, fwBusy, running: Boolean(s.running),
+          onToggleAuto: toggleFrameworkAuto, onApply: applyFwUpdate,
+        }),
 
         /**
          * 探活身份校验：紧跟着「组件版本」，都是「Roost 到底起没起来」这条线上的事。

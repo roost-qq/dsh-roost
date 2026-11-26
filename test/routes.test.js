@@ -1160,7 +1160,8 @@ test('移除 ai-chat：/setup/plugin、/setup/configure、/setup/sync 三条路�
   );
   /** 直连与向导路由一个都不能少 */
   for (const p of ['/roost/pair', '/roost/pair/enable', '/roost/pair/test',
-                   '/setup/wizard', '/setup/wizard/done', '/setup/wizard/skip', '/setup/wizard/reopen']) {
+                   '/setup/wizard', '/setup/wizard/done', '/setup/wizard/skip', '/setup/wizard/reopen',
+                   '/setup/framework-update', '/setup/framework-update/apply']) {
     assert.ok(routes.has('/roost/api' + p), `缺路由 ${p}`);
   }
   off?.();
