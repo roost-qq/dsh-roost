@@ -726,7 +726,13 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
     description: '你想对主人说一句话。不直接发：交给主动消息治理排队，安静时段先攒着。说不说由治理和你判断，但「想过要说」会留痕。',
     parameters: {
       text: { type: 'string', required: true, description: '想说的话' },
-      reason: { type: 'string', required: false, description: '为什么现在想说' },
+      /**
+       * 可选参数**不写 `required` 键**：DSH 的 `defineTool` 只要看到
+       * `required` 就必须是 `true`，写 `false` 会抛
+       * `parameters.reason.required must be true when present`。
+       * 注册器遇到第一个失败就整组返回，后面的工具全部挂不上（issue #81）。
+       */
+      reason: { type: 'string', description: '为什么现在想说' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
