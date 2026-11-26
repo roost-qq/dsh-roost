@@ -259,7 +259,7 @@ test('面板：扩展不存在时报 not_found，而不是「没有设置项」'
   assert.equal(r.reason, 'not_found');
 });
 
-test('面板：saveConfig 只接受声明过的敏感键，用户手写目录只读', (t) => {
+test('面板：saveConfig 只接受声明过的敏感键；手写扩展配置可写、清单仍只读', (t) => {
   const dir = tmp(t);
   const spec = normalizeConfigSpec(SPEC).spec;
   const foreign = { value: false };
@@ -276,9 +276,17 @@ test('面板：saveConfig 只接受声明过的敏感键，用户手写目录只
   assert.equal(bad.ok, false);
   assert.match(bad.message, /不能大于 10/);
 
+  /**
+   * 2026-11-27 起：手写扩展的**配置**可写（存宿主 cfg，不碰用户目录），
+   * 只有**清单**（plugin.json，usage 写回那里）仍然只读。
+   */
   foreign.value = true;
-  assert.equal(panel.saveConfig('demo', { threshold: 2 }).reason, 'foreign_readonly');
-  assert.equal(panel.configOf('demo').canEdit, false);
+  const after = panel.saveConfig('demo', { threshold: 3 });
+  assert.equal(after.ok, true, '手写扩展的配置不该再被拒');
+  assert.equal(panel.configOf('demo').canEdit, true);
+
+  const usage = panel.saveUsage('demo', '新说明');
+  assert.equal(usage.reason, 'foreign_readonly', '清单是用户文件，面板不能写回');
 });
 
 test('launcher：把配置与密钥注入子进程 env', (t) => {
