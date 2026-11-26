@@ -20,11 +20,25 @@ import {
 } from 'node:fs';
 
 import { MANIFEST_FILE, SOURCE_FILE } from './ext-registry.js';
+import { SELF_REPO, GITEE_SELF_REPO } from './repo.js';
 
 /** 随包投放的接口文档。`API.md` 由 `scripts/build-ext-docs.mjs` 从源码生成。 */
 export const AUTHOR_DOCS = ['API.md', 'extension.d.ts'];
 export const AUTHOR_GUIDE = '写一个扩展.md';
-export const GUIDE_URL = `https://github.com/roost-qq/qq-bot-roost/blob/master/docs/${encodeURIComponent(AUTHOR_GUIDE)}`;
+
+/**
+ * 教程在线地址。**本仓是 dsh-roost，不是框架 qq-bot-roost。**
+ *
+ * 这份文档只在 dsh-roost 的 `docs/` 下，指向框架仓会 404；而两个 slug 长得
+ * 几乎一样（`roost-qq/qq-bot-roost` vs `roost-qq/dsh-roost`），URL 不点开
+ * 根本看不出错。所以走 `SELF_REPO` 常量，别在这里拼 owner。
+ *
+ * 两个远端都放：国内直连 GitHub 常失败，Gitee 是原生 Pull 镜像，内容同步。
+ */
+const GUIDE_BRANCH = 'main';
+const GUIDE_PATH = `docs/${encodeURIComponent(AUTHOR_GUIDE)}`;
+export const GUIDE_URL = `https://github.com/${SELF_REPO}/blob/${GUIDE_BRANCH}/${GUIDE_PATH}`;
+export const GUIDE_URL_GITEE = `https://gitee.com/${GITEE_SELF_REPO}/blob/${GUIDE_BRANCH}/${GUIDE_PATH}`;
 
 /**
  * 复制目录时跳过的名字。

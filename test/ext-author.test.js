@@ -18,9 +18,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  plantAuthorDocs, authorPrompt, forkExtension, countFiles, AUTHOR_GUIDE, GUIDE_URL,
+  plantAuthorDocs, authorPrompt, forkExtension, countFiles, AUTHOR_GUIDE, GUIDE_URL, GUIDE_URL_GITEE,
 } from '../src/ext-author.js';
 import { validateManifest, EXT_ALLOWED_SCOPES } from '../src/ext-registry.js';
+import { SELF_REPO, GITEE_SELF_REPO, FW_REPO } from '../src/repo.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const HOMES = [];
@@ -43,7 +44,25 @@ test('教程文件随包存在，且写清了「清单 / 权限 / 生效方式 /
   for (const key of ['plugin.json', 'dsh-extension', 'serverName', 'scopes', '重启 DSH', 'index.json']) {
     assert.ok(text.includes(key), `教程里应提到 ${key}`);
   }
-  assert.match(GUIDE_URL, /github\.com\/roost-qq\/qq-bot-roost/, 'GitHub 链接要指向本仓');
+});
+
+/**
+ * 教程链接的仓库必须对。
+ *
+ * 曾经写的是框架仓 `qq-bot-roost`（还带 `master`），而 `docs/写一个扩展.md`
+ * 只在 **dsh-roost** 这一层——点过去 404。两个 slug 只差几个字，URL 看上去
+ * 完全正常，测试当时还把错的值写成了断言。所以这里拿常量比，并且明确禁止
+ * 出现框架仓 slug。
+ */
+test('教程链接指向本仓 dsh-roost，GitHub 与 Gitee 各一条', () => {
+  const path = `docs/${encodeURIComponent(AUTHOR_GUIDE)}`;
+  assert.equal(GUIDE_URL, `https://github.com/${SELF_REPO}/blob/main/${path}`,
+    'GitHub 链接要指向本仓 main 分支下的 docs/');
+  assert.equal(GUIDE_URL_GITEE, `https://gitee.com/${GITEE_SELF_REPO}/blob/main/${path}`,
+    'Gitee 镜像也要给——国内直连 GitHub 常失败，只给一条等于没给');
+  assert.ok(!GUIDE_URL.includes(FW_REPO), '教程不在框架仓里，指向它必然 404');
+  assert.ok(!GUIDE_URL_GITEE.includes('roost-qq/'),
+    'Gitee 上是个人号，拼上 GitHub 组织名会 404');
 });
 
 test('plantAuthorDocs：投放到扩展根目录，缺的文件跳过、内容没变不重写', () => {
@@ -206,4 +225,28 @@ test('市场页的教程卡前面有引导语（不然用户不知道这张卡�
   assert.match(marketTab, /没有想要的|自己写/, '市场页要有一句「没找到就自己写」的引导');
   assert.ok(marketTab.indexOf('没有想要的') < marketTab.indexOf('ExtGuideBlock'),
     '引导语要在教程卡之前');
+});
+
+/**
+ * 两个地址要一路送到前端。
+ *
+ * 曾经后端只回一个 `url`（还是错的仓），前端只画一个链接。改成 `urls`
+ * 之后，任何一端退回单向都会让 Gitee 静默消失——这里把两端都钉住。
+ */
+test('教程路由同时给两个地址，前端两个都画出来', () => {
+  const host = fs.readFileSync(join(ROOT, 'src', 'host.js'), 'utf8');
+  const at = host.indexOf("regAuthor('/extensions/guide'");
+  assert.ok(at > 0, '教程路由要在');
+  const seg = host.slice(at, at + 900);
+  assert.match(seg, /urls = \{ github: GUIDE_URL, gitee: GUIDE_URL_GITEE \}/,
+    '路由要同时回 GitHub 与 Gitee');
+  assert.ok(seg.split('urls').length - 1 >= 2, '成功与失败分支都要带 urls，否则出错时链接也没了');
+
+  const src = fs.readFileSync(join(ROOT, 'client', 'client.js'), 'utf8');
+  const from = src.indexOf('function ExtGuideBlock');
+  const block = src.slice(from, src.indexOf('function ExtAuthoringCard', from));
+  assert.match(block, /setUrls\(r\?\.urls \|\| \{\}\)/, '前端要读 urls，别再读单条 url');
+  assert.ok(block.includes('urls.github') && block.includes('urls.gitee'),
+    '两个地址都要渲染成链接');
+  assert.ok(block.indexOf('urls.github') < block.indexOf('urls.gitee'), 'GitHub 在前，Gitee 在后');
 });

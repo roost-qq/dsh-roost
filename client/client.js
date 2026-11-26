@@ -23628,7 +23628,12 @@ window.__ModuleLoader__.load({
      */
     function ExtGuideBlock({ toast }) {
       const [text, setText] = useState('')
-      const [url, setUrl] = useState('')
+      /**
+       * 两个地址都要：GitHub 主仓 + Gitee 镜像。
+       * 这里曾经只有一个 GitHub 链接，而且指向的是**框架仓**（qq-bot-roost），
+       * 而这份教程只在 dsh-roost 的 docs/ 下——点过去是 404，URL 却长得像对的。
+       */
+      const [urls, setUrls] = useState({})
       const [err, setErr] = useState('')
       const [busy, setBusy] = useState(false)
       const load = async () => {
@@ -23636,14 +23641,19 @@ window.__ModuleLoader__.load({
         setBusy(true)
         try {
           const r = await get('/extensions/guide')
-          if (r?.ok) { setText(r.text || ''); setUrl(r.url || '') }
-          else { setErr(r?.message || '读不到教程'); setUrl(r?.url || '') }
+          setUrls(r?.urls || {})
+          if (r?.ok) setText(r.text || '')
+          else setErr(r?.message || '读不到教程')
         } finally { setBusy(false) }
       }
       const copyAll = async () => {
         try { await navigator.clipboard.writeText(text); toast('教程复制好了') }
         catch { toast('复制失败，手动选一下吧') }
       }
+      /** 外链按钮：文字短、带箭头，两个站并排，哪个通点点哪个 */
+      const link = (href, label) => (href
+        ? h('a', { href, target: '_blank', rel: 'noreferrer', style: { fontSize: 11.5 } }, `${label} ↗`)
+        : null)
       return h('details', {
         className: 'roost-note',
         style: { marginTop: 8 },
@@ -23652,7 +23662,8 @@ window.__ModuleLoader__.load({
         h('summary', { style: { cursor: 'pointer', fontWeight: 620 } }, '写扩展教程（从清单到能跑，含最小示例）'),
         h('div', { style: { display: 'flex', gap: 8, margin: '8px 0', flexWrap: 'wrap', alignItems: 'center' } },
           h('button', { type: 'button', className: 'roost-btn roost-btn-primary', disabled: !text, onClick: copyAll }, '一键复制全文'),
-          url ? h('a', { href: url, target: '_blank', rel: 'noreferrer', style: { fontSize: 11.5 } }, '在 GitHub 上看 ↗') : null,
+          link(urls.github, '在 GitHub 上看'),
+          link(urls.gitee, '在 Gitee 上看'),
           busy ? h('span', { className: 'roost-faint' }, '读着…') : null),
         err ? h('div', { style: { color: 'var(--bad)', fontSize: 11.5 } }, err) : null,
         text ? h('pre', {

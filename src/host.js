@@ -295,7 +295,7 @@ import { splitPersonaText, joinPersonaText, joinPersonaBlocks } from './persona-
 import { simulate, SIM_PERSONAS } from './simulate.js';
 import { buildExtension, formatScaffold } from './ext-wizard.js';
 import {
-  plantAuthorDocs, authorPrompt, forkExtension, AUTHOR_GUIDE, GUIDE_URL,
+  plantAuthorDocs, authorPrompt, forkExtension, AUTHOR_GUIDE, GUIDE_URL, GUIDE_URL_GITEE,
 } from './ext-author.js';
 import { analyzeStyle, styleMemoryEntry } from './speech-style.js';
 import { polishText, POLISH_PRESETS } from './persona-polish.js';
@@ -10742,14 +10742,19 @@ export function apply(ctx) {
 
     /** 写扩展的教程：随包发布，面板里直接看 / 复制，连不上 GitHub 也能用。 */
     regAuthor('/extensions/guide', (req, res) => {
+      /**
+       * 两个远端都给：GitHub 是主仓，Gitee 是镜像。国内直连 GitHub 常失败，
+       * 只给一条等于没给——用户在「打不开」和「自己找」之间就没有别的路。
+       */
+      const urls = { github: GUIDE_URL, gitee: GUIDE_URL_GITEE }
       try {
         const text = readFileSync(join(import.meta.dirname, '..', 'docs', AUTHOR_GUIDE), 'utf8')
-        return send(res, 200, { ok: true, text, url: GUIDE_URL })
+        return send(res, 200, { ok: true, text, urls })
       } catch (e) {
         return send(res, 200, {
           ok: false,
           message: `读不到教程文件（docs/${AUTHOR_GUIDE}）：${e?.message ?? e}`,
-          url: GUIDE_URL,
+          urls,
         })
       }
     })
