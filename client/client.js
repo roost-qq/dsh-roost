@@ -9331,18 +9331,18 @@ window.__ModuleLoader__.load({
             feedbackState.breaker?.needsReview ? h('div', { style: { color: 'var(--warn)', marginTop: 4 } }, '⚠ 熔断待检视：她连续全灭或被叫停，先看看是不是规矩太紧') : null)
           : null,
 
-        /** 她的小闹钟（A1）：一次性提醒，到点叫醒她自己决定说不说，不替她发消息 */
+        /** 她的小闹钟（A1）：到点叫醒她，她真说的话投递到设闹钟的那个私聊，`<<skip>>` 不发 */
         h('div', { className: 'roost-note', style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--line-soft)' } },
           h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 5 } }, '小闹钟：代她设一条 / 看待触发'),
           h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8, lineHeight: 1.6 } },
             '这里是**操作**：替她记一条、看哪些还没触发、关掉某条。'
             + '开关（允许她自己设 / 问了没回会轻追 / 失败重试）和上限在「主动搭话 → 05 她的小闹钟与追问」页。'
-            + '到点系统会叫醒她，由她决定要不要找你，不会替她发。'),
+            + '到点会先叫醒她，她决定说就发到设闹钟的那个私聊，回 <<skip>> 就不发。'),
           h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 } },
             h('input', {
               type: 'text', className: 'roost-input', value: remindAt,
               onChange: (e) => setRemindAt(e.target.value),
-              placeholder: '2026-11-26 17:30', style: { width: 150, fontSize: 11 },
+              placeholder: '2026-11-26 17:30 或 一分钟后', style: { width: 175, fontSize: 11 },
             }),
             h('input', {
               type: 'text', className: 'roost-input', value: remindNote,
@@ -9920,7 +9920,8 @@ window.__ModuleLoader__.load({
         h(Sec, { n: '05', title: '她的小闹钟与追问',
           right: h('span', { className: 'roost-muted', style: { fontSize: 11 } }, '默认关 · 即点即存') },
           h('div', { className: 'roost-note', style: { marginBottom: 10 } },
-            '她可以在私聊里自己设一次性提醒（「记得 X 点提醒我…」），到点系统叫醒她、由她决定说不说；'
+            '她可以在私聊里自己设一次性提醒（「记得 X 点提醒我…」或「一分钟后…」），到点系统叫醒她，'
+            + '她决定说就发到设闹钟的那个私聊（回 <<skip>> 就不发）；'
             + '她问了你一句、15–40 分钟没回，偶尔轻追一句，每句最多追一次。'),
           h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 10 } },
             h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
