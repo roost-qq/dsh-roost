@@ -106,7 +106,7 @@ test('D7：已有档案进 prompt 让模型能改口，dry-run 只算不写', as
 
 /* ---------------- host 这一侧 ---------------- */
 
-async function boot({ enabled = false, seedProfile = true } = {}) {
+async function boot({ enabled = false, seedProfile = true, seed = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'roost-prof-host-'));
   const data = join(dir, 'data');
   mkdirSync(data, { recursive: true });
@@ -116,7 +116,7 @@ async function boot({ enabled = false, seedProfile = true } = {}) {
 
   writeFileSync(join(data, 'config.json'), JSON.stringify({ profiles: { enabled } }), 'utf8');
   if (seedProfile) {
-    writeFileSync(join(data, 'profiles.json'), JSON.stringify([
+    writeFileSync(join(data, 'profiles.json'), JSON.stringify(seed || [
       { key: 'u1', name: '小明', impression: '说话直', tips: '先给结论', at: NOW, hits: 1 },
     ]), 'utf8');
   }
@@ -221,4 +221,41 @@ test('D7：开关已上线（staged 删了），能看也能改', async (t) => {
   const onDisk = JSON.parse(readFileSync(join(b.data, 'config.json'), 'utf8'));
   assert.equal(onDisk.profiles.enabled, true);
   assert.equal(existsSync(b.file), false, '只改开关不写数据文件');
+});
+
+/* ---------------- 称呼段（T3）与 @ 别名登记（T2） ---------------- */
+
+test('T3：称呼段真的进 system prompt，且与档案段分开（不并进按天冻结的那段）', async (t) => {
+  const b = await boot({
+    enabled: true,
+    seed: [{
+      key: 'u1', name: '小明', impression: '说话直', at: NOW, hits: 1,
+      addresses: { '*': '老王' },
+      nicknames: { '*': ['明明'] },
+    }],
+  });
+  t.after(b.done);
+  const mind = await b.call('/roost/api/mind', null, 'GET');
+  assert.match(mind.body.memoryStaticText, /【怎么称呼他们】/, '称呼段要出现');
+  assert.match(mind.body.memoryStaticText, /叫他「老王」/);
+  assert.match(mind.body.memoryStaticText, /别人也说「明明」/, '别名作为"别人在说谁"的线索');
+  /** 档案段与称呼段都在，但称呼段不能塞进档案那行里 */
+  assert.match(mind.body.memoryStaticText, /熟人小档案/);
+  const idx = mind.body.memoryStaticText.indexOf('【怎么称呼他们】');
+  const profIdx = mind.body.memoryStaticText.indexOf('熟人小档案');
+  assert.notEqual(idx, profIdx);
+});
+
+test('T3：没设称呼的人不产生这一段（空串，不占预算）', async (t) => {
+  const b = await boot({ enabled: true });
+  t.after(b.done);
+  const mind = await b.call('/roost/api/mind', null, 'GET');
+  assert.equal(mind.body.memoryStaticText.includes('【怎么称呼他们】'), false);
+});
+
+test('T2：宿主已经把 profiles.addNickname 接进收消息链路（静态守门）', () => {
+  const src = readFileSync(new URL('../src/host.js', import.meta.url), 'utf8');
+  assert.match(src, /profiles\.addNickname\?\.\(id, name, \{ scope: chat\.chatId \}\)/, 'mentions 要登记到档案');
+  assert.match(src, /addressSec = profiles\.addressText\(\{ chatId \}\)/, '称呼段要按当前会话现算');
+  assert.match(src, /profilesSec, addressSec/, '两个分支都要带上称呼段');
 });

@@ -6643,6 +6643,22 @@ export function apply(ctx) {
     }
 
     /**
+     * 称呼段（T3）：**不能并进 `profilesSec`**。
+     *
+     * 档案段按日历日冻结（保 prompt cache），称呼却跟着当前会话走——
+     * 同一个人在 A 群叫「老王」、B 群叫「小明」，混进日缓存就会串群。
+     * 所以单独一段、每轮现算；没有内容时是空串（不占预算，与升级前一致）。
+     */
+    let addressSec = '';
+    if (shouldInjectProfiles({ enabled: cfg.profiles?.enabled })) {
+      try {
+        addressSec = profiles.addressText({ chatId });
+      } catch (e) {
+        log.debug(`取称呼失败：${e.message}`);
+      }
+    }
+
+    /**
      * 平时只给分数最高的几条；深度时才全量。
      *
      * 深度也按同一顺序给：万一 `fitBudget` 要砍，砍掉的是分数低的尾巴，
@@ -6759,8 +6775,8 @@ export function apply(ctx) {
      * facts 是硬事实，自述是软状态。
      */
     const sections = deep
-      ? [rules, directiveSec, followSec, factsGlobal, factsChat, staleSec, selfSec, profilesSec, digestSec, topSec, graphSec]
-      : [rules, followSec, factsGlobal, factsChat, profilesSec];
+      ? [rules, directiveSec, followSec, factsGlobal, factsChat, staleSec, selfSec, profilesSec, addressSec, digestSec, topSec, graphSec]
+      : [rules, followSec, factsGlobal, factsChat, profilesSec, addressSec];
 
     const body = fitBudget(sections, deep ? recallBudgets().deep : recallBudgets().res);
     // 一句都没有（新装的、什么都没聊过）就别占地方
@@ -9066,6 +9082,25 @@ export function apply(ctx) {
     if (!chat.chatId) {
       log.warn('收到没有 chatId 的消息，忽略');
       return;
+    }
+    /**
+     * 称呼别名登记（T2）：平台在 `mentions[]` 里直接给出「被 @ 的 openid 此刻叫什么」，
+     * 这是最可靠的别名来源——比启发式硬、比模型猜准（对齐 rabbit 的 `seeAlias`）。
+     *
+     * 只写程序侧的档案，**不进 prompt、不影响任何注入段**：真正的注入在
+     * `profiles.addressText()`，那里用主人设的称呼，不拿别人怎么叫当自己的叫法。
+     * 没有档案的人直接跳过（不为一条 @ 建半条空档案）。
+     */
+    try {
+      const mentions = Array.isArray(payload?.mentions) ? payload.mentions : [];
+      for (const m of mentions.slice(0, 20)) {
+        const id = String(m?.id || m?.member_openid || '').trim();
+        const name = String(m?.username || '').trim();
+        if (!id || !name) continue;
+        profiles.addNickname?.(id, name, { scope: chat.chatId });
+      }
+    } catch (e) {
+      log.debug(`登记 @ 别名跳过：${e?.message ?? e}`);
     }
     /**
      * 4.5：这一轮用哪个人格，决定新记忆写到哪个物理键。
