@@ -178,6 +178,27 @@ export function l3Candidates(rows, { maxRows = 12 } = {}) {
   return { ids: high.map((r) => r.id), before, lines };
 }
 
+/**
+ * 模型抽出来的「废话条目」：她对自己能力的元评论、模糊的自我性格评价。
+ *
+ * 为什么只拦这两类，且必须**以「我/她」开头**：
+ * `我有点社恐` 记下来只会让她照着演；但 `主人有点社恐` 是**关于主人的有用事实**，
+ * 一起拦掉就是误伤。这条线划在"说的是谁"上，不划在词上。
+ *
+ * 三条都不碰显式入口：`<<remember>>`、面板手记是用户明确要求记的，
+ * 哪怕内容像自我评价也必须记——用户的意思优先于启发式。
+ */
+const SELF_META_RE = /^(?:我|她)(?:会|能|可以|一直|都|总是)?\s*(?:帮你|为你|替你)?\s*(?:记住|记着|记得|提醒|保存|记录下来)/;
+const SELF_MEMORY_RE = /^(?:我|她)的?记忆(?:力)?/;
+const SELF_TRAIT_RE = /^(?:我|她)(?:有点|有些|比较|很|特别|稍微|总是|好像)?\s*(?:社恐|社牛|内向|外向|慢热|敏感|emo|话痨|高冷|健忘|怕生|不擅长聊天)/;
+
+/** 纯函数，便于测边界；`true` = 不该进长期事实 */
+export function isNoiseFact(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  return SELF_META_RE.test(t) || SELF_MEMORY_RE.test(t) || SELF_TRAIT_RE.test(t);
+}
+
 /** 拼提示词 */
 /** 旧事实进 prompt 的上限（D6）：多了既烧 token，又让模型挑花眼 */
 export const MAX_PROMPT_FACTS = 10;
@@ -190,7 +211,14 @@ export const MAX_PROMPT_FACTS = 10;
  * 就让模型去「作废某条旧约定」，等于给它一张空白支票。
  */
 export function normalizeAgreement(raw) {
-  if (typeof raw === 'string') return { text: raw.trim(), op: 'add', old: '', status: 'fact' };
+  /**
+   * 老格式（纯字符串）走的是**提前返回**，不经过下面的检查链——
+   * 噪声过滤必须在这里也过一遍，否则老盘上的输出照样能把「我有点社恐」写进事实。
+   */
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    return { text: isNoiseFact(t) ? '' : t, op: 'add', old: '', status: 'fact' };
+  }
   const o = raw && typeof raw === 'object' ? raw : {};
   const text = String(o.text ?? '').trim();
   const want = String(o.op ?? '').toLowerCase();
@@ -205,6 +233,11 @@ export function normalizeAgreement(raw) {
    */
   const status = String(o.status ?? '').toLowerCase() === 'hearsay' ? 'hearsay' : 'fact';
   if (!text) return { text: '', op: 'add', old: '', status: 'fact' };
+  /**
+   * 元评论 / 自我性格评价不进长期事实。返回空 text，调用方 (`if (!item.text) continue`)
+   * 会静默跳过——**不新增输出字段**，巩固的输出形状与升级前一致。
+   */
+  if (isNoiseFact(text)) return { text: '', op: 'add', old: '', status: 'fact' };
   if (!old && op !== 'add') return { text, op: 'add', old: '', status, degraded: '缺 old 定位词' };
   /**
    * 待跟进（可选）：约定带一个「该问结果」的时点。
