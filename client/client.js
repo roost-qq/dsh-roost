@@ -6737,6 +6737,20 @@ window.__ModuleLoader__.load({
                 reload()
               },
             }, '手动跑一次巩固'),
+            /**
+             * 待整理进度：判据与定时器同源（那天那个会话有没有摘要行），
+             * 所以面板说"还剩 3 天"就是定时器真会去跑的那几天，不会自说自话。
+             */
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: async () => {
+                const r = await get('/memory/backlog')
+                if (r?.ok === false) return toast(r.message || '读不到待整理进度')
+                toast(r.pending
+                  ? `还有 ${r.pending} 个「天 × 会话」没整理（共 ${r.rows} 条日记，最早 ${r.oldest}）`
+                  : `最近 ${r.scannedDays} 天都整理完了`)
+              },
+            }, '看还有多少没整理'),
             h('div', { className: 'roost-note', style: { margin: 0, alignSelf: 'center' } },
               '平时每天凌晨自动跑（错过会补）'),
           ),

@@ -14264,6 +14264,21 @@ export function apply(ctx) {
        * 而且日记搜索要走 FTS，前端拿不到。
        * 只读接口，编辑/删除仍走 /memory/fact 与 /memory/node。
        */
+      /**
+       * 待整理进度（面板「还有多少没整理」）。
+       *
+       * 判据与定时器同源（`consolidate.done()`：那天那个会话有没有摘要行），
+       * 两处一旦不同，面板说整理完了而定时器还在跑，用户会以为坏了。
+       */
+      route('/memory/backlog', (req, res) => {
+        try {
+          const q = new URL(req.url || '/', 'http://x').searchParams;
+          return send(res, 200, consolidate.backlog({ days: Number(q.get('days')) || 14 }));
+        } catch (e) {
+          return send(res, 200, { ok: false, message: `读待整理进度失败：${e.message}` });
+        }
+      }),
+
       route('/memory/browse', async (req, res) => {
         const url = new URL(req.url || '/', 'http://localhost');
         const q = String(url.searchParams.get('q') || '').trim();

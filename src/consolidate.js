@@ -1158,6 +1158,48 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
     /** 过期压缩（宿主每 10 分钟调一次，和按天巩固解耦） */
     compressDue,
     dueDay,
+    /**
+     * 待整理进度（面板「还有多少没整理」）。
+     *
+     * 判据和 `dueDay()` **完全一致**：这一天这个会话有没有 `day:<day>:<chat>`
+     * 摘要行。不复用另一套口径——两处判据一旦不同，面板说"整理完了"而定时器
+     * 还在跑（或者反过来），用户会以为功能坏了。
+     *
+     * 只回**没整理**的：已整理的不列，避免用户看到一屏绿勾还以为有事要做。
+     * 按天倒序查询（最多 90 天），每次请求几十条索引查询，面板点开才算。
+     */
+    backlog({ days = 14, at = now() } = {}) {
+      const n = Math.max(1, Math.min(90, Number(days) || 14));
+      const items = [];
+      let rows = 0;
+      for (let i = 1; i <= n; i += 1) {
+        const day = dayOf(at - i * 86_400_000);
+        const list = journal.byDay(day);
+        if (!list.length) continue;
+        /** 按会话分组：一个群的缺口不能因为另一个群整理过就被算成已完成 */
+        const byChat = new Map();
+        for (const r of list) {
+          const cid = String(r.chatId || '');
+          byChat.set(cid, (byChat.get(cid) || 0) + 1);
+        }
+        for (const [cid, cnt] of byChat) {
+          if (done(day, cid)) continue;
+          items.push({ day, chatId: cid, rows: cnt });
+          rows += cnt;
+        }
+      }
+      return {
+        ok: true,
+        scannedDays: n,
+        /** 有几个「天 × 会话」没整理 */
+        pending: items.length,
+        /** 一共积压多少条日记 */
+        rows,
+        oldest: items.length ? items[items.length - 1].day : '',
+        newest: items.length ? items[0].day : '',
+        items: items.slice(0, 20),
+      };
+    },
     done,
     status: () => last,
     /** 供测试注入假时钟 */
