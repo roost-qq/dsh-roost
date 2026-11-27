@@ -26,6 +26,24 @@ function batchOf(items) {
     msg: last,
     text: items.length === 1 ? textOf(items[0]) : items.map(lineOf).join('\n'),
     /**
+     * 给模型看的带序号版本（只用于 `payload.rendered`，**不进日记/检索**）。
+     *
+     * 2026-11-27 的引用错位就是这么来的：一批里有好几句，她回的是前面那句，
+     * 自动引用却固定挂末条。让模型按 `#N` 明确选一条才是对的——序号和正文
+     * 必须同时出现在模型眼前，否则它只能猜。
+     *
+     * 单条时不编号：本来就只有一句，加个 #1 只会让措辞变啰嗦。
+     */
+    numberedText: items.length === 1
+      ? textOf(items[0])
+      : items.map((it, i) => `#${i + 1} ${lineOf(it)}`).join('\n'),
+    /**
+     * `#N` → 本条自己的 `msg_idx`（`REFIDX_xxx`）。模型只写 `#N`，映射由程序做：
+     * 让它自己抄 135 字符的索引必错，而且 2026-11-26 就栽过一次截断。
+     * 没有 msgIdx 的事件（频道 / 主动轮）留空串，出站层判空不引用。
+     */
+    refs: items.map((it, i) => ({ n: i + 1, refIdx: String(it?.scene?.msgIdx ?? '') })),
+    /**
      * 插话专用文本：无论几条都带发言人名。
      *
      * `text` 单条时不带名字（日记/检索用，避免 openid 进 FTS 变噪音），

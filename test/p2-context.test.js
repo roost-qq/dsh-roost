@@ -150,20 +150,20 @@ test('<<quote: 索引>> 显式挂引用', async () => {
   assert.doesNotMatch(ch.calls[0].text, /<</, '标记要摘干净');
 });
 
-test('<<quote:>> 留空时退回入站 replyTo', async () => {
+test('<<quote:>> 留空时不再退回 replyTo（那是用户引用了谁，不是她在回谁）', async () => {
   const ch = fakeChannel();
   const run = createActionRunner({ channel: () => ch });
   await run({ text: '回你 <<quote:>>', target: 'c1', replyTo: 'REFIDX_3' });
-  assert.deepEqual(ch.calls[0].messageReference, { message_id: 'REFIDX_3' });
+  assert.equal(ch.calls[0].messageReference, null);
 });
 
-test('既没索引也没 replyTo：降级普通回复并留日志', async () => {
+test('既没序号也没自动目标：降级普通回复并留日志', async () => {
   const ch = fakeChannel();
   const logs = [];
   const run = createActionRunner({ channel: () => ch, log: (m) => logs.push(m) });
   await run({ text: '回你 <<quote:>>', target: 'c1' });
   assert.equal(ch.calls[0].messageReference, null);
-  assert.ok(logs.some((m) => /没给索引/.test(m)));
+  assert.ok(logs.some((m) => /没解析出可用索引/.test(m)));
 });
 
 test('parseOutboundActions 把 quote 单独摘出，不被通用兜底吃掉', () => {
