@@ -270,16 +270,6 @@ export const FEATURES = [
   },
   {
     /**
-     * 出站近似去重（参照 mem0/aurabot 的 `chat.dupSimilarity`）。
-     *
-     * 值域是数字（0 = 关，0.85 / 0.95 = 相似度阈值），但这里用 `select` 暴露成
-     * 三档：直接让人填 0~1 的小数没有意义，用户心里想的是「关 / 宽松 / 严格」。
-     * select 写进去的是字符串（`'0.95'`），宿主侧 `Number(...) || 0` 两种都认。
-     *
-     * **默认 `'0'`（关）**：短句重复在正常对话里不少见（连说两次「马上」），
-     * 一旦被吞，用户会觉得她漏回消息，而这种 bug 极难复现。要开自己开。
-     */
-    /**
      * 相关链接（默认关）：巩固结束后多调一次模型，判断哪些事实是
      * 「同一实体的不同事」并互相链上。判据必须由模型给——字符相似度在这件事上
      * 是反的（本仓实测：「狗叫 Max」vs「带 Max 露营」0.21，「喜欢咖啡」vs「喜欢喝茶」0.57）。
@@ -289,6 +279,8 @@ export const FEATURES = [
     desc: '每天巩固后多问一次模型：哪些事是同一个对象的不同阶段，互相链上（面板显示「相关 N」）',
     source: 'config',
     path: ['memory', 'links', 'enabled'],
+    /** 默认关：`readFeatures` 对 toggle 缺省算「开」，不写这行裸 cfg 会显示开、实际没跑 */
+    default: false,
     requires: NONE,
     affects: NONE,
     offHint: '',
@@ -304,12 +296,24 @@ export const FEATURES = [
     desc: '每天巩固后多问一次模型：哪句话已经被后来那句取代了（搬家、改名、改主意），把旧的标成历史，不再同时注入',
     source: 'config',
     path: ['memory', 'semantic', 'enabled'],
+    /** 默认关：同上，裸 cfg 下必须显式声明，否则面板显示开、实际没跑 */
+    default: false,
     requires: NONE,
     affects: NONE,
     offHint: '',
     advanced: true,
   },
   {
+    /**
+     * 出站近似去重（参照 mem0/aurabot 的 `chat.dupSimilarity`）。
+     *
+     * 值域是数字（0 = 关，0.85 / 0.95 = 相似度阈值），但这里用 `select` 暴露成
+     * 三档：直接让人填 0~1 的小数没有意义，用户心里想的是「关 / 宽松 / 严格」。
+     * select 写进去的是字符串（`'0.95'`），宿主侧 `Number(...) || 0` 两种都认。
+     *
+     * **默认 `'0'`（关）**：短句重复在正常对话里不少见（连说两次「马上」），
+     * 一旦被吞，用户会觉得她漏回消息，而这种 bug 极难复现。要开自己开。
+     */
     id: 'chatDupSimilarity',
     label: '同一段别发两遍',
     desc: '长回合里她常把「我先看看」「我看了下」这类几乎一样的话发两条；开着会挡掉后一条（短句不挡、只跟上一条比、十分钟窗）',
