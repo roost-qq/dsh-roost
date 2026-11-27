@@ -70,6 +70,8 @@ import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
 import { createPersons } from './persons.js';
 import { createPendingAliases } from './pending-aliases.js';
+import { createForgetFilter } from './forget-filter.js';
+import { createForgetPerson, FORGET_MODES } from './forget-person.js';
 import { createGroupChatProfiles } from './group-chat-profile.js';
 import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS, DEFAULT_IMPRESSION_DAYS } from './gist-impression.js';
 import { sourceStats } from './source-stats.js';
@@ -4017,8 +4019,25 @@ export function apply(ctx) {
     recent: Number(cfg.recall?.recentMax) || MEMORY_RECENT_MAX,
   });
 
+  /**
+   * 人物身份基座（按人遗忘的地基）：把「一个人」从显示名提升为稳定 id。
+   *
+   * 为什么不能省：`journal.sender` 与 `facts.meta.src.speaker` 历史存的是**显示名**，
+   * 改名/重名会让「删掉这个人」删错人。这里存 QQ 号/openid 权威身份，其余各层
+   * 只做引用打标。纯旁挂：没人调一个字都不写，`remembers()` 默认 true。
+   *
+   * 建在 memory 之前：下面 `factFilter` 要立刻注入给记忆读写，晚建就来不及了。
+   */
+  const persons = createPersons({ file: join(dataDir(), 'persons.json'), log: (m) => log.warn(m) });
+  /** 模型猜出来的「显示名 ≈ QQ」先排队，主人确认后才写权威别名（宁漏不误） */
+  const pendingAliases = createPendingAliases({ file: join(dataDir(), 'pending-aliases.json'), log: (m) => log.warn(m) });
+  /** 遗忘闸门：facts / 档案 / 图谱共用同一份「已遗忘名单」，判定只写一次 */
+  const forgetFilter = createForgetFilter({ persons, log: (m) => log.warn(m) });
+
   const memory = personaScope.wrapMemory(createMemory({
     capacityOf: () => cfg.memory?.capacity,
+    /** 按人遗忘：读不出、也写不进（收口在 memory 内部，不怕漏调用点） */
+    factFilter: forgetFilter,
     /** 读盘失败 / 坏文件隔离都要留痕：这类问题以前是静默的 */
     log: (m) => log.warn(m),
   }));
@@ -4052,17 +4071,12 @@ export function apply(ctx) {
    * 写入只在凌晨巩固（天级），注入走稳定段但同一天冻结渲染结果，
    * 两边都不碰消息热链路，也不动 prompt cache。
    */
-  const profiles = createProfiles({ file: join(dataDir(), 'profiles.json'), log: (m) => log.warn(m) });
-  /**
-   * 人物身份基座（按人遗忘的地基）：把「一个人」从显示名提升为稳定 id。
-   *
-   * 为什么不能省：`journal.sender` 与 `facts.meta.src.speaker` 历史存的是**显示名**，
-   * 改名/重名会让「删掉这个人」删错人。这里存 QQ 号/openid 权威身份，其余各层
-   * 只做引用打标。纯旁挂：没人调一个字都不写，`remembers()` 默认 true。
-   */
-  const persons = createPersons({ file: join(dataDir(), 'persons.json'), log: (m) => log.warn(m) });
-  /** 模型猜出来的「显示名 ≈ QQ」先排队，主人确认后才写权威别名（宁漏不误） */
-  const pendingAliases = createPendingAliases({ file: join(dataDir(), 'pending-aliases.json'), log: (m) => log.warn(m) });
+  const profiles = createProfiles({
+    file: join(dataDir(), 'profiles.json'),
+    /** noMemory 权威在 persons，profiles 里的同名标记只是老面板镜像 */
+    isForgotten: (key) => !forgetFilter.remembers(key),
+    log: (m) => log.warn(m),
+  });
   /**
    * 群印象档案：按 chatId 存气氛/常聊什么/印象，独立 chat-profiles.json。
    * 和 profiles 一样不进人格隔离（数据本身是"这个群什么样"），默认不注入。
@@ -4139,8 +4153,28 @@ export function apply(ctx) {
    */
   const graph = personaScope.wrapGraph(createGraph({
     file: join(dataDir(), 'graph.sqlite'),
+    /** 按人遗忘：已遗忘的实体不注入、也不再新建关系边 */
+    forgetFilter,
     log: (m) => log.warn(m),
   }));
+
+  /**
+   * 按人遗忘的编排（三档：unlink / archive / hard）。
+   *
+   * 为什么单独一层：一次遗忘要同时动身份标记、日记、事实、档案、图谱，
+   * 分散在路由里写必然漏一处；而且「预览影响面」与「真执行」必须同一口径。
+   */
+  const forgetPerson = createForgetPerson({
+    persons,
+    forgetFilter,
+    profiles,
+    memory,
+    journal,
+    graph,
+    file: join(dataDir(), 'forget-archive.json'),
+    log: (m) => log.warn(m),
+    audit: (e) => audit({ ...e, chatId: 'panel' }),
+  });
 
   /**
    * 第五层：自我叙述。
@@ -12672,12 +12706,29 @@ export function apply(ctx) {
               return send(res, 200, r);
             }
 
-            /** 阶段6：不再记住某人（只标记不删档案，撤回来还在） */
+            /**
+             * 阶段6：不再记住某人。
+             *
+             * 现在走 `forgetPerson`（完整版），不再是「只清档案正文」的轻量版：
+             *   · 默认 `unlink` —— 档案/事实/关系**一个字都不删**，只断链
+             *     （各处读路径看不见 + 日记打 `forget:<id>`），一键可恢复；
+             *   · `archive` —— 断链 + 快照到 forget-archive.json；
+             *   · `hard` —— 物理清，必须 `confirm:true` 二次确认。
+             * 关掉 = 撤回（只放回这个人的标记，不动别人的）。
+             */
             case 'persona.noMemory': {
               const key = String(arg?.key ?? '').trim();
               if (!key) return send(res, 400, { ok: false, message: '缺人物 key' });
-              const ok = profiles.setNoMemory(key, arg?.enabled !== false);
-              return send(res, 200, { ok, message: ok ? (arg?.enabled === false ? '恢复记住这个人' : '不再记住这个人') : '没找到这个人' });
+              if (arg?.enabled === false) {
+                const r = forgetPerson.restore(key);
+                return send(res, r.ok ? 200 : 400, { ok: r.ok, message: r.message });
+              }
+              const mode = FORGET_MODES.includes(String(arg?.mode)) ? String(arg.mode) : 'unlink';
+              if (mode === 'hard' && arg?.confirm !== true) {
+                return send(res, 400, { ok: false, message: '彻底遗忘不可恢复，需要再确认一次（confirm:true）' });
+              }
+              const r = forgetPerson.run(key, { mode, peer: { name: '面板' } });
+              return send(res, r.ok ? 200 : 400, r);
             }
 
             /**
@@ -13780,7 +13831,8 @@ export function apply(ctx) {
             dislikes: r.dislikes || '',
             /** 阶段6：人工标签 + 不再记住标记，面板列表用得上 */
             tags: Array.isArray(r.tags) ? r.tags : [],
-            noMemory: Boolean(r.noMemory),
+            /** 权威在 persons（profiles 的标记只是老数据镜像），两处任一说忘了就是忘了 */
+            noMemory: Boolean(r.noMemory) || persons.remembers(r.key || '') === false,
             at: r.at,
           })),
           profilesEnabled: cfg.profiles?.enabled === true,
@@ -14033,7 +14085,8 @@ export function apply(ctx) {
               tips: row?.tips || '',
               dislikes: row?.dislikes || '',
               tags: Array.isArray(row?.tags) ? row.tags : [],
-              noMemory: Boolean(row?.noMemory),
+              /** 权威在 persons（profiles 的标记只是老数据镜像） */
+              noMemory: Boolean(row?.noMemory) || persons.remembers(key) === false,
               /** 阶段6：互动数从 journal 现算（不冗余存 profiles）；只数真人发言 */
               interactions: journal.listChat(chatId, 500, aliasesOf(chatId))
                 .filter((r) => r.role === 'user' && r.sender && (r.sender === key || r.sender === row?.openid)).length,
@@ -14209,6 +14262,135 @@ export function apply(ctx) {
           return send(res, ok ? 200 : 400, { ok, message: ok ? '忘掉这个人了' : '没找到这条档案' });
         }
         return send(res, 400, { ok: false, message: '这一类没有直接操作' });
+      }),
+
+      /**
+       * 按人遗忘：**先看影响面，再动手**。
+       *
+       * 分两个接口（plan / 真执行）而不是一个带 dry 的：面板要先渲染一张
+       * 「会动到多少条」的确认卡，用户点确认后才走真执行。合成一个接口时
+       * 前端很容易忘了传 dry 就直接删了。
+       */
+      route('/person/forget/plan', async (req, res) => {
+        const b = await readBody(req);
+        /** 面板用 GET 打这个接口（只读预览），id 在 query 里 */
+        const u = new URL(req.url || '/', 'http://x');
+        const id = String(b?.id ?? b?.key ?? u.searchParams.get('id') ?? u.searchParams.get('key') ?? '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        return send(res, 200, forgetPerson.plan(id));
+      }),
+
+      route('/person/forget', async (req, res) => {
+        const b = await readBody(req);
+        const id = String(b?.id ?? b?.key ?? '').trim();
+        const mode = String(b?.mode ?? 'unlink');
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        if (!FORGET_MODES.includes(mode)) {
+          return send(res, 400, { ok: false, message: `不认识的模式：${mode}` });
+        }
+        /** hard 不可逆：必须显式二次确认，别让误触把记忆删了 */
+        if (mode === 'hard' && b?.confirm !== true) {
+          return send(res, 400, { ok: false, message: '彻底遗忘不可恢复，需要再确认一次（confirm:true）' });
+        }
+        const r = forgetPerson.run(id, { mode, peer: { name: '面板' } });
+        return send(res, r?.ok ? 200 : 400, r);
+      }),
+
+      route('/person/forget/restore', async (req, res) => {
+        const b = await readBody(req);
+        const id = String(b?.id ?? b?.key ?? '').trim();
+        if (!id) return send(res, 400, { ok: false, message: '缺 id' });
+        const r = forgetPerson.restore(id);
+        return send(res, r?.ok ? 200 : 400, r);
+      }),
+
+      /** 已遗忘名单 + 最近的归档摘要（面板「谁被忘了」用） */
+      route('/person/forgotten', (req, res) => {
+        const list = persons
+          .all()
+          .filter((p) => p.noMemory)
+          .map((p) => ({
+            id: p.id,
+            qq: p.qq || '',
+            names: persons.namesOf(p.id),
+            at: Number(p.noMemoryAt) || 0,
+            by: p.noMemoryBy || '',
+          }));
+        return send(res, 200, { ok: true, items: list, archived: forgetPerson.archived({ limit: 20 }) });
+      }),
+
+      /**
+       * 待确认别名：两个来源合并
+       *   1. `pending-aliases.json` —— 模型/启发式的提议；
+       *   2. **身份表里见过但还没确认的名字**（`persons.names` − `aliases`）。
+       *
+       * 第二个来源是必需的：老数据的显示名就躺在人物档案里，不需要模型去猜，
+       * 但也不能自动当权威——主人点一下「确认」才写进 `aliases`，之后
+       * `/person/alias/backfill` 才会按它去补 `about`。不合并的话，这一栏
+       * 会长期空着，而「补归属」永远无从下手。
+       */
+      route('/person/alias/pending', (req, res) => {
+        const queued = pendingAliases.list({ limit: 100 });
+        const seen = [];
+        for (const p of persons.all()) {
+          const known = new Set((p.aliases || []).map((a) => String(a).trim().toLowerCase()));
+          for (const n of persons.namesOf(p.id)) {
+            const v = String(n || '').trim();
+            if (!v || known.has(v.toLowerCase())) continue;
+            if (queued.some((q) => String(q.alias).toLowerCase() === v.toLowerCase() && q.person === p.id)) continue;
+            seen.push({ alias: v, person: p.id, hits: 1, src: 'seen', firstAt: Number(p.at) || 0, lastAt: Number(p.at) || 0 });
+          }
+        }
+        return send(res, 200, { ok: true, items: [...queued, ...seen].slice(0, 100) });
+      }),
+
+      route('/person/alias/confirm', async (req, res) => {
+        const b = await readBody(req);
+        const alias = String(b?.alias ?? '').trim();
+        const person = String(b?.person ?? '').trim();
+        if (!alias) return send(res, 400, { ok: false, message: '缺 alias' });
+        /**
+         * 队列里有就出队；没有但是「身份表里见过的名字」也允许确认
+         * （`src:'seen'` 那一类不落在队列文件里，见 `/person/alias/pending`）。
+         */
+        const row = pendingAliases.confirm(alias, person) || (person ? { alias, person } : null);
+        if (!row) return send(res, 404, { ok: false, message: '没有这条待确认' });
+        /**
+         * 只给**真实存在的人**挂别名：身份表或人物档案里得先有这个人。
+         * 不查就会变成「随便传个 id 就建一条权威别名」，比不确认还糟。
+         */
+        const personId = String(row.person || '');
+        const exists = Boolean(persons.get(personId))
+          || (profiles.recent(0) || []).some((r) => String(r.key || '') === personId);
+        if (!exists) return send(res, 404, { ok: false, message: '没有这个人，先让他有档案' });
+        persons.addAlias(row.person, row.alias);
+        forgetFilter.invalidate();
+        return send(res, 200, { ok: true, alias: row.alias, person: row.person, message: '已确认这个别名' });
+      }),
+
+      route('/person/alias/ignore', async (req, res) => {
+        const b = await readBody(req);
+        const alias = String(b?.alias ?? '').trim();
+        const person = String(b?.person ?? '').trim();
+        if (!alias) return send(res, 400, { ok: false, message: '缺 alias' });
+        const ok = pendingAliases.ignore(alias, person);
+        return send(res, ok ? 200 : 404, { ok, message: ok ? '已忽略这条推测' : '没有这条待确认' });
+      }),
+
+      /**
+       * 用**已确认的别名**给老事实补归属。
+       *
+       * 只认 `persons.aliases`（主人确认过的），解析不出来的一律留空——
+       * 老数据的 speaker 是显示名，猜就是删除错人。所以这是显式操作，
+       * 不做成自动任务。
+       */
+      route('/person/alias/backfill', async (req, res) => {
+        const map = new Map();
+        for (const p of persons.all()) {
+          for (const a of p.aliases || []) map.set(String(a).trim().toLowerCase(), p.id);
+        }
+        const r = memory.backfillAbout({ resolve: (sp) => map.get(String(sp || '').trim().toLowerCase()) || '' });
+        return send(res, 200, { ...r, ok: true, aliases: map.size, message: `检查 ${r.checked} 条，补上归属 ${r.changed} 条` });
       }),
 
       route('/memory/add', async (req, res) => {

@@ -125,11 +125,23 @@ export function createProfiles({
   file,
   max = PROFILE_MAX,
   now = () => Date.now(),
+  /** 按人遗忘的权威在 `persons`（`noMemory` 只是镜像），注入/写入都要问它 */
+  isForgotten = null,
   log = () => {},
 } = {}) {
   let rows = null;
   /** { day, value }：同一天的渲染结果冻结，跨天才重算（保 prompt cache） */
   let renderCache = null;
+
+  /** 判一个人是不是已「不再记住」。没注入回调 = 只认本地标记（老行为） */
+  function forgotten(key) {
+    if (!key || typeof isForgotten !== 'function') return false;
+    try {
+      return isForgotten(key) === true;
+    } catch {
+      return false;
+    }
+  }
 
   function save() {
     try {
@@ -155,7 +167,8 @@ export function createProfiles({
 
   function render(limit) {
     /** `noMemory` 的人在档案段一律不注入，哪怕旧数据里还留着正文字段 */
-    const list = load().filter((r) => !r.noMemory && (r.impression || r.tips || r.dislikes || r.style || r.persona));
+    const list = load().filter((r) => !r.noMemory && !forgotten(r.key)
+      && (r.impression || r.tips || r.dislikes || r.style || r.persona));
     const picked = limit > 0 ? list.slice(-limit).reverse() : [...list].reverse();
     if (!picked.length) return '';
     const lines = picked.map((r) => {
@@ -193,7 +206,7 @@ export function createProfiles({
       const cur = all.find((r) => r.key === key);
       if (cur) {
         /** 不再记住的人：模型继续提炼也别再写回档案（面板标记优先） */
-        if (cur.noMemory) return 0;
+        if (cur.noMemory || forgotten(key)) return 0;
         /**
          * 主人手填的字段不再被模型提炼冲掉（对齐 aurabot #604 的 ownerFields）。
          * 锁的是「字段」而不是「值」：主人清空某字段等于交还给自动印象，
@@ -210,6 +223,8 @@ export function createProfiles({
         cur.at = now();
         cur.hits = Number(cur.hits || 0) + 1;
       } else {
+        /** 已遗忘的人不新建档案——否则巩固一次就长出半条，第二天又注入了 */
+        if (forgotten(key)) return 0;
         all.push({ key, name, impression: imp, tips: tip, dislikes: bad, style: sty, persona: per, at: now(), hits: 1 });
       }
       if (all.length > max) all.splice(0, all.length - max);

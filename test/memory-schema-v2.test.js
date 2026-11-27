@@ -48,7 +48,7 @@ test('v1 老库 migrateIfNeeded：补 hitDays=0/lastHitDay=""/lastHit=0，不推
     const r = m.migrateIfNeeded();
     assert.equal(r.migrated, true, '首次应迁移落盘');
     const disk = JSON.parse(readFileSync(join(f.dir, 'memory.json'), 'utf8'));
-    assert.equal(disk.schemaVersion, 2, '落盘打 v2 标记');
+    assert.equal(disk.schemaVersion, MEMORY_SCHEMA_VERSION, '落盘打到当前版本（v3 起）');
     for (const text of ['主人住杭州', '重要的事']) {
       const x = disk.meta.global[text];
       assert.equal(x.hitDays, 0, `${text} hitDays 补 0`);
@@ -60,13 +60,13 @@ test('v1 老库 migrateIfNeeded：补 hitDays=0/lastHitDay=""/lastHit=0，不推
   } finally { f.done(); }
 });
 
-test('幂等：schemaVersion=2 的库不再迁移，逐字节不变', () => {
-  const v2 = { ...V1, schemaVersion: 2, meta: { ...V1.meta, global: { '主人住杭州': { w: 2, at: 1700000000000, hitDays: 3, lastHitDay: '2026-11-20', lastHit: 111 } } } };
+test('幂等：schemaVersion=3 的库不再迁移，逐字节不变', () => {
+  const v2 = { ...V1, schemaVersion: MEMORY_SCHEMA_VERSION, meta: { ...V1.meta, global: { '主人住杭州': { w: 2, at: 1700000000000, hitDays: 3, lastHitDay: '2026-11-20', lastHit: 111 } } } };
   const f = fresh(v2);
   try {
     const before = readFileSync(join(f.dir, 'memory.json'), 'utf8');
     const m = f.memory();
-    assert.equal(m.migrateIfNeeded().migrated, false, 'v2 不迁移');
+    assert.equal(m.migrateIfNeeded().migrated, false, '当前版本不迁移');
     assert.equal(readFileSync(join(f.dir, 'memory.json'), 'utf8'), before, '不写盘，逐字节不变');
     assert.equal(m.heatOf(['主人住杭州'])['主人住杭州'].hitDays, 3, '已有热度不被覆盖');
   } finally { f.done(); }
@@ -79,7 +79,7 @@ test('新装空库：migrateIfNeeded 不误写、schemaVersion 正常', () => {
     assert.equal(m.migrateIfNeeded().migrated, false, '无老库可读，不做迁移');
     m.add('g1', '新事实');
     const disk = JSON.parse(readFileSync(join(f.dir, 'memory.json'), 'utf8'));
-    assert.equal(disk.schemaVersion, 2, '首次写入就是 v2');
+    assert.equal(disk.schemaVersion, MEMORY_SCHEMA_VERSION, '首次写入就是当前版本');
     assert.equal(disk.meta.global['新事实'].hitDays, undefined, '新事实没有热度字段（等真实注入才涨）');
   } finally { f.done(); }
 });
@@ -100,7 +100,7 @@ test('v1 无 meta 的极老库：迁移不崩，不凭空造 meta 键', () => {
     const m = f.memory();
     assert.equal(m.migrateIfNeeded().migrated, true);
     const disk = JSON.parse(readFileSync(join(f.dir, 'memory.json'), 'utf8'));
-    assert.equal(disk.schemaVersion, 2);
+    assert.equal(disk.schemaVersion, MEMORY_SCHEMA_VERSION);
     assert.equal(disk.meta?.global?.['一句话'], undefined, '没有 meta 就不造');
   } finally { f.done(); }
 });

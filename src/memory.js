@@ -57,7 +57,7 @@ const FACTS_MAX = 40;
  *   · 文件版本 > 当前支持 → 隔离（quarantine）+ 空视图，绝不写回
  *   · 迁移函数从 v1 逐级跑上来，每级只做一件事
  */
-export const MEMORY_SCHEMA_VERSION = 2;
+export const MEMORY_SCHEMA_VERSION = 3;
 /**
  * v(n) → v(n+1)：入参是整份对象，返回迁移后的对象；保持纯函数便于单测。
  *
@@ -83,6 +83,18 @@ const SCHEMA_MIGRATIONS = Object.freeze({
     for (const [cid, list] of Object.entries(raw.chats || {})) fill(list, meta.chats?.[cid]);
     return raw;
   },
+  /**
+   * v2 → v3：给事实加「关于谁」（`meta[*].about`）的**结构位**。
+   *
+   * 为什么这一档什么都不补：老数据只有 `src.speaker`（显示名，会改名、会重名），
+   * 拿它猜 about 就是给「删错人」埋雷。归属只在**主人确认过别名**之后由
+   * `backfillAbout()` 精确补，没确认的宁可留着空——空 about 在按人遗忘时
+   * 一律保留，不会误删。
+   *
+   * 这一档存在的意义是版本号：让 v2 的库能继续被读，也让以后真有字段要补时
+   * 有地方挂。
+   */
+  2: (raw) => raw,
 });
 export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze(
   [1, ...Object.keys(SCHEMA_MIGRATIONS).map(Number)],
@@ -643,8 +655,23 @@ function scoreOfAliasFact(meta, now = Date.now()) {
   return scoreOfFact({ ...meta, at: now - capped * DAY_MS }, now);
 }
 
-export function createMemory({ now = () => Date.now(), capacityOf = null, log = () => {} } = {}) {
+export function createMemory({ now = () => Date.now(), capacityOf = null, factFilter = null, log = () => {} } = {}) {
   const file = () => join(dataDir(), 'memory.json');
+  /**
+   * 遗忘闸门（按人遗忘）：`keep({text, about})` 为 false 的条目**读不出、写不进**。
+   *
+   * 为什么不散在调用点：注入有浅注入 / deep 派生 / 召回 / 巩固读回好几条路径，
+   * 少拦一处就是「档案清了她还知道这个人」。收口在这里，所有读写都得过。
+   * 不传 = 恒 true，老行为逐字节不变。
+   */
+  const visible = (text, meta) => {
+    if (typeof factFilter?.keep !== 'function') return true;
+    try {
+      return factFilter.keep({ text, about: String(meta?.about || '') }) !== false;
+    } catch {
+      return true;
+    }
+  };
   let cache = null;
   /**
    * 读盘遇到 ENOENT 之外的错误（EBUSY / EACCES / EIO）时置位。
@@ -878,6 +905,17 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     // 收口在这里：所有写入路径（模型标记、面板手记、以后新增的）都过一遍
     const src = normalizeSrc(opts.src);
     /**
+     * 这条事实**关于谁**（稳定 id）。只在调用方明确给时落盘：
+     * 老调用点不传 → 字段不出现，老库字节不变（默认行为零变化的落点）。
+     * 空值不覆盖已有归属——重提一句没带归属，不该把之前判定的归属抹掉。
+     */
+    const about = String(opts.about ?? '').trim().toLowerCase().replace(/^@+/, '').slice(0, 64);
+    /**
+     * 写入闸门：这个人已经「不再记住」了，就别再把他的事写进来。
+     * 返回原列表而不是报错——调用方不该因为一条被挡掉的事实而中断整轮。
+     */
+    if (!visible(f, { about })) return list;
+    /**
      * 调用方不传 = **没表态**（不是"说这是真的"）。
      *
      * 区分这两种很重要：老调用点、`<<remember>>`、面板手记都不传，
@@ -953,6 +991,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (!Number.isFinite(Number(next.occurredAt)) && Number(opts.occurredAt) > 0) next.occurredAt = Number(opts.occurredAt);
       /** 显式指令重提仍是指令（不会因为再提一次就降级成普通事实） */
       if (opts.directive === true) next.directive = true;
+      /** 归属：只在这次明确给了才改，没给就保留原归属（老库没有则继续没有） */
+      if (about) next.about = about;
       /**
        * 标签：只在调用方明确给时改，没给就保留原标签（重提一句不该悄悄抹掉归类）。
        * 给空数组 = 显式清空（面板清标签用），此时删字段保持老库字节不变。
@@ -1001,6 +1041,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       ...(Number(opts.validUntil) > 0 ? { validUntil: Number(opts.validUntil) } : {}),
       /** 标签：默认 [] 不落盘，老库与旧调用方字节不变 */
       ...(normalizeTags(opts.tags).length ? { tags: normalizeTags(opts.tags) } : {}),
+      /** 归属：只在明确给时落盘，老调用方字节不变 */
+      ...(about ? { about } : {}),
     };
     /** 新建就带出处＝第一条证据；老调用点不传 evidence，这一行是空操作 */
     if (opts.evidence) writeEvidence(fresh, applyEvidence({}, 'reinforce', opts.evidence));
@@ -1107,7 +1149,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
           .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt)
           /** E3 时效：还没生效 / 已过期的条目不当"活事实"给调用方 */
           /** 用注入的 now，不直接用 Date.now()——测试/补跑历史时口径才一致 */
-          .filter((text) => isValidAt(mm?.[text], now()));
+          .filter((text) => isValidAt(mm?.[text], now()))
+          /** 按人遗忘：被遗忘者的条目对调用方不存在（**只过滤返回行，不改盘**） */
+          .filter((text) => visible(text, mm?.[text]));
       return {
         global: alive(m.global, m.meta.global),
         chat: alive(c.list, c.meta),
@@ -1169,6 +1213,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
            */
           .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt
             && isValidAt(mm?.[text], t)
+            /** 按人遗忘：浅注入与 deep 都用这一处，漏了就是「档案清了她还知道他」 */
+            && visible(text, mm?.[text])
             && statusOf(mm?.[text]) !== 'guess'
             && !(skipDirective && mm?.[text]?.directive === true)
             && !(skipStale && ['stale', 'weakening'].includes(trendOf(evidenceOf(mm?.[text]).evidence, t)))
@@ -1205,7 +1251,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     listFull(chatId, aliases = [], opts = {}) {
       const m = load();
       const one = (list, mm) =>
-        (Array.isArray(list) ? list : []).map((text) => {
+        (Array.isArray(list) ? list : [])
+          /** 按人遗忘：deep 派生块从这里取，必须在映射前就滤掉 */
+          .filter((text) => visible(text, mm?.[text]))
+          .map((text) => {
           const x = mm?.[text] || {};
           return {
             text,
@@ -1221,6 +1270,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
              */
             status: statusOf(x),
             speaker: String(x.src?.speaker ?? ''),
+            /**
+             * 这条事实**关于谁**（稳定 id：QQ 号优先，其次 openid）。
+             * 老库没有这个字段 → 空串，表示"不知道关于谁"，按人遗忘时
+             * 一律保留（宁漏不误）。不写回磁盘。
+             */
+            about: String(x.about || ''),
             /** 以下都是可选扩展字段，老库没有时给默认，不写回磁盘 */
             tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
             /** A2 双时态：种类 + 事发时间（缺省回退到 at，老库表现不变） */
@@ -1440,6 +1495,82 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
         const c0 = m.chats[k].length;
         m.chats[k] = drop(m.chats[k], (m.meta.chats[k] = m.meta.chats[k] || {}));
         n += c0 - m.chats[k].length;
+      }
+      if (n) save();
+      return n;
+    },
+
+    /**
+     * 给老事实**精确补归属**（`meta[*].about`）。
+     *
+     * 为什么不能自动猜：老数据只有 `src.speaker`，是**显示名**——会改名、
+     * 会重名。拿它当条件补 about，等于给「删错人」埋雷。所以只接受调用方
+     * 给的 `resolve(speaker)`，而调用方只喂**主人确认过的别名**
+     * （`persons.aliases`，经 `pending-aliases` 确认）。解析不出来的一律
+     * 留着空——空 about 在按人遗忘时保留，不会误删。
+     *
+     * @param {{resolve?: (speaker:string)=>(string|'')}} opts
+     * @returns {{checked:number, changed:number}}
+     */
+    backfillAbout({ resolve = null } = {}) {
+      if (typeof resolve !== 'function') return { checked: 0, changed: 0 };
+      const m = load();
+      let checked = 0;
+      let changed = 0;
+      const walk = (list, mm) => {
+        if (!mm || typeof mm !== 'object') return;
+        for (const text of Array.isArray(list) ? list : []) {
+          const x = mm[text];
+          if (!x || typeof x !== 'object') continue;
+          checked += 1;
+          if (String(x.about || '').trim()) continue;
+          const sp = String(x.src?.speaker || '').trim();
+          if (!sp) continue;
+          const id = String(resolve(sp) || '').trim().toLowerCase();
+          if (!id) continue;
+          x.about = id;
+          changed += 1;
+        }
+      };
+      walk(m.global, m.meta.global);
+      for (const [cid, list] of Object.entries(m.chats || {})) walk(list, m.meta.chats?.[cid]);
+      if (changed) save();
+      return { checked, changed };
+    },
+
+    /**
+     * 按人物理删事实（hard 档专用）：`about` 精确命中 **或** 正文提到
+     * 这个名字的条目一起删，两层（全局 + 所有会话）都扫。
+     *
+     * 为什么不做成「按会话 + 关键词」的循环：`remove()` 一次一个会话一个词，
+     * 一个人可能横跨十几个群 + 多个键，循环调用既慢又会漏（别名键没枚举到）。
+     *
+     * 只给「用户明确要求彻底忘掉」用——正文删了不可恢复。
+     * @returns {number} 删掉几条
+     */
+    removePerson({ about = '', names = [] } = {}) {
+      const a = String(about ?? '').trim().toLowerCase();
+      const ns = (Array.isArray(names) ? names : [])
+        .map((x) => String(x ?? '').trim())
+        .filter(Boolean);
+      if (!a && !ns.length) return 0;
+      const m = load();
+      /** 单字名会误删一大片（「明」），和遗忘闸门同一个底线 */
+      const safe = ns.filter((n) => n.length >= 2);
+      const hit = (f, meta) => {
+        if (a && String(meta?.about || '').toLowerCase() === a) return true;
+        return safe.some((n) => f.includes(n));
+      };
+      let n = 0;
+      const drop = (list, mm) => {
+        const gone = (Array.isArray(list) ? list : []).filter((f) => hit(f, mm?.[f]));
+        for (const f of gone) delete mm[f];
+        n += gone.length;
+        return (Array.isArray(list) ? list : []).filter((f) => !gone.includes(f));
+      };
+      m.global = drop(m.global, m.meta.global);
+      for (const k of Object.keys(m.chats || {})) {
+        m.chats[k] = drop(m.chats[k], (m.meta.chats[k] = m.meta.chats[k] || {}));
       }
       if (n) save();
       return n;

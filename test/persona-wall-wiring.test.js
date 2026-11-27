@@ -51,6 +51,7 @@ async function boot() {
     quick: (op, arg) => call('/roost/api/quick', { viaExt: '@panel', op, arg }),
     call,
     profiles: () => JSON.parse(readFileSync(join(data, 'profiles.json'), 'utf8')),
+    persons: () => { try { return JSON.parse(readFileSync(join(data, 'persons.json'), 'utf8')); } catch { return { persons: {} }; } },
     done: () => {
       for (const c of cleanups) { try { c(); } catch {} }
       if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
@@ -82,15 +83,19 @@ test('quick(persona.edit) 标签护栏端到端生效', async () => {
   } finally { b.done(); }
 });
 
-test('quick(persona.noMemory) 真 host 跑通：标记与撤销', async () => {
+test('quick(persona.noMemory) 真 host 跑通：标记与撤销（权威在 persons，档案正文不动）', async () => {
   const b = await boot();
   try {
     let r = await b.quick('persona.noMemory', { key: 'u123', enabled: true });
     assert.equal(r.ok, true);
-    assert.equal(b.profiles()[0].noMemory, true);
+    /** 新语义：默认 unlink 只断链，档案正文一个字都不删（可恢复） */
+    assert.equal(b.persons().persons['u123']?.noMemory, true, 'persons 里立了标记');
+    assert.equal(b.profiles()[0].impression, '爱打球', '断链不擦除：正文还在');
+
     r = await b.quick('persona.noMemory', { key: 'u123', enabled: false });
     assert.equal(r.ok, true);
-    assert.equal(b.profiles()[0].noMemory, undefined);
+    /** 撤回后标记不再为 true（空壳记录会被清掉，所以不能断言 === false） */
+    assert.notEqual(b.persons().persons['u123']?.noMemory, true, '撤回后标记清掉');
   } finally { b.done(); }
 });
 

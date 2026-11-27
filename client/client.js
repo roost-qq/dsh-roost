@@ -8250,6 +8250,24 @@ window.__ModuleLoader__.load({
       const [chatEditId, setChatEditId] = useState('')
       const [chatEditForm, setChatEditForm] = useState(null)
       const [chatEditBusy, setChatEditBusy] = useState(false)
+      /**
+       * 按人遗忘（三档）+ 待确认别名。
+       *
+       * 数据来自新接口 `/person/forgotten` 与 `/person/alias/pending`：
+       * 与 `mem.profiles` 分开取，因为这两个是**低频变更的状态**，
+       * 不该跟着记忆刷新一起重拉。
+       */
+      const [forgotten, setForgotten] = useState(null)
+      const [aliasQueue, setAliasQueue] = useState(null)
+      const [forgetBusy, setForgetBusy] = useState('')
+      const loadForgetState = async () => {
+        try {
+          const [a, b] = await Promise.all([get('/person/forgotten'), get('/person/alias/pending')])
+          if (a?.ok) setForgotten(a)
+          if (b?.ok) setAliasQueue(b.items || [])
+        } catch { /* 读不到就空着，别把整页带崩 */ }
+      }
+      useEffect(() => { loadForgetState() }, [])
       const saveChatProfile = async (chatId) => {
         if (!chatEditForm) return
         setChatEditBusy(true)
@@ -8307,7 +8325,31 @@ window.__ModuleLoader__.load({
         const key = picked.key || picked.name
         const r = await quick('persona.noMemory', { key, enabled: !on })
         toast(r?.message || '已更新', r?.ok === false ? 'err' : 'ok')
-        if (r?.ok !== false) { await openPerson(picked); if (reload) reload() }
+        if (r?.ok !== false) { await openPerson(picked); await loadForgetState(); if (reload) reload() }
+      }
+      /**
+       * 归档 / 彻底遗忘：先看影响面、再确认。
+       *
+       * 为什么不直接调：`hard` 不可恢复（正文抹掉、事实删除），
+       * 而用户点按钮时并不知道会动多少条。所以先拿 `/person/forget/plan`
+       * 的计数摆在确认框里，看清楚再点。
+       */
+      const forgetAs = async (mode) => {
+        if (!picked) return
+        const key = picked.key || picked.name
+        setForgetBusy('mode')
+        try {
+          let plan = null
+          try { plan = await get('/person/forget/plan?id=' + encodeURIComponent(key)) } catch { plan = null }
+          const tail = plan?.message ? ('\n影响面：' + plan.message) : ''
+          const ask = mode === 'hard'
+            ? '彻底遗忘不可恢复：日记正文会被抹掉，关于他的事实会被删除。' + tail + '\n\n继续？'
+            : '会把这个人的记忆归档一份（可从归档找回），之后不再提起他。' + tail + '\n\n继续？'
+          if (!globalThis.confirm(ask)) return
+          const r = await post('/person/forget', { id: key, mode, confirm: mode === 'hard' })
+          toast(r?.message || '已处理', r?.ok === false ? 'err' : 'ok')
+          if (r?.ok !== false) { await openPerson(picked); await loadForgetState(); if (reload) reload() }
+        } finally { setForgetBusy('') }
       }
       const stateWordOf = (at) => {
         if (!at) return '没记过时间'
@@ -8462,7 +8504,17 @@ window.__ModuleLoader__.load({
                                     type: 'checkbox', checked: Boolean(detail.person?.noMemory),
                                     onChange: (e) => toggleNoMemory(e.target.checked),
                                   }),
-                                  '不再记住这个人（当场清档案，日记/facts 仍保留）'),
+                                  '不再记住这个人（只断链：不再提起他，数据不删，可恢复）'),
+                                h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 } },
+                                  h('button', {
+                                    type: 'button', className: 'roost-btn', disabled: forgetBusy === 'mode',
+                                    onClick: () => forgetAs('archive'),
+                                  }, '归档后遗忘'),
+                                  h('button', {
+                                    type: 'button', className: 'roost-btn',
+                                    style: { color: 'var(--bad)' }, disabled: forgetBusy === 'mode',
+                                    onClick: () => forgetAs('hard'),
+                                  }, '彻底遗忘…')),
                               )
                             : h('div', null,
                                 detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || detail.person?.style || detail.person?.persona || (detail.person?.tags || []).length
@@ -8625,6 +8677,78 @@ window.__ModuleLoader__.load({
                   }, chatEditId === c.chatId ? '收起' : '编辑'),
                 )))
             : h('div', { className: 'roost-empty' }, '还没写下群印象。'),
+        ),
+
+        /**
+         * 遗忘与身份别名（2026-11-27）。
+         *
+         * 为什么单独一节、而不是塞进人物详情的一个勾选框：遗忘是**跨模块**
+         * 动作（身份 / 日记 / 事实 / 档案 / 图谱），点一下到底动了多少东西
+         * 必须能看见；而且「待确认的别名」不属于任何一个人，是全局队列。
+         */
+        h(Sec, { n: '06', title: '遗忘与身份别名' },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '默认「不再记住」只断链：不再提起他、不参与回忆，但数据一个字都不删，随时可恢复。'),
+          h('div', { className: 'roost-diag-h' }, '已遗忘的人'),
+          (forgotten?.items || []).length
+            ? (forgotten.items).map((p) => h('div', {
+                key: p.id, className: 'roost-item',
+                style: { alignItems: 'center', justifyContent: 'space-between' },
+              },
+                h('span', null,
+                  (p.names || []).join('、') || p.id,
+                  h('span', { className: 'd' }, p.at ? ' ' + shortTime(p.at) : '')),
+                h('button', {
+                  type: 'button', className: 'roost-btn', disabled: forgetBusy === p.id,
+                  onClick: async () => {
+                    setForgetBusy(p.id)
+                    try {
+                      const r = await post('/person/forget/restore', { id: p.id })
+                      toast(r?.message || '已恢复', r?.ok === false ? 'err' : 'ok')
+                      await loadForgetState()
+                      if (reload) reload()
+                    } finally { setForgetBusy('') }
+                  },
+                }, '恢复记住')))
+            : h('div', { className: 'roost-empty' }, '还没有人被遗忘。'),
+          h('div', { className: 'roost-diag-h', style: { marginTop: 12 } },
+            '待确认的别名（模型猜的「显示名 ≈ QQ」，确认后才用于清理老数据）'),
+          (aliasQueue || []).length
+            ? (aliasQueue).map((a) => h('div', {
+                key: a.alias + '|' + a.person, className: 'roost-item',
+                style: { alignItems: 'center', justifyContent: 'space-between' },
+              },
+                h('span', null, a.alias + ' → ' + a.person,
+                  h('span', { className: 'd' }, ' 提到 ' + a.hits + ' 次')),
+                h('span', null,
+                  h('button', {
+                    type: 'button', className: 'roost-btn roost-primary',
+                    onClick: async () => {
+                      const r = await post('/person/alias/confirm', { alias: a.alias, person: a.person })
+                      toast(r?.message || '已确认', r?.ok === false ? 'err' : 'ok')
+                      await loadForgetState()
+                    },
+                  }, '确认'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', style: { marginLeft: 6 },
+                    onClick: async () => {
+                      await post('/person/alias/ignore', { alias: a.alias, person: a.person })
+                      await loadForgetState()
+                    },
+                  }, '忽略'))))
+            : h('div', { className: 'roost-empty' },
+                '没有待确认的别名。老数据的显示名不会被自动猜成某个人——猜错等于删错人。'),
+          h('div', { style: { marginTop: 10 } },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: forgetBusy === 'backfill',
+              onClick: async () => {
+                setForgetBusy('backfill')
+                try {
+                  const r = await post('/person/alias/backfill', {})
+                  toast(r?.message || '已补归属', r?.ok === false ? 'err' : 'ok')
+                } finally { setForgetBusy('') }
+              },
+            }, '用已确认别名补旧数据归属')),
         ),
 
         /** 事实 / 日记 / 召回记录仍只在记忆页：那是「记了什么」，不是「记得谁」 */
