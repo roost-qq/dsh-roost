@@ -13,11 +13,13 @@
 // ⚠️ 权限按**每一条消息**判定：主人、管理员、普通成员拿到的工具不一样，
 //    认不出身份的一律只给聊天。表在 config.json 的 `permissions` 里。
 
-import { basename, join, resolve, extname, relative, sep } from 'node:path';
+import { basename, dirname, join, resolve, extname, relative, sep } from 'node:path';
 import { spawn } from 'node:child_process';
-import { mkdirSync, statSync, writeFileSync, existsSync, createReadStream, createWriteStream, readFileSync, rmSync, realpathSync } from 'node:fs';
-import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets, restoreMaskedSecrets } from './config.js';
+import { mkdirSync, statSync, writeFileSync, existsSync, renameSync, createReadStream, createWriteStream, readFileSync, rmSync, realpathSync } from 'node:fs';
+import { loadConfig, saveConfig, patchConfig, publicConfig, dataDir, readRawConfig, configRevision, collectSecrets, restoreMaskedSecrets, DEFAULTS } from './config.js';
 import { redactText, redactValue, addSecretProvider } from './redact.js';
+import { configBundleNote } from './support-config.js';
+import { resetDshSettings, clearDataPlan, backupStamp } from './support-reset.js';
 import {
   GROUP_ID, LINKS, PANEL_LOG_MAX, FAQ_HEADING,
   faqSlice, dshLogInfo, frameworkLogInfo, readTail, openCmd, diagnosticsText,
@@ -11105,6 +11107,47 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
       };
     }
 
+    /**
+     * 诊断包里的「配置与功能」段：两边配置都读原文，再逐字段脱敏。
+     *
+     * 框架目录只从 `setup.detect()` 的结果取，不自己猜；读失败也照常出包，
+     * 只是那一段写明「没读到」，别让最需要诊断包的坏机器反而导不出来。
+     * 已知密钥（dsh-roost 的 SECRET_PATHS + 框架的 accessKey / appSecret）
+     * 一起喂给 redactConfig，防止它们粘在备注之类的无关字段里漏出去。
+     */
+    const buildBundleConfigNote = (fwDir = '') => {
+      const dshCfg = readRawConfig() || {};
+      const secrets = [...collectSecrets(dshCfg)];
+      let fwGlobal = {};
+      let fwBots = [];
+      const dir = String(fwDir || '');
+      if (dir && existsSync(join(dir, 'config'))) {
+        try {
+          fwGlobal = JSON.parse(readFileSync(join(dir, 'config', 'bot.json'), 'utf8'));
+        } catch { /* 没装 / 配置坏了都当空，不挡导出 */ }
+        const key = fwGlobal?.webui?.accessKey;
+        if (typeof key === 'string' && key) secrets.push(key);
+        const bd = join(dir, 'config', 'bots');
+        try {
+          fwBots = readdirSync(bd)
+            .filter((n) => n.endsWith('.json'))
+            .map((n) => {
+              let raw = {};
+              try { raw = JSON.parse(readFileSync(join(bd, n), 'utf8')); } catch { /* 坏的那只跳过内容 */ }
+              if (typeof raw.appSecret === 'string' && raw.appSecret) secrets.push(raw.appSecret);
+              return { id: n.replace(/\.json$/, ''), ...raw };
+            });
+        } catch { /* 没有 bots 目录也正常 */ }
+      }
+
+      const on = readFeatures(dshCfg);
+      const dshFeatures = FEATURES
+        .filter((f) => (f.kind || 'toggle') === 'toggle')
+        .map((f) => ({ id: f.id, label: f.label, on: on[f.id] !== false }));
+
+      return configBundleNote({ dshConfig: dshCfg, fwGlobal, fwBots, dshFeatures, secrets });
+    };
+
     regSupport('/support/info', async (req, res) => {
       try {
         return send(res, 200, { ok: true, ...(await buildSupportInfo()) });
@@ -11131,7 +11174,14 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
          * `bundleText` 只吃 `diagnostics` 与 `entries`：`info` 是聚合后的对象，
          * 传进去也没人读，反而会让后来者以为它能从这里取环境信息。
          */
-        const text = redactText(bundleText({ diagnostics: info.diagnostics, entries: logs }))
+        /** 配置段单独兜底：读配置挂了也要把环境 + 日志导出去 */
+        let configNote = '';
+        try {
+          configNote = buildBundleConfigNote(info?.logs?.framework?.dir);
+        } catch (e) {
+          configNote = `（读配置失败：${e?.message || e}）`;
+        }
+        const text = redactText(bundleText({ diagnostics: info.diagnostics, entries: logs, configNote }))
         const dir = dataDir()
         mkdirSync(dir, { recursive: true })
 
@@ -11158,6 +11208,141 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
       } catch (e) {
         return send(res, 500, { ok: false, message: `导出失败：${e?.message ?? e}` });
       }
+    })
+
+    /**
+     * 恢复默认设置（只设置，不碰任何数据）。
+     *
+     * dsh-roost 这边整份重建（`saveConfig` 是删了重建语义，patch 清不掉旧键）；
+     * 框架那边**不自己写文件**，带面板密钥调框架的 `/api/config/reset`——
+     * 跨进程直接改配置文件会和运行中框架的内存状态抢，见 config-reset.js。
+     * 旧框架没有这个接口时如实报 404，别假装成功。
+     */
+    regSupport('/support/reset-settings', async (req, res) => {
+      const body = await readBody(req).catch(() => ({}))
+      if (body?.confirm !== 'RESET') {
+        return send(res, 400, { ok: false, message: '需要输入 RESET 确认' })
+      }
+      const side = String(body?.side || '')
+      if (!['dsh', 'framework', 'both'].includes(side)) {
+        return send(res, 400, { ok: false, message: 'side 只能是 dsh / framework / both' })
+      }
+
+      const results = []
+      const errors = []
+      if (side === 'dsh' || side === 'both') {
+        try {
+          saveConfig(resetDshSettings(readRawConfig() || {}, DEFAULTS))
+          results.push('dsh-roost：设置已恢复默认，连接引导与凭证保留')
+        } catch (e) {
+          errors.push(`dsh-roost：${e?.message || e}`)
+        }
+      }
+      if (side === 'framework' || side === 'both') {
+        let fw = {}
+        try { fw = await setup.detect() } catch (e) { log.warn(`读框架状态失败：${e?.message ?? e}`) }
+        if (!fw.dir || !frameworkLogInfo(fw.dir).installed) {
+          errors.push('框架：没装或目录不对，没有可恢复的设置')
+        } else {
+          try {
+            const r = await setup.api('/api/config/reset', {
+              method: 'POST', body: JSON.stringify({ confirm: 'RESET' }),
+            })
+            results.push(`框架：${r?.message || '设置已恢复默认'}（约 3 秒后热加载）`)
+          } catch (e) {
+            errors.push(e?.status === 404
+              ? '框架：当前版本没有这个接口，请到框架面板手动恢复默认'
+              : `框架：${e?.message || e}`)
+          }
+        }
+      }
+
+      addLog(errors.length ? 'warn' : 'info', 'support',
+        `恢复默认设置：${side}；成功 ${results.length} 项，失败 ${errors.length} 项`)
+      return send(res, errors.length ? 500 : 200, {
+        ok: errors.length === 0, side, results, errors,
+        message: errors.length ? errors.join('；') : results.join('；'),
+      })
+    })
+
+    /**
+     * 清除所有数据：**挪到备份目录，不删除**。
+     *
+     * 发生在还在运行的进程里，只认白名单 + 路径护栏（见 support-reset.js）；
+     * 框架侧先 stop，避免文件被占。挪不动的逐项报出来，用户退出 DSH 再点一次，
+     * 不会留下「删了一半」的状态。备份目录由用户自己确认后再删。
+     */
+    regSupport('/support/clear-data', async (req, res) => {
+      const body = await readBody(req).catch(() => ({}))
+      if (body?.confirm !== 'CLEAR') {
+        return send(res, 400, { ok: false, message: '需要输入 CLEAR 确认' })
+      }
+      const side = String(body?.side || '')
+      let fwDir = ''
+      let fwDataNames = []
+      if (side === 'framework' || side === 'both') {
+        let fw = {}
+        try { fw = await setup.detect() } catch (e) { log.warn(`读框架状态失败：${e?.message ?? e}`) }
+        if (!fw.dir || !frameworkLogInfo(fw.dir).installed) {
+          return send(res, 400, { ok: false, message: '框架没装或目录不对，不能清它的数据' })
+        }
+        fwDir = fw.dir
+        try {
+          fwDataNames = readdirSync(join(fwDir, 'data'))
+        } catch (e) {
+          return send(res, 400, { ok: false, message: `读框架 data 目录失败：${e?.message || e}` })
+        }
+      }
+
+      let stamp = backupStamp()
+      if (existsSync(join(dataDir(), 'backups', stamp))
+        || (fwDir && existsSync(join(fwDir, 'data', '_backup', stamp)))) {
+        stamp += `-${Date.now()}`
+      }
+      const plan = clearDataPlan({ side, dshDir: dataDir(), fwDir, fwDataNames, stamp })
+      if (!plan.ok) {
+        const why = {
+          side: 'side 只能是 dsh / framework / both',
+          'dsh-dir': '数据目录被改成了不安全的位置，拒绝清理',
+          'framework-dir': '框架目录被改成了不安全的位置，拒绝清理',
+        }
+        return send(res, 400, { ok: false, message: why[plan.reason] || '清理计划没通过安全检查' })
+      }
+
+      /** 框架要先停：Windows 上开着的文件改不了名 */
+      if (side === 'framework' || side === 'both') {
+        let stopped
+        try { stopped = await setup.stop() }
+        catch (e) { return send(res, 500, { ok: false, message: `停框架失败，没动任何数据：${e?.message || e}` }) }
+        if (stopped?.ok === false) {
+          return send(res, 500, { ok: false, message: `停框架失败，没动任何数据：${stopped.message}` })
+        }
+      }
+
+      const moved = []
+      const failed = []
+      for (const job of plan.jobs) {
+        if (!existsSync(job.from)) continue
+        try {
+          mkdirSync(dirname(job.to), { recursive: true })
+          renameSync(job.from, job.to)
+          moved.push(job.from)
+        } catch (e) {
+          failed.push(`${job.from}：${e?.message || e}`)
+        }
+      }
+
+      const message = failed.length
+        ? `挪走了 ${moved.length} 项，${failed.length} 项没挪成（多半是 DSH 还开着）——退出 DSH 后可重试。备份目录：${stamp}`
+        : `已把 ${moved.length} 项数据挪进备份目录 ${stamp}，没有删除任何文件`
+      addLog(failed.length ? 'warn' : 'info', 'support', `清数据：${side}；挪走 ${moved.length}，失败 ${failed.length}`)
+      return send(res, failed.length ? 500 : 200, {
+        ok: failed.length === 0, side, stamp, moved, failed, message,
+        backupDirs: [
+          ...(side === 'dsh' || side === 'both' ? [join(dataDir(), 'backups', stamp)] : []),
+          ...(side === 'framework' || side === 'both' ? [join(fwDir, 'data', '_backup', stamp)] : []),
+        ],
+      })
     })
 
     /** 常见问题：直接读随包的 README 并切片，断网也能看 */

@@ -3452,6 +3452,91 @@ test('路由：/support/bundle 真写出文件，落在数据目录，且把日�
   } finally { h.off?.(); }
 });
 
+test('路由：/support/bundle 带上功能摘要与脱敏配置，假密钥不能落进文件', async () => {
+  const h = await bootHost();
+  try {
+    const file = join(h.dir, 'config.json');
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    writeFileSync(file, JSON.stringify({
+      ...raw,
+      tts: { ...(raw.tts || {}), enabled: true, apiKey: 'FAKE-TTS-KEY-1234567890' },
+      server: { ...(raw.server || {}), token: 'FAKE-PANEL-TOKEN-123456' },
+    }, null, 2));
+    const r = await h.call('/support/bundle', { method: 'POST', body: {} });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    const text = readFileSync(r.json.path, 'utf8');
+    assert.match(text, /\[配置与功能\]/);
+    assert.match(text, /\[功能开关 · dsh-roost\]/);
+    assert.match(text, /开 总开关（botEnabled）/);
+    assert.match(text, /\[dsh-roost 配置原文（已脱敏）\]/);
+    for (const s of ['FAKE-TTS-KEY-1234567890', 'FAKE-PANEL-TOKEN-123456']) {
+      assert.equal(text.includes(s), false, `假密钥 ${s} 写进了诊断包`);
+    }
+  } finally { h.off?.(); }
+});
+
+test('路由：/support/reset-settings 没有确认词直接拒，带确认词只重置 dsh 设置', async () => {
+  const h = await bootHost();
+  try {
+    const file = join(h.dir, 'config.json');
+    const before = JSON.parse(readFileSync(file, 'utf8'));
+    writeFileSync(file, JSON.stringify({
+      ...before,
+      enabled: false,
+      dryRun: true,
+      setup: { ...(before.setup || {}), roostDir: 'D:\\my-roost', wizardVersion: 1 },
+      server: { port: 18888, token: 'panel-token' },
+      roostHost: { ...(before.roostHost || {}), enabled: true, url: 'http://127.0.0.1:6801', token: 'host-token' },
+    }, null, 2));
+    const raw = readFileSync(file, 'utf8');
+
+    const bad = await h.call('/support/reset-settings', {
+      method: 'POST', body: { side: 'dsh' },
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(readFileSync(file, 'utf8'), raw, '没确认词时一个字节都不能改');
+
+    const ok = await h.call('/support/reset-settings', {
+      method: 'POST', body: { side: 'dsh', confirm: 'RESET' },
+    });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    const after = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(after.enabled, true, '开关要回默认');
+    assert.equal(after.dryRun, false);
+    assert.equal(after.server.port, 18888, '端口是连接引导，不能重置');
+    assert.equal(after.server.token, 'panel-token');
+    assert.equal(after.setup.roostDir, 'D:\\my-roost');
+    assert.equal(after.roostHost.token, 'host-token');
+  } finally { h.off?.(); }
+});
+
+test('路由：/support/clear-data 只挪不删；没有确认词不动任何东西', async () => {
+  const h = await bootHost();
+  try {
+    const memory = join(h.dir, 'memory.json');
+    const config = join(h.dir, 'config.json');
+    writeFileSync(memory, 'FAKE-MEMORY-CONTENT');
+    const raw = readFileSync(memory, 'utf8');
+
+    const bad = await h.call('/support/clear-data', {
+      method: 'POST', body: { side: 'dsh' },
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(readFileSync(memory, 'utf8'), raw);
+
+    const ok = await h.call('/support/clear-data', {
+      method: 'POST', body: { side: 'dsh', confirm: 'CLEAR' },
+    });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.equal(ok.json.ok, true);
+    assert.equal(existsSync(memory), false, '清掉后数据目录里不该还有');
+    assert.equal(existsSync(config), true, '配置是设置，不能被清');
+    assert.ok(ok.json.backupDirs.length === 1);
+    assert.equal(existsSync(join(ok.json.backupDirs[0], 'memory.json')), true, '必须能在备份里找到原文');
+    assert.equal(readFileSync(join(ok.json.backupDirs[0], 'memory.json'), 'utf8'), raw, '备份内容要逐字一致');
+  } finally { h.off?.(); }
+});
+
 test('路由：/support/open 的 framework-web 在没装框架时拒绝，并说清下一步', async () => {
   /** 指向一个不存在的框架目录：正好是「还没装」那种干净状态，不会误开浏览器 */
   const h = await bootHost({ setup: { roostDir: join(tmpdir(), 'no-such-roost-fwweb-' + Date.now()) } });

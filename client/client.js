@@ -17573,6 +17573,11 @@ window.__ModuleLoader__.load({
       /** 导出诊断包的结果：成功后才显示文件名（失败的提示走 toast，不占版面） */
       const [bundle, setBundle] = useState(null)
       const [bundleBusy, setBundleBusy] = useState(false)
+      /** 05 段：先选动作，再输入确认词。按钮点一下不会直接执行危险操作 */
+      const [danger, setDanger] = useState('')
+      const [dangerText, setDangerText] = useState('')
+      const [dangerBusy, setDangerBusy] = useState(false)
+      const [dangerResult, setDangerResult] = useState(null)
 
       useEffect(() => {
         let alive = true
@@ -17637,6 +17642,28 @@ window.__ModuleLoader__.load({
           if (r?.ok) { setBundle(r); toast(r.message || '已导出') }
           else toast(r?.message || '导出失败')
         } finally { setBundleBusy(false) }
+      }
+
+      /** 恢复 / 清理都是不可逆观感很强的操作：两段确认，服务端再验一次确认词 */
+      const dangerWord = (kind) => (kind === 'reset' ? 'RESET' : 'CLEAR')
+      const beginDanger = (kind, side) => {
+        setDanger({ kind, side })
+        setDangerText('')
+        setDangerResult(null)
+      }
+      const runDanger = async () => {
+        if (!danger || dangerText !== dangerWord(danger.kind)) return
+        setDangerBusy(true)
+        try {
+          /** 路由名用字符串字面量：`test/routes.test.js` 靠 `'/路径` 前缀核对前端入口 */
+          const url = danger.kind === 'reset' ? '/support/reset-settings' : '/support/clear-data'
+          const r = await post(url, { side: danger.side, confirm: dangerWord(danger.kind) })
+          setDangerResult(r)
+          toast(r?.message || (r?.ok ? '已执行' : '操作失败'))
+          if (r?.ok) { setDanger(''); setDangerText('') }
+        } catch (e) {
+          toast('操作失败：' + (e?.message || e))
+        } finally { setDangerBusy(false) }
       }
 
       const logs = info?.logs || {}
@@ -17865,6 +17892,62 @@ window.__ModuleLoader__.load({
                     `${Math.max(1, Math.round((bundle.size || 0) / 1024))} KB · ${bundle.dir || ''}`)),
                 btn('open-bundle-dir', '打开目录', () => openDir('data'), { busy: opening === 'data' }),
               )
+            : null,
+        ),
+
+        /* 05 恢复与清理：先选动作，再手输确认词；服务端独立验一遍 */
+        h('div', { className: 'roost-help-sec' },
+          h('div', { className: 'roost-help-h' }, h('span', { className: 'n' }, '05'), '恢复与清理'),
+          h('div', { className: 'roost-help-row' },
+            h('div', { className: 'l' },
+              h('div', null, '恢复默认设置'),
+              h('div', { className: 'v' }, '只重置设置；凭证与连接引导保留，数据一条不动')),
+            btn('reset-fw', '框架', () => beginDanger('reset', 'framework')),
+            btn('reset-dsh', 'dsh-roost', () => beginDanger('reset', 'dsh')),
+            btn('reset-both', '两边', () => beginDanger('reset', 'both')),
+          ),
+          h('div', { className: 'roost-help-row' },
+            h('div', { className: 'l' },
+              h('div', null, '清除所有数据'),
+              h('div', { className: 'v' }, '记忆 / 日志 / 图库先挪进 backups，不直接删；清框架前会先停框架')),
+            btn('clear-fw', '框架', () => beginDanger('clear', 'framework')),
+            btn('clear-dsh', 'dsh-roost', () => beginDanger('clear', 'dsh')),
+            btn('clear-both', '两边', () => beginDanger('clear', 'both')),
+          ),
+          danger
+            ? h('div', {
+                key: 'danger',
+                style: {
+                  marginTop: 8, padding: '10px 12px', borderRadius: 8,
+                  border: '1px solid var(--bad)',
+                  background: 'var(--dsw-alias-fill-secondary, rgba(128,128,128,.12))',
+                },
+              },
+              h('div', { style: { color: 'var(--bad)', fontSize: 12 } },
+                danger.kind === 'reset'
+                  ? '恢复默认：设置会被重建，数据不动；旧框架可能没这个接口，会如实报错。'
+                  : '清数据：条目会挪进备份目录，不直接删；跑完建议重启 DSH。'),
+              h('div', { style: { fontSize: 11.5, marginTop: 4 } },
+                `要继续就输入 ${dangerWord(danger.kind)}：`),
+              h('div', { style: { display: 'flex', gap: 8, marginTop: 6, alignItems: 'center', flexWrap: 'wrap' } },
+                h('input', {
+                  className: 'roost-input', value: dangerText,
+                  onChange: (e) => setDangerText(e.target.value),
+                  placeholder: dangerWord(danger.kind),
+                }),
+                btn('danger-go', '确认执行', runDanger, {
+                  primary: true,
+                  busy: dangerBusy || dangerText !== dangerWord(danger.kind),
+                }),
+                btn('danger-cancel', '取消', () => { setDanger(''); setDangerText('') }),
+              ))
+            : null,
+          dangerResult
+            ? h('div', { key: 'danger-result', className: 'roost-note', style: { marginTop: 6 } },
+                dangerResult.message || (dangerResult.ok ? '已执行' : '操作失败'),
+                Array.isArray(dangerResult.backupDirs) && dangerResult.backupDirs.length
+                  ? h('div', null, '备份在：' + dangerResult.backupDirs.join('、'))
+                  : null)
             : null,
         ),
       )
