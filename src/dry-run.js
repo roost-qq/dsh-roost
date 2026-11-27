@@ -139,6 +139,12 @@ export function normalizeEntry(raw, target, chatId = '') {
     /** 阶段8：被取代指针，白名单漏了就在 dry-run→还原链上断链 */
     supersededBy: String(e.supersededBy || ''),
     /**
+     * 变更留痕：`...e` 本来就带过来了，这里显式写一遍是把「四处白名单」的
+     * 契约钉住（免得以后改 `base` 时误删），形状交给 `insertRaw` 归一化。
+     */
+    updatedAt: Number(e.updatedAt) > 0 ? Number(e.updatedAt) : 0,
+    changes: Array.isArray(e.changes) ? e.changes.slice(-6) : [],
+    /**
      * 证据账本三件套：这一行会一路走到 `memory.insertRaw()`，
      * 少带一个字段就等于「清理→后悔→还原」把证据悄悄抹掉。
      */

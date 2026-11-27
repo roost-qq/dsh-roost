@@ -451,6 +451,73 @@ function writeEvidence(meta, next) {
   return meta;
 }
 
+/**
+ * 变更留痕：`changes[]`（参照 mem0 的 history 表，只取"会丢信息"的那几种动作）
+ * ==========================================================================
+ *
+ * ## 为什么叫 changes 而不叫 history
+ *
+ * 仓里已经有 `memory-history.js` 管"**历史说法**"——把被 `supersede` 掉的旧条目
+ * 投影成一条演变链。那是"同一件事先后怎么说"，读的是**别的行**。
+ * 这里记的是"**这一行自己**被谁动过"，读的是**本行的字段**。两件事，名字必须分开，
+ * 否则面板上两个「历史」会互相打脸。
+ *
+ * ## 为什么 supersede 不记
+ *
+ * 被顶掉时已经写了 `until`（何时失效）+ `supersededBy`（被谁顶掉）双指针，
+ * `memory-history.js` 能据此还原整条链。再往 `changes` 里抄一遍就是**双份真相**，
+ * 两处一旦不同步，排查时不知道该信谁。所以只记"没有别的字段能表达"的动作：
+ *
+ * | 事件 | 为什么必须记 |
+ * |---|---|
+ * | `edit` | 改了正文 → 旧说法原本会被 `delete mm[旧文本]` 直接抹掉，不记就永久丢失 |
+ * | `archive` / `unarchive` | 软隐藏只有 `archivedAt` 一个时间点，说不出是"面板归档"还是"按人遗忘" |
+ * | `expire` | `until` + `expiredBy` 只说"谁让它过期"，说不出"什么时候、被哪次整理" |
+ * | `restore` | 恢复后 `until` 被删掉，等于把"曾经失效过"这件事擦干净了 |
+ *
+ * ## 与 `at` / `updatedAt` 的分工（三个时间别混）
+ *
+ * · `at`        = **最后一次被提到**（重提会覆盖它，这是既有行为，不动）
+ * · `updatedAt` = **最后一次结构性修改**（编辑/作废/恢复/归档；只在真改时落盘）
+ * · `changes[].at` = 每次修改**分别**的时间
+ *
+ * 老库没有这两个字段，读出时 `updatedAt` 缺省当 `at`、`changes` 当空数组——
+ * **不写盘就等于不存在**，所以升级后老库仍是逐字节一样的文件。
+ */
+export const FACT_CHANGES_MAX = 6;
+/** 旧正文只留前 80 字：够认出"原来是哪句"，不是备份 */
+const CHANGE_TEXT_MAX = 80;
+
+/** 读出规范化后的变更记录（老库/坏数据 → 空数组，从不抛） */
+export function changesOf(meta) {
+  const rows = Array.isArray(meta?.changes) ? meta.changes : [];
+  return rows
+    .filter((h) => h && typeof h === 'object' && Number(h.at) > 0)
+    .slice(-FACT_CHANGES_MAX)
+    .map((h) => ({
+      event: String(h.event || '').slice(0, 16),
+      at: Number(h.at),
+      ...(h.from ? { from: String(h.from).slice(0, CHANGE_TEXT_MAX) } : {}),
+      ...(h.to ? { to: String(h.to).slice(0, CHANGE_TEXT_MAX) } : {}),
+      ...(h.by ? { by: String(h.by).slice(0, 24) } : {}),
+    }));
+}
+
+/** 追加一条变更事件并环形成 6 条；空记录不落盘（老库字节一致） */
+function pushChange(meta, entry) {
+  if (!entry || !(Number(entry.at) > 0)) return meta;
+  const rows = changesOf(meta);
+  rows.push({
+    event: String(entry.event || '').slice(0, 16),
+    at: Number(entry.at),
+    ...(entry.from ? { from: String(entry.from).slice(0, CHANGE_TEXT_MAX) } : {}),
+    ...(entry.to ? { to: String(entry.to).slice(0, CHANGE_TEXT_MAX) } : {}),
+    ...(entry.by ? { by: String(entry.by).slice(0, 24) } : {}),
+  });
+  meta.changes = rows.slice(-FACT_CHANGES_MAX);
+  return meta;
+}
+
 /** 正文 → 稳定短 id（djb2）；同一句话永远同一个 id，编辑后自然换新 id */
 export function factIdOf(text) {
   let h = 5381;
@@ -960,7 +1027,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
          * （factIdOf 由正文派生，不落正文副本，省空间）。没有它时，
          * memory-history 只能靠相似度推断配对、不能宣称因果链（见该文件头注释）。
          */
-        metaMap[other] = { ...om, until: t, supersededBy: factIdOf(f) };
+        /**
+         * `updatedAt` 一起写：这是"这条被改动过"的结构性修改。
+         * 不写 `changes` 事件——`until` + `supersededBy` 已经能还原整条链
+         * （见 `changesOf` 上方注释：不造双份真相）。
+         */
+        metaMap[other] = { ...om, until: t, supersededBy: factIdOf(f), updatedAt: t };
       }
     };
 
@@ -1663,6 +1735,24 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
         if (v > 0) meta.archivedAt = v;
         else delete meta.archivedAt;
       }
+      /**
+       * 变更留痕：只记"别的字段表达不出来"的动作。
+       *
+       * 改正文时把旧说法留在 `from` 里——因为下面 `delete mm[text]` 一执行，
+       * 旧的那句话就**永久消失**了（这条正是参照 mem0 的 history 表补的）。
+       */
+      const changedText = nextText !== text;
+      const changedMeta = patch.pin !== undefined || patch.tier !== undefined
+        || patch.tags !== undefined || patch.archivedAt !== undefined;
+      if (changedText || changedMeta) {
+        const t = now();
+        meta.updatedAt = t;
+        pushChange(meta, {
+          event: patch.archivedAt !== undefined ? (Number(patch.archivedAt) > 0 ? 'archive' : 'unarchive') : 'edit',
+          at: t,
+          ...(changedText ? { from: text, to: nextText } : {}),
+        });
+      }
       if (nextText !== text) {
         list[list.indexOf(text)] = nextText;
         delete mm[text];
@@ -2037,6 +2127,13 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
               /** 阶段8：被哪条事实顶替（新条目稳定 id）；清理→还原不能丢，否则真链断了 */
               supersededBy: String(x.supersededBy || ''),
               /**
+               * 变更留痕：同 `status` 的教训——不导出，「清理→后悔→还原」就把
+               * "这条被改过什么"抹干净，用户看不出少的是哪一层。
+               * 0 / [] 都按"没有"导出，`insertRaw` 据此不落盘，老库逐字节一致。
+               */
+              updatedAt: Number(x.updatedAt) > 0 ? Number(x.updatedAt) : 0,
+              changes: changesOf(x),
+              /**
                * E2 待跟进：**必须一起导出**。
                * 不导出的话，「清理 → 后悔 → 还原」之后这条事实回来了，
                * 但「到点该问一句」悄悄没了——用户看不出哪里少了东西。
@@ -2070,7 +2167,15 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
         for (const it of Array.isArray(items) ? items : []) {
           const hit = locateFact(m, it);
           if (!hit || hit.mm[hit.text]?.until) continue;
-          hit.mm[hit.text] = { ...(hit.mm[hit.text] || {}), until: t, expiredBy: 'retention' };
+          const next = {
+            ...(hit.mm[hit.text] || {}),
+            until: t,
+            expiredBy: 'retention',
+            /** 结构性修改留痕：`expiredBy` 只说"谁让它过期"，说不出是哪一次整理 */
+            updatedAt: t,
+          };
+          pushChange(next, { event: 'expire', at: t });
+          hit.mm[hit.text] = next;
           n += 1;
         }
         if (n) save();
@@ -2094,6 +2199,13 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
             const next = { ...x };
             delete next.until;
             delete next.expiredBy;
+            /**
+             * 恢复后 `until` 被删掉，"曾经失效过"这件事只剩这条记录能说明。
+             * 不留痕的话，面板上"为什么这条突然又活了"永远查不到。
+             */
+            const t = now();
+            next.updatedAt = t;
+            pushChange(next, { event: 'restore', at: t });
             mm[text] = next;
             n += 1;
           }
@@ -2174,6 +2286,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
       /** 阶段8：还原被取代指针（空不落盘，老库逐字节一致） */
       if (row.supersededBy) meta.supersededBy = String(row.supersededBy);
+      /** 变更留痕：0 / 空数组不落盘，老库与升级前的文件逐字节一致 */
+      if (Number(row.updatedAt) > 0) meta.updatedAt = Number(row.updatedAt);
+      const ch = changesOf({ changes: row.changes });
+      if (ch.length) meta.changes = ch;
       /** E2 待跟进：同样默认不落盘，还原后与升级前的老库逐字节一致 */
       if (row.followUp && Number(row.followUp.at) > 0) {
         meta.followUp = {
