@@ -68,6 +68,8 @@ import { createHistoryRing } from './history-ring.js';
 import { memoryLines, oneLine, followUpAllowed, followUpSection } from './memory-line.js';
 import { createEvents, EVENT_LABELS, shouldInjectEvents } from './events.js';
 import { createProfiles, shouldInjectProfiles, dayKey } from './profiles.js';
+import { createPersons } from './persons.js';
+import { createPendingAliases } from './pending-aliases.js';
 import { createGroupChatProfiles } from './group-chat-profile.js';
 import { createImpressionStore, buildImpressionPrompt, cleanImpression, crystallizeCandidates, IMPRESSION_MIN_HITS, DEFAULT_IMPRESSION_DAYS } from './gist-impression.js';
 import { sourceStats } from './source-stats.js';
@@ -4051,6 +4053,16 @@ export function apply(ctx) {
    * 两边都不碰消息热链路，也不动 prompt cache。
    */
   const profiles = createProfiles({ file: join(dataDir(), 'profiles.json'), log: (m) => log.warn(m) });
+  /**
+   * 人物身份基座（按人遗忘的地基）：把「一个人」从显示名提升为稳定 id。
+   *
+   * 为什么不能省：`journal.sender` 与 `facts.meta.src.speaker` 历史存的是**显示名**，
+   * 改名/重名会让「删掉这个人」删错人。这里存 QQ 号/openid 权威身份，其余各层
+   * 只做引用打标。纯旁挂：没人调一个字都不写，`remembers()` 默认 true。
+   */
+  const persons = createPersons({ file: join(dataDir(), 'persons.json'), log: (m) => log.warn(m) });
+  /** 模型猜出来的「显示名 ≈ QQ」先排队，主人确认后才写权威别名（宁漏不误） */
+  const pendingAliases = createPendingAliases({ file: join(dataDir(), 'pending-aliases.json'), log: (m) => log.warn(m) });
   /**
    * 群印象档案：按 chatId 存气氛/常聊什么/印象，独立 chat-profiles.json。
    * 和 profiles 一样不进人格隔离（数据本身是"这个群什么样"），默认不注入。
