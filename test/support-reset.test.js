@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join, parse, resolve } from 'node:path';
+import { basename, join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 import {
@@ -23,7 +23,7 @@ test('恢复默认：连接引导与凭证搬回来，开关与向导以外的�
     enabled: false,
     dryRun: true,
     server: { port: 18000, token: 'panel-token' },
-    setup: { roostDir: 'D:\\bot', wizardVersion: 1, wizardSkippedVersion: 1, frameworkAutoUpdate: true },
+    setup: { roostDir: join(process.cwd(), 'fixture-bot'), wizardVersion: 1, wizardSkippedVersion: 1, frameworkAutoUpdate: true },
     roostHost: { enabled: true, url: 'http://127.0.0.1:6801', token: 'host-token', transport: 'ws' },
   };
   const out = resetDshSettings(cur, DEFAULTS);
@@ -31,7 +31,7 @@ test('恢复默认：连接引导与凭证搬回来，开关与向导以外的�
   assert.equal(out.dryRun, false);
   assert.equal(out.server.port, 18000);
   assert.equal(out.server.token, 'panel-token');
-  assert.equal(out.setup.roostDir, 'D:\\bot');
+  assert.equal(out.setup.roostDir, join(process.cwd(), 'fixture-bot'));
   assert.equal(out.setup.wizardVersion, 1);
   assert.equal(out.setup.frameworkAutoUpdate, false, '非保留项必须回默认');
   assert.equal(out.roostHost.enabled, true);
@@ -56,13 +56,14 @@ test('恢复默认：空值 / 掩码 / 坏端口都不搬，避免把怪值当�
 });
 
 test('清理计划：不认未知 side；dsh 白名单里有记忆、没有配置与凭证目录', () => {
-  const bad = clearDataPlan({ side: 'all', dshDir: 'D:\\data' });
+  const bad = clearDataPlan({ side: 'all', dshDir: join(process.cwd(), 'fixture-data') });
   assert.equal(bad.ok, false);
   assert.equal(bad.reason, 'side');
 
-  const plan = clearDataPlan({ side: 'dsh', dshDir: 'D:\\data\\dsh-roost', stamp: 'clear-x' });
+  const plan = clearDataPlan({ side: 'dsh', dshDir: join(process.cwd(), 'fixture-data', 'dsh-roost'), stamp: 'clear-x' });
   assert.equal(plan.ok, true);
-  const names = plan.jobs.map((j) => j.from.slice(j.from.lastIndexOf('\\') + 1));
+  /** 用 basename 而不是 lastIndexOf('\\')：CI 在 Linux 上跑，分隔符是 / */
+  const names = plan.jobs.map((j) => basename(j.from));
   assert.ok(names.includes('memory.json'));
   assert.ok(names.includes('journal.sqlite'));
   assert.ok(names.includes('gallery'));
@@ -82,22 +83,23 @@ test('清理计划：护栏拒绝根目录 / 家目录 / 盘根', () => {
 
 test('清理计划：框架只清 data/ 下真实条目，跳过备份目录与隐藏项', () => {
   const plan = clearDataPlan({
-    side: 'framework', fwDir: 'D:\\bot', stamp: 'clear-1',
+    side: 'framework', fwDir: join(process.cwd(), 'fixture-bot'), stamp: 'clear-1',
     fwDataNames: [
       'bots', 'quota.json', '_backup', '.gitkeep', '../escape', 'identity.json',
       'backups', 'config', 'secrets', 'onnx-models',
     ],
   });
   assert.equal(plan.ok, true);
-  const names = plan.jobs.map((j) => j.from.slice(j.from.lastIndexOf('\\') + 1));
+  /** 用 basename 而不是 lastIndexOf('\\')：CI 在 Linux 上跑，分隔符是 / */
+  const names = plan.jobs.map((j) => basename(j.from));
   assert.deepEqual(names, ['bots', 'quota.json', 'identity.json']);
-  assert.ok(plan.jobs.every((j) => j.from.includes(join('bot', 'data'))));
+  assert.ok(plan.jobs.every((j) => j.from.includes(join('fixture-bot', 'data'))));
   assert.ok(plan.jobs.every((j) => j.to.includes(join('_backup', 'clear-1'))));
 });
 
 test('清理计划：两边都清时共用同一个备份时间戳', () => {
   const plan = clearDataPlan({
-    side: 'both', dshDir: 'D:\\dsh\\dsh-roost', fwDir: 'D:\\bot',
+    side: 'both', dshDir: join(process.cwd(), 'fixture-dsh', 'dsh-roost'), fwDir: join(process.cwd(), 'fixture-bot'),
     fwDataNames: ['quota.json'], stamp: 'clear-both',
   });
   assert.equal(plan.ok, true);
