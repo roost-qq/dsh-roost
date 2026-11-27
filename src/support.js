@@ -290,7 +290,7 @@ export function bundleName(date = new Date()) {
  * 顺序是刻意的——**最要紧的在最上面**：群友点开文件先看到版本和最近 error，
  * 不用滚到几千行日志里找。
  */
-export function bundleText({ diagnostics = '', entries = [], now = new Date(), note = '' } = {}) {
+export function bundleText({ diagnostics = '', entries = [], now = new Date(), note = '', configNote = '' } = {}) {
   const list = Array.isArray(entries) ? entries : [];
   const errs = pickRecent(list, 'error', 5);
   const warnCount = list.filter((e) => e && e.level === 'warn').length;
@@ -307,6 +307,10 @@ export function bundleText({ diagnostics = '', entries = [], now = new Date(), n
     line,
     '[环境]',
     diagnostics.trim() || '（环境信息没读到）',
+    '',
+    line,
+    '[配置与功能]（已逐字段脱敏：密钥与 OpenID 只留条数）',
+    configNote.trim() || '（没读到配置文件）',
     /** 只说分布：条数下面是「共 N 条」，环境段里也已经有「内存里 N/400」 */
     `日志统计：error ${errCount} / warn ${warnCount}`,
     '',
