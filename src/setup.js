@@ -385,9 +385,17 @@ export function assertCanWipe(dir, { dataDir = '', home = '' } = {}) {
   return abs;
 }
 
-export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer = null }) {
+export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer = null, spawnRoost = null }) {
   /** 我们自己拉起来的那个进程。DSH 重启后为 null，但 Roost 可能还在跑 */
   let child = null;
+  /**
+   * 进程代次。每次 spawn / kill 都递增，`exit` 回调只认自己那一代。
+   *
+   * 竞态现场：自动启动拉起 A → 填完 AppID 的 `createBot()` 把 A 停掉、又拉起 B；
+   * A 的 `exit` 是异步事件，晚到时若无条件 `child = null`，会把 B 的引用一起
+   * 清掉，启动轮询立刻误报「启动后马上退出了」。见 1.4.7 的回归。
+   */
+  let childGen = 0;
   let busy = '';
   /**
    * 本次 DSH 进程里装过的框架版本；null = 没装过。
@@ -1583,7 +1591,8 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
     try {
       if (await isRunning()) {
         // 走 *Once：createBot 自己占着 busy，再过一次闸门会撞上它自己
-        await stopOnce();
+        const stopped = await stopOnce();
+        if (stopped?.ok === false) throw new Error(stopped.message);
         await startOnce();
         restarted = true;
         log('已重启 Roost，新凭证生效');
@@ -1636,6 +1645,7 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
   /** 杀掉我们自己拉起来的进程。停不掉也不抛——调用方本来就在错误路径上 */
   function killChild() {
     if (!child) return;
+    childGen++; // 作废这一代的 exit 回调，免得它晚到时误清新拉起的进程
     try {
       child.kill();
     } catch {}
@@ -1675,27 +1685,52 @@ export function createSetup({ cfgOf, setCfg, dataDir, log = () => {}, installer 
     if (live.length) {
       const who = live.map((x) => `PID ${x.pid}（AppID ${x.appId}）`).join('、');
       throw new Error(
-        `已经有一个 Roost 在跑：${who}。先停掉它再启动；面板「设置 → 实例锁」能看到详情并清理残留记录`,
+        `已经有一个 Roost 在跑：${who}。先停掉它再启动；` +
+          '如果确认那个进程已经退出了，等 30 秒再试（心跳 30 秒不刷新即视为失效）；' +
+          '仍报这条就把 data/instances.json 里那条记录删掉（Roost 目录下）',
       );
     }
 
     const dir = dirOf();
-    child = spawn(process.execPath, ['src/main.js', '--serve', '--no-open'], {
+    /** `spawnRoost` 是单测注入口；生产仍走真 spawn */
+    const proc = (spawnRoost || spawn)(process.execPath, ['src/main.js', '--serve', '--no-open'], {
       cwd: dir,
       env: { ...process.env, ROOST_HOME: dir },
-      stdio: 'ignore',
+      // 以前 stdio:'ignore' 把子进程输出全丢了，退出原因一个字都留不下
+      stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
     });
-    child.on('exit', (code) => {
-      log(`Roost 进程退出（${code}）`);
-      child = null;
+    const myGen = ++childGen;
+    child = proc;
+    /** 只留尾部 4 KB：够看报错，又不会让长时间运行的进程把内存吃满 */
+    let tail = '';
+    const keepTail = (chunk) => {
+      tail = (tail + chunk.toString('utf8')).slice(-4096);
+    };
+    proc.stdout?.on('data', keepTail);
+    proc.stderr?.on('data', keepTail);
+    let exitInfo = '';
+    proc.on('error', (e) => {
+      exitInfo = `启动错误：${e.message}`;
+      log(`Roost 进程启动错误：${e.message}`);
+    });
+    proc.on('exit', (code, signal) => {
+      exitInfo = signal ? `信号 ${signal}` : `退出码 ${code}`;
+      log(`Roost 进程退出（${exitInfo}）`);
+      // 只清自己：旧进程晚到的 exit 不能把新进程的引用清掉
+      if (child === proc && childGen === myGen) child = null;
     });
 
     // 等它起来（最多 20 秒）
     let panel = null;
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 500));
-      if (!child) throw new Error('Roost 启动后马上退出了。看它的日志：可能缺 AppID/AppSecret，或端口被占');
+      if (!child) {
+        const detail = [exitInfo, tail.trim() ? `输出：${tail.trim()}` : ''].filter(Boolean).join('；');
+        throw new Error(
+          `Roost 启动后马上退出了${detail ? `（${detail}）` : ''}。看它的日志：可能缺 AppID/AppSecret，或端口被占`,
+        );
+      }
       panel = await panelHealth();
       if (!panel) continue;
       const verdict = startVerdict(panel);
