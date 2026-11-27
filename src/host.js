@@ -5224,6 +5224,8 @@ export function apply(ctx) {
          * `/v1/message` 走 `postReply`——四条最后都掉进 `send`。
          */
         dryRunOf: () => dryRunOn(),
+        /** 出站近似去重阈值（默认 0 = 关）：四条出站路在通道层统一拦 */
+        dupSimilarityOf: () => Number(cfg.chat?.dupSimilarity) || 0,
         /**
          * 总开关。`judge()` 与 `sendOut()` 之外的最后一道：盖住「模型在跑、
          * 主人才关掉」那段在途窗口——那一轮不经过 `judge()`，也不一定经过
