@@ -178,6 +178,18 @@ test('待确认别名：确认后写进 persons.aliases，队列出队', async (
   } finally { b.done(); }
 });
 
+test('/memory/node 删「这个人」= 断链，不是只删一行档案（否则当晚又长回来）', async () => {
+  const b = await boot();
+  try {
+    const r = await b.call('/roost/api/memory/node', { kind: 'profile', id: '10001' });
+    assert.equal(r.ok, true, r.message);
+    assert.equal(b.read('persons.json').persons['10001'].noMemory, true, '要走完整遗忘，立身份标记');
+    assert.equal(b.read('profiles.json').length, 1, '档案行还在（可恢复），不是物理删');
+    const back = await b.facts();
+    assert.equal(back.global.includes('小明在准备考试'), false, '断链后事实也不再注入');
+  } finally { b.done(); }
+});
+
 test('回填：确认别名之后，老事实补上归属（只补确认过的）', async () => {
   const b = await boot();
   try {

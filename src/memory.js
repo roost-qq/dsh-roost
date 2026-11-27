@@ -1800,6 +1800,11 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
           if (meta.until || meta.archivedAt) continue;
           if (!isValidAt(meta, t)) continue;
           if (statusOf(meta) === 'guess') continue;
+          /**
+           * 按人遗忘：待跟进也是「她会主动提起他」的一条路。
+           * 不过闸门的话，忘掉一个人之后下一句还是「他考试怎么样了」。
+           */
+          if (!visible(text, meta)) continue;
           out.push({
             text,
             scope,

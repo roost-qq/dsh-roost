@@ -17,6 +17,7 @@ import { createJournal, ERASED } from '../src/journal.js';
 import { createMemory } from '../src/memory.js';
 import { createGraph } from '../src/graph.js';
 import { createProfiles } from '../src/profiles.js';
+import { createSelf } from '../src/self.js';
 
 function rig(t) {
   const dir = mkdtempSync(join(tmpdir(), 'roost-fp-'));
@@ -33,9 +34,11 @@ function rig(t) {
     isForgotten: (k) => !filter.remembers(k),
     log: () => {},
   });
+  const self = createSelf({ log: () => {} });
+  self.add({ text: '和小明约了周末打球', day: '2026-11-26' });
   const audits = [];
   const fp = createForgetPerson({
-    persons, forgetFilter: filter, profiles, memory, journal, graph,
+    persons, forgetFilter: filter, profiles, memory, journal, graph, self,
     file: join(dir, 'forget-archive.json'),
     log: () => {},
     audit: (e) => audits.push(e),
@@ -53,7 +56,7 @@ function rig(t) {
   journal.add({ id: 'k1', at: 1700000004000, chatId: 'group:G1', sender: '阿猫', role: 'member', text: '猫粮买好了' });
   graph.addEdge({ src: '主人', rel: '朋友', dst: '小明', chatId: 'private:10001' });
   filter.invalidate();
-  return { dir, persons, filter, journal, memory, graph, profiles, fp, audits };
+  return { dir, persons, filter, journal, memory, graph, profiles, self, fp, audits };
 }
 
 test('unlink：日记只打标记不删正文，事实一条不少，读路径全看不见', (t) => {
@@ -162,6 +165,54 @@ test('档案：同一天里点完**立刻**生效（按天冻结的渲染缓存�
   assert.equal(profiles.text({ day: '2026-11-27' }), '', '同一天也要当场不提他，否则等于没做');
   fp.restore('10001');
   assert.match(profiles.text({ day: '2026-11-27' }), /小明/, '撤回后当场复活');
+});
+
+test('按显示名遗忘：用档案 key 当身份，档案真的不再注入', (t) => {
+  const { fp, profiles, persons } = rig(t);
+  /** 面板传的是名字，档案 key 是 openid */
+  const r = fp.run('小明', { mode: 'unlink' });
+  assert.equal(r.ok, true, r.message);
+  assert.equal(r.id, '10001', '身份要落在档案 key 上，不能拿名字当 id');
+  assert.equal(persons.remembers('10001'), false);
+  assert.equal(profiles.text({ day: '2026-11-27' }), '', '档案段当场不注入');
+});
+
+test('按 QQ 号遗忘、档案以旧 openid 为键：确认别名能桥接', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'roost-fp2-'));
+  process.env.DSH_ROOST_DATA = dir;
+  t.after(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
+  const persons = createPersons({ file: join(dir, 'persons.json'), log: () => {} });
+  const filter = createForgetFilter({ persons });
+  const profiles = createProfiles({
+    file: join(dir, 'profiles.json'),
+    isForgotten: (k) => !filter.remembers(k),
+    log: () => {},
+  });
+  const fp = createForgetPerson({
+    persons, forgetFilter: filter, profiles,
+    file: join(dir, 'forget-archive.json'), log: () => {},
+  });
+  /** 换过机器人：openid-old 是这个人，QQ 号是 10001 */
+  persons.see('openid-old', { name: '小明' });
+  persons.addAlias('openid-old', '10001');
+  profiles.note({ who: '小明', openid: 'openid-old', impression: '爱打球' });
+
+  fp.run('10001', { mode: 'unlink' });
+  assert.equal(persons.remembers('openid-old'), false, '按 QQ 号设的标记要落到 openid 上');
+  assert.equal(profiles.text({ day: '2026-11-27' }), '', '档案以 openid 为键也要被挡掉');
+});
+
+test('hard 顺手抹掉自述里提到他的那几条（unlink 不动原文）', (t) => {
+  const { fp, self } = rig(t);
+
+  /** unlink 档：自述原文不动 */
+  fp.run('10001', { mode: 'unlink' });
+  assert.match(self.all().notes.map((n) => n.text).join('|'), /小明/, 'unlink 不擦除自述');
+  fp.restore('10001');
+
+  const r = fp.run('10001', { mode: 'hard' });
+  assert.equal(r.steps.self >= 1, true, `应抹掉至少一条自述，实际 ${r.steps.self}`);
+  assert.equal(self.all().notes.some((n) => String(n.text).includes('小明')), false, '自述里也不再有他');
 });
 
 test('没有身份记录的人：照样能按名字清（但只按名字），不崩', (t) => {

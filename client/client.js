@@ -8344,7 +8344,7 @@ window.__ModuleLoader__.load({
           const tail = plan?.message ? ('\n影响面：' + plan.message) : ''
           const ask = mode === 'hard'
             ? '彻底遗忘不可恢复：日记正文会被抹掉，关于他的事实会被删除。' + tail + '\n\n继续？'
-            : '会把这个人的记忆归档一份（可从归档找回），之后不再提起他。' + tail + '\n\n继续？'
+            : '会把这个人当前的状态归档一份快照（留档核对用），然后不再提起他；数据仍然不删，随时可以「恢复记住」。' + tail + '\n\n继续？'
           if (!globalThis.confirm(ask)) return
           const r = await post('/person/forget', { id: key, mode, confirm: mode === 'hard' })
           toast(r?.message || '已处理', r?.ok === false ? 'err' : 'ok')
@@ -8711,8 +8711,14 @@ window.__ModuleLoader__.load({
                   },
                 }, '恢复记住')))
             : h('div', { className: 'roost-empty' }, '还没有人被遗忘。'),
-          h('div', { className: 'roost-diag-h', style: { marginTop: 12 } },
-            '待确认的别名（模型猜的「显示名 ≈ QQ」，确认后才用于清理老数据）'),
+          h('div', { className: 'roost-diag-h', style: { marginTop: 12 } }, '最近归档'),
+          (forgotten?.archived || []).length
+            ? (forgotten.archived).map((a, i) => h('div', {
+                key: 'ar' + i, className: 'roost-note',
+              }, '· ' + (a.id || '') + '　' + (a.at ? shortTime(a.at) : '')
+                + '　档案 ' + (a.hasProfile ? 1 : 0) + ' 条 / 事实 ' + (a.facts || 0) + ' 条'))
+            : h('div', { className: 'roost-empty' }, '还没有归档。归档只留一份快照（可导出核对），不会删数据。'),
+          h('div', { className: 'roost-diag-h', style: { marginTop: 12 } }, '待确认的别名（模型猜的「显示名 ≈ QQ」，确认后才用于清理老数据）'),
           (aliasQueue || []).length
             ? (aliasQueue).map((a) => h('div', {
                 key: a.alias + '|' + a.person, className: 'roost-item',

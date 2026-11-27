@@ -228,11 +228,13 @@ export function createPersons({
     },
 
     /**
-     * 遗忘版本号：**在途写入的护栏**。
+     * 遗忘代数：每次「遗忘 / 撤回」+1。
      *
-     * 巩固/提炼是异步的：它开工时读到一批记忆，写完前用户可能已经点了遗忘。
-     * 开工时记下 `forgetVersion`，落盘前再读一次，不一致就整批丢弃——否则
-     * 「刚删干净，下一分钟又被旧结果写回来」。对齐 aurabot 的 `forgetVersion`。
+     * **现在的作用是审计与排障**（面板/日志能看到这个人被遗忘过几次）。
+     * 它原计划当在途写入护栏（aurabot 的 `forgetVersion`），但落地后发现
+     * 不需要：所有写入路径都是**写入时**读闸门（`factFilter` / `isForgotten`），
+     * 在途任务写回时自然被挡——留一个没人读的版本号只会误导后来的人。
+     * 真出现「整批重扫」这类异步批处理时，再让它在批开始/结束时比对。
      */
     forgetVersionOf(x) {
       return Number(find(x)?.forgetVersion) || 0;

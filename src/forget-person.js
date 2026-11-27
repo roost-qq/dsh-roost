@@ -50,6 +50,7 @@ export function createForgetPerson({
   memory = null,
   journal = null,
   graph = null,
+  self = null,
   file,
   now = () => Date.now(),
   log = () => {},
@@ -93,33 +94,51 @@ export function createForgetPerson({
     const q = String(query ?? '').trim();
     if (!q) return null;
     const row = persons?.get?.(q) || null;
-    /** 面板上的显示名：不管 persons 有没有记录都读一次，用来补 names */
-    let displayName = '';
+    /**
+     * 面板档案那一行：`key` 才是真正的身份键（openid），`name` 只是展示。
+     *
+     * 必须先认 `key`：拿显示名当 id 的话，`profiles` 里那行（key 是 openid）
+     * 永远匹配不上「已遗忘」，档案段照样注入——用户看着人都忘了，
+     * 她还在档案里提他。
+     */
+    let prof = null;
     try {
-      const hit = (profiles?.recent?.(0) || [])
-        .find((r) => norm(r.key) === norm(q) || norm(r.name) === norm(q) || norm(r.key) === norm(row?.id));
-      displayName = String(hit?.name || '').trim();
-    } catch { displayName = ''; }
+      const all = profiles?.recent?.(0) || [];
+      /**
+       * 这个人可能有一堆等价键（qq / openid / 别名 / 显示名）。
+       * 只按输入值和 `row.id` 找档案，会漏掉「按 QQ 号遗忘、档案却以
+       * 旧 openid 为键」这一种——那行档案就继续被注入。
+       */
+      const keys = new Set([norm(q), norm(row?.id), norm(row?.qq)]);
+      for (const a of row?.aliases || []) keys.add(norm(a));
+      for (const n of row?.names || []) keys.add(norm(n));
+      prof = all.find((r) => keys.has(norm(r.key)) || norm(r.name) === norm(q))
+        || null;
+    } catch { prof = null; }
+    const displayName = String(prof?.name || '').trim();
+    const profileKey = String(prof?.key || '').trim().toLowerCase();
 
     if (!row) {
-      const id = String(q).toLowerCase();
+      /** 有档案就用档案 key 当身份，没有才退回输入值 */
+      const id = String(profileKey || q).toLowerCase();
       const names = [...new Set([displayName, q].filter(Boolean))];
-      return { id, row: null, names, known: false };
+      return { id, row: null, names, known: false, profileKey };
     }
     const names = persons.namesOf?.(row.id) || [];
     const merged = [...new Set([...names, displayName, row.id].filter(Boolean))];
-    return { id: row.id, row, names: merged, known: true };
+    return { id: row.id, row, names: merged, known: true, profileKey };
   }
 
   /** 私聊键：一个人可能有好几个 openid（换过机器人），每个都要清 */
   function chatKeysOf(info) {
     const keys = new Set();
-    const id = String(info?.id || '');
-    if (id) keys.add(`private:${id}`);
-    for (const a of info?.row?.aliases || []) {
-      const v = String(a || '').trim();
-      if (v) keys.add(`private:${v}`);
-    }
+    const push = (v) => {
+      const s = String(v || '').trim();
+      if (s) keys.add(`private:${s}`);
+    };
+    push(info?.id);
+    push(info?.profileKey);
+    for (const a of info?.row?.aliases || []) push(a);
     return [...keys];
   }
 
@@ -142,7 +161,9 @@ export function createForgetPerson({
     plan(query) {
       const info = resolve(query);
       if (!info) return { ok: false, message: '缺人物' };
-      const hasProfile = Boolean(profiles?.recent?.()?.some?.((r) => norm(r.key) === norm(info.id)));
+      /** 档案那一行：`resolve` 已经按 key/name 找过，找到就说明有 */
+      const hasProfile = Boolean(info.profileKey)
+        || Boolean(profiles?.recent?.(0)?.some?.((r) => norm(r.key) === norm(info.id)));
       const facts = countFacts(info);
       let journalRows = 0;
       try {
@@ -177,8 +198,9 @@ export function createForgetPerson({
       let snapshot = null;
       if (m === 'archive') {
         try {
+          const wantKey = norm(info.profileKey || info.id);
           snapshot = {
-            profile: profiles?.recent?.()?.find?.((r) => norm(r.key) === norm(info.id)) || null,
+            profile: profiles?.recent?.(0)?.find?.((r) => norm(r.key) === wantKey) || null,
             facts: (memory?.listFull?.('', [])?.global || [])
               .filter((r) => matcherOf(info.id, info.names)(r.text, r.about))
               .map((r) => ({ text: r.text, about: r.about, at: r.at })),
@@ -193,15 +215,22 @@ export function createForgetPerson({
       try {
         const r = persons?.setNoMemory?.(info.id, true, { by });
         steps.mark = Boolean(r?.ok);
+        /** 记一次遗忘代数（审计/排障用；在途写回由「写入时读闸门」挡住） */
+        steps.version = persons?.bumpForgetVersion?.(info.id) || 0;
       } catch (e) {
         steps.mark = false;
         log(`标记失败：${e.message}`);
       }
       /**
-       * 把面板上的显示名记进身份表。不记的话，下次闸门重建名单时只知道
-       * 那串 openid，日记/事实里出现的「小明」就一条都命中不了。
+       * 把面板上的显示名与档案 key 记进身份表。不记的话，下次闸门重建名单时
+       * 只知道那串 openid（或只有名字），日记/事实/档案里另一种写法就命中不了。
+       * 档案 key 通常就是 openid——它必须成为这个人的别名，否则按 QQ 号遗忘后，
+       * 以 openid 为键的那行档案仍然会被注入。
        */
       try {
+        if (info.profileKey && norm(info.profileKey) !== norm(info.id)) {
+          persons?.see?.(info.id, { alias: info.profileKey });
+        }
         const display = info.names.find((n) => norm(n) !== norm(info.id) && String(n).length >= 2);
         if (display) persons?.see?.(info.id, { name: display });
       } catch { /* 记不住名字不影响主流程 */ }
@@ -248,6 +277,19 @@ export function createForgetPerson({
         } catch (e) {
           steps.graph = 0;
           log(`删除图谱实体失败：${e.message}`);
+        }
+        /**
+         * 自我叙述里提到的也要抹（`self.forget(word)` 是现成的）：
+         * 那条自述是「她自己写下的话」，留着就等于她还记得。
+         * 只 hard 档做——unlink 只断注入、原文不动。
+         */
+        try {
+          let scrubbed = 0;
+          for (const n of info.names) scrubbed += Number(self?.forget?.(n) || 0);
+          steps.self = scrubbed;
+        } catch (e) {
+          steps.self = 0;
+          log(`抹自述失败：${e.message}`);
         }
       }
 

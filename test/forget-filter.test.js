@@ -15,6 +15,7 @@ import { createForgetFilter } from '../src/forget-filter.js';
 import { createMemory } from '../src/memory.js';
 import { createGraph } from '../src/graph.js';
 import { createProfiles } from '../src/profiles.js';
+import { createSelf } from '../src/self.js';
 
 function freshDir(t, name = 'roost-forget-') {
   const dir = mkdtempSync(join(tmpdir(), name));
@@ -126,6 +127,25 @@ test('图谱：已遗忘的实体不注入、也不再新建关系', (t) => {
 
   const added = g.addEdge({ src: '小明', rel: '同事', dst: '小李', chatId: 'private:u1' });
   assert.equal(added, 0, '已遗忘的实体不再新建边');
+});
+
+test('自我叙述：提到已遗忘的人那一条不注入，别人那几条照旧', (t) => {
+  const dir = freshDir(t);
+  const persons = createPersons({ file: join(dir, 'persons.json'), log: () => {} });
+  const f = createForgetFilter({ persons });
+  /** 自述是自由文本，这里用真实的 self 模块（按 DSH_ROOST_DATA 落盘） */
+  const s = createSelf({ log: () => {}, hideText: (x) => f.mentions(x) });
+  s.add({ text: '今天和小明聊了很久，他最近在准备考试', day: '2026-11-25' });
+  s.add({ text: '今天天气很好，心情不错', day: '2026-11-26' });
+  assert.match(s.text(3), /小明/, '遗忘前照常注入');
+
+  persons.see('10001', { name: '小明' });
+  persons.setNoMemory('10001', true);
+  f.invalidate();
+  const txt = s.text(3);
+  assert.equal(txt.includes('小明'), false, '提到他的那条不注入');
+  assert.match(txt, /天气很好/, '无关的自述不受影响');
+  assert.match(s.all().notes.map((n) => n.text).join('|'), /小明/, '原文不动（断链不擦除）');
 });
 
 test('档案：note 不再写回已遗忘的人，render 也不再注入', (t) => {

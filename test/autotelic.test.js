@@ -583,3 +583,28 @@ test('不做 presetIdOverride 假控件：我方 DSH 宿主没有 preset 机制'
   /** 我方后台会话工具收放走能力页那套，不是 preset */
   assert.match(src, /ctx\.agents\.create\(\)/, '注释要说明我方走 DSH agents 服务')
 })
+
+test('按人遗忘：提到已遗忘的人的观察不进决策（hideText）', async () => {
+  const dir = tmp();
+  try {
+    let seen = null;
+    const planner = { decideRound: async (o) => { seen = o; return { outcome: 'all-dead', candidates: [], verdicts: [], tickets: [] }; } };
+    const observe = {
+      list: () => ([
+        { id: 'o1', ts: 1, source: 'chat', tag: '牵挂', text: '小明说他在准备考试' },
+        { id: 'o2', ts: 2, source: 'chat', tag: '好奇', text: '主人想换个键盘' },
+      ]),
+    };
+    const e = createAutotelic({
+      dir,
+      cfgOf: () => ({ enabled: true }),
+      log: () => {},
+      planner,
+      observe,
+      hideText: (t) => String(t).includes('小明'),
+    });
+    const r = await e.decide({ round: 1 });
+    assert.equal(r.ok, true, r.error || '');
+    assert.deepEqual(seen.observations.map((o) => o.id), ['o2'], '提到小明的那条被挡掉');
+  } finally { cleanup(dir); }
+});

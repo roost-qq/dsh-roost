@@ -3011,6 +3011,12 @@ export function apply(ctx) {
     reviewer: autotelicReviewer,
     /** 观察层（P1）：decide 用真实观察而不是账本行 */
     observe: autotelicObserve,
+    /**
+     * 按人遗忘：提到已遗忘的人的观察不进决策。
+     * 闭包延迟取值——`forgetFilter` 建在下面（比这里晚），调用时已初始化；
+     * 万一在初始化前被调到（TDZ），`try` 兜住，退化成不过滤。
+     */
+    hideText: (t) => { try { return forgetFilter.mentions(t); } catch { return false; } },
     run: autotelicRun,
   });
 
@@ -4159,10 +4165,25 @@ export function apply(ctx) {
   }));
 
   /**
+   * 第五层：自我叙述。
+   *
+   * 写由巩固按天做（她自己说得够多才写），读只在**会话边界**——
+   * 新会话第一轮、压缩后的开场、深度重注。每轮都灌会让她
+   * 为了跟自述一致而表演，而不是自然地活着。
+   */
+  const self = createSelf({
+    log: (m) => log.warn(m),
+    /** 按人遗忘：自述里提到已遗忘的人，那一条不注入（原文不动） */
+    hideText: (t) => forgetFilter.mentions(t),
+  });
+
+  /**
    * 按人遗忘的编排（三档：unlink / archive / hard）。
    *
-   * 为什么单独一层：一次遗忘要同时动身份标记、日记、事实、档案、图谱，
+   * 为什么单独一层：一次遗忘要同时动身份标记、日记、事实、档案、图谱、自述，
    * 分散在路由里写必然漏一处；而且「预览影响面」与「真执行」必须同一口径。
+   *
+   * 放在 `self` 之后：hard 档要调 `self.forget()`，提前建会踩 TDZ。
    */
   const forgetPerson = createForgetPerson({
     persons,
@@ -4171,19 +4192,11 @@ export function apply(ctx) {
     memory,
     journal,
     graph,
+    self,
     file: join(dataDir(), 'forget-archive.json'),
     log: (m) => log.warn(m),
     audit: (e) => audit({ ...e, chatId: 'panel' }),
   });
-
-  /**
-   * 第五层：自我叙述。
-   *
-   * 写由巩固按天做（她自己说得够多才写），读只在**会话边界**——
-   * 新会话第一轮、压缩后的开场、深度重注。每轮都灌会让她
-   * 为了跟自述一致而表演，而不是自然地活着。
-   */
-  const self = createSelf({ log: (m) => log.warn(m) });
 
   /**
    * B2 心智模型快照：独立文件（mind-model.json），不进 journal、不进 self.json，
@@ -14258,8 +14271,15 @@ export function apply(ctx) {
           });
         }
         if (kind === 'profile') {
-          const ok = profiles.forget(id);
-          return send(res, ok ? 200 : 400, { ok, message: ok ? '忘掉这个人了' : '没找到这条档案' });
+          /**
+           * 走完整的「不再记住」而不是只删这一行档案。
+           *
+           * 只删行的话，当晚巩固会按同一批日记把人重新提炼出来——
+           * 用户看到的是「删了又长回来」。这里用默认档（断链，可恢复），
+           * 真要彻底删在人物页的「彻底遗忘」里。
+           */
+          const r = forgetPerson.run(id, { mode: 'unlink', peer: { name: '面板' } });
+          return send(res, r?.ok ? 200 : 400, { ok: Boolean(r?.ok), message: r?.message || '没找到这条档案' });
         }
         return send(res, 400, { ok: false, message: '这一类没有直接操作' });
       }),

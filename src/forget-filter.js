@@ -43,6 +43,14 @@ export function createForgetFilter({ persons, log = () => {} } = {}) {
         if (!p?.noMemory) continue;
         if (p.id) ids.add(norm(p.id));
         if (p.qq) ids.add(norm(p.qq));
+        /**
+         * 确认过的别名也是身份：按 QQ 号遗忘、档案却以 openid 为键时，
+         * 只认 `id`/`qq` 会让那行档案继续注入（用户以为忘了，她还在提）。
+         */
+        for (const a of p.aliases || []) {
+          const v = norm(a);
+          if (v) ids.add(v);
+        }
         const list = persons?.namesOf?.(p.id) || [];
         for (const n of list) {
           const v = String(n || '').trim();
