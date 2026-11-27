@@ -9540,6 +9540,16 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
             text = `${st}\n\n${text}`;
             log.info(`会话边界带上自述（${st.length} 字）`);
           }
+          /**
+           * B-lite：主人从她的自述里勾过「算数」的那几句，单独一段硬提示。
+           * 和自述分开写：自述是"我最近在想什么"（软状态），这段是
+           * "我答应过要改的"（照着做）。没勾过就是空串，注入与之前逐字节一致。
+           */
+          const pr = self.promises(3);
+          if (pr) {
+            text = `${pr}\n\n${text}`;
+            log.info(`会话边界带上「答应过自己的」（${pr.length} 字）`);
+          }
         } catch (e) {
           log.warn(`读自述失败（不影响这轮）：${e.message}`);
         }
@@ -13568,6 +13578,22 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
              * 单独一个动作、不挂在会话级清空上：自述是**跨群汇总**写的一条，
              * 按 chatId 清既清不干净（它不属于任何一个群）又会误伤别的群。
              */
+            /**
+             * B-lite：把某天的自述标成「算数」/ 取消。
+             * 只有标过的才进「你答应过自己的」注入段（见 self.promises）。
+             */
+            case 'self.keep': {
+              const day = String(arg?.day ?? '').trim();
+              const on = arg?.on !== false;
+              const text = String(arg?.text ?? '');
+              const r = self.mark({ day, text, on });
+              return send(res, r.ok ? 200 : 400, {
+                ...r,
+                message: r.ok
+                  ? (on ? '这条算数了：新会话开场会带上' : '取消了')
+                  : (r.why || '没改成'),
+              });
+            }
             case 'self.clear':
               self.clear();
               log.info('自我叙述已重置');
@@ -13859,7 +13885,10 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
           sf = {
             stats: self.stats(),
             /** 最近几条按天写的自述（新的在后） */
-            notes: a.notes.slice(-8).map((n) => ({ day: n.day, at: n.at, text: clip(n.text, 200) })),
+            /** `kept` = 主人勾过「算数」，会进「你答应过自己的」那一段 */
+            notes: a.notes.slice(-8).map((n) => ({
+              day: n.day, at: n.at, text: clip(n.text, 200), kept: n.kept === true,
+            })),
             /** 压成阶段自述的旧条目 */
             chapters: a.chapters.slice(-3).map((c) => ({ from: c.from, to: c.to, text: clip(c.text, 200) })),
           };

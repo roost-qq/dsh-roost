@@ -6782,6 +6782,31 @@ window.__ModuleLoader__.load({
           ),
         ),
 
+        /* ── 她自己写下的（B-lite） ── */
+        (mem?.self?.notes || []).length
+          ? h(Sec, { n: '02b', title: '她自己写下的', defaultOpen: false },
+              h('div', { className: 'roost-note', style: { marginTop: 0 } },
+                '这些是她每天写给自己的。勾了「算数」的那几条，新会话开场会当成「你答应过自己的」带上；没勾的只是她的自言自语，不进提示词。'),
+              h('div', { className: 'roost-list' },
+                mem.self.notes.slice().reverse().map((n2) =>
+                  h('div', { key: n2.day, className: 'roost-item' },
+                    h('span', { className: 't' }, n2.text),
+                    h('span', { className: 'd' }, `${n2.day}${n2.kept ? ' · 算数' : ''}`),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: async () => {
+                        const r = await quick('self.keep', { day: n2.day, text: n2.text, on: !n2.kept })
+                        toast(r?.message || (r?.ok ? '改了' : '没改成'), r?.ok === false ? 'err' : 'ok')
+                        if (r?.ok !== false) reload()
+                      },
+                    }, n2.kept ? '取消' : '算数'),
+                  ),
+                ),
+              ),
+            )
+          : null,
+
+
         /* ── 第三层：图谱 ── */
         h(Sec, { n: '03', title: '她知道的关系', defaultOpen: false },
           gp?.stats?.enabled === false

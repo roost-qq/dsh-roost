@@ -149,6 +149,8 @@ export const OP_SCOPE = Object.freeze({
   'persona.noMemory': 'prompt:write',
   /** 称呼（T4）：改的是档案里按场景的称呼表，同样属于提示词可见内容 */
   'persona.address': 'prompt:write',
+  /** B-lite：勾「这条自述算数」——改的是会被注入的自述，同样归 prompt:write */
+  'self.keep': 'prompt:write',
   /** 阶段7：群印象档案读写，改的是独立档案文件，归 prompt:write */
   'chatprofile.save': 'prompt:write',
   'chatprofile.clear': 'prompt:write',

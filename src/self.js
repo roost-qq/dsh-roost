@@ -160,7 +160,19 @@ export function createSelf({ log = () => {}, now = () => Date.now(), hideText = 
 
       const i = m.notes.findIndex((n) => n.day === d && n.kind === kind);
       const rec = { at: ts, day: d, text: t, kind };
-      if (i >= 0) m.notes[i] = rec;
+      /**
+       * B-lite：主人勾过「算数」的那条，重写时**只在正文没变**才保留标记。
+       * 正文变了就说明她想改的话变了，原来批准的不是这一句——标记作废，
+       * 否则「他批过的东西」会悄悄变成一句他从没看过的话。
+       */
+      if (i >= 0) {
+        const prev = m.notes[i];
+        if (prev?.kept && prev.text === t) {
+          rec.kept = true;
+          if (prev.keptAt) rec.keptAt = prev.keptAt;
+        }
+        m.notes[i] = rec;
+      }
       else m.notes.push(rec);
       m.notes.sort((a, b) => a.at - b.at);
 
@@ -177,6 +189,49 @@ export function createSelf({ log = () => {}, now = () => Date.now(), hideText = 
     },
 
     /**
+     * B-lite：把某天的自述标成「算数」/ 取消（主人在面板上勾）。
+     *
+     * 为什么不走模型提案那一套：那要改巩固 prompt，影响**所有**巩固输出，
+     * 还得防她自我强化。而她本来就在自由地写自述——让主人从里面挑，
+     * 既不用改 prompt，也顺手补了「面板看不到她写了什么」这个真空。
+     *
+     * @returns {{ok:boolean, why?:string, kept?:boolean}}
+     */
+    mark({ day, text = '', on = true } = {}) {
+      const d = String(day || '').trim();
+      if (!d) return { ok: false, why: '缺日期' };
+      const m = load();
+      const note = m.notes.find((x) => x.day === d && (!text || x.text === String(text)));
+      if (!note) return { ok: false, why: '没找到这条自述' };
+      if (on) {
+        note.kept = true;
+        note.keptAt = now();
+      } else {
+        delete note.kept;
+        delete note.keptAt;
+      }
+      save();
+      return { ok: true, kept: on };
+    },
+
+    /**
+     * 「你答应过自己的」——**只有主人勾过的**才进这一段。
+     *
+     * 和自述分开：自述是"我最近在想什么"（软状态），这一段是"我答应过要改的"
+     * （硬提示）。混在一起的话，她分不清哪句是自己随口写的、哪句是主人认过的。
+     */
+    promises(n = 3) {
+      const m = load();
+      const k = Math.max(1, Number(n) || 3);
+      const kept = m.notes.filter((x) => x.kept && !hidden(x.text)).slice(-k);
+      if (!kept.length) return '';
+      return [
+        '【你答应过自己的】（主人从你写过的话里挑出来的，照着做；别念出来，也别说"我答应过"）',
+        ...kept.map((x) => `· ${mmdd(x.day)} ${x.text}`),
+      ].join('\n');
+    },
+
+    /**
      * 注入用的一段话。没有就返回空串——**不要注入「还没有自述」这种废话**。
      *
      * 措辞刻意区分于记忆块：这是她自己写的，不是别人对她的评价。
@@ -190,7 +245,8 @@ export function createSelf({ log = () => {}, now = () => Date.now(), hideText = 
        * 就是「档案清了她还是知道这个人」。这里只**不注入**含已遗忘名字的那几条，
        * 原文一律不动（断链不擦除，撤回后原样回来）。
        */
-      const notes = m.notes.filter((x) => !hidden(x.text)).slice(-k);
+      /** 已勾「算数」的走 `promises()` 那一段，这里不重复注入 */
+      const notes = m.notes.filter((x) => !x.kept && !hidden(x.text)).slice(-k);
       if (!notes.length) return '';
       return [
         '【你自己最近写下的】（这些是你自己写的，不是别人对你的评价）',
@@ -213,6 +269,9 @@ export function createSelf({ log = () => {}, now = () => Date.now(), hideText = 
       for (const note of m.notes) {
         if (!note.text.includes(w)) continue;
         note.text = '（已按用户要求遗忘）';
+        /** 正文已经不是原来那句了，主人批过的标记一并作废 */
+        delete note.kept;
+        delete note.keptAt;
         n += 1;
       }
       for (const c of m.chapters) {
