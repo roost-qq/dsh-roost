@@ -154,7 +154,8 @@ export function createProfiles({
   }
 
   function render(limit) {
-    const list = load().filter((r) => r.impression || r.tips || r.dislikes || r.style || r.persona);
+    /** `noMemory` 的人在档案段一律不注入，哪怕旧数据里还留着正文字段 */
+    const list = load().filter((r) => !r.noMemory && (r.impression || r.tips || r.dislikes || r.style || r.persona));
     const picked = limit > 0 ? list.slice(-limit).reverse() : [...list].reverse();
     if (!picked.length) return '';
     const lines = picked.map((r) => {
@@ -191,6 +192,8 @@ export function createProfiles({
       const name = clipChars(String(who || openid || key).trim(), 24) || key;
       const cur = all.find((r) => r.key === key);
       if (cur) {
+        /** 不再记住的人：模型继续提炼也别再写回档案（面板标记优先） */
+        if (cur.noMemory) return 0;
         /**
          * 主人手填的字段不再被模型提炼冲掉（对齐 aurabot #604 的 ownerFields）。
          * 锁的是「字段」而不是「值」：主人清空某字段等于交还给自动印象，
@@ -296,14 +299,28 @@ export function createProfiles({
       return { ok: true, message: '人物印象已保存' };
     },
 
-    /** 不再记住某人：面板开关，只标记不删档案（撤回来还在） */
+    /**
+     * 不再记住某人（对齐 aurabot setNoMemory + deleteExisting 的轻量版）。
+     *
+     * 打开：当场清掉档案正文（印象/相处/雷区/风格/性格/标签/ownerFields），
+     * 只留 key + noMemory 标记——档案段当天就不再注入这个人（render 过滤）。
+     * 日记/facts 是纯文本、没有「关于谁」的结构字段，物理删除要动数据模型，
+     * 这一档不做；撤回标记后旧日记仍会被正常想起（对应用户目的「不再记住」优先）。
+     * 关闭：只撤标记，正文已经清掉，不会自动长回来（下次巩固重新提炼）。
+     */
     setNoMemory(key, enabled = true) {
       const k = String(key ?? '').trim().toLowerCase();
       if (!k) return false;
       const row = load().find((r) => String(r.key ?? '').trim().toLowerCase() === k);
       if (!row) return false;
-      if (enabled) row.noMemory = true;
-      else delete row.noMemory;
+      if (enabled) {
+        row.noMemory = true;
+        for (const f of ['impression', 'tips', 'dislikes', 'style', 'persona', 'alias', 'tags', 'tagsBy', 'ownerFields']) {
+          delete row[f];
+        }
+      } else {
+        delete row.noMemory;
+      }
       renderCache = null;
       save();
       return true;

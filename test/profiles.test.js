@@ -172,6 +172,27 @@ test('E4 画像雷区：dislikes 单独成字段、渲染标"别踩"、空串不
   assert.equal(p.recent(10).find((r) => r.key === 'o1').dislikes, '别叫他小名', '空串不覆盖');
 });
 
+test('不再记住某人：当天从注入里消失，正文清空，模型不再写回', (t) => {
+  const { file } = fresh(t);
+  const p = createProfiles({ file });
+  p.note({ who: '小明', openid: 'o1', impression: '爱聊游戏', tips: '直接点', dislikes: '别叫小名' });
+  assert.ok(p.text({ enabled: true, day: DAY }).includes('小明'), '原先会注入');
+  assert.equal(p.setNoMemory('o1', true), true);
+  assert.equal(p.text({ enabled: true, day: DAY }), '', '当天就不再注入这个人');
+  const row = p.recent(10).find((x) => x.key === 'o1');
+  assert.equal(row.noMemory, true, '保留标记便于面板回显');
+  for (const f of ['impression', 'tips', 'dislikes', 'style', 'persona', 'tags', 'ownerFields']) {
+    assert.equal(row[f], undefined, `${f} 已清掉`);
+  }
+  p.note({ who: '小明', openid: 'o1', impression: '最近迷上篮球' });
+  assert.equal(p.recent(10).find((x) => x.key === 'o1').impression, undefined, '模型不能写回');
+  /** 撤回标记：正文不会自己长回来，等下次巩固重新提炼 */
+  assert.equal(p.setNoMemory('o1', false), true);
+  assert.equal(p.recent(10).find((x) => x.key === 'o1').impression, undefined);
+  p.note({ who: '小明', openid: 'o1', impression: '重新认识他' });
+  assert.equal(p.recent(10).find((x) => x.key === 'o1').impression, '重新认识他', '恢复后能重新写');
+});
+
 test('ownerFields：主人手填的字段不被每天巩固的模型结果冲掉', (t) => {
   const { file } = fresh(t);
   const p = createProfiles({ file });

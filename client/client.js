@@ -8462,7 +8462,7 @@ window.__ModuleLoader__.load({
                                     type: 'checkbox', checked: Boolean(detail.person?.noMemory),
                                     onChange: (e) => toggleNoMemory(e.target.checked),
                                   }),
-                                  '不再记住这个人（撤回来档案还在）'),
+                                  '不再记住这个人（当场清档案，日记/facts 仍保留）'),
                               )
                             : h('div', null,
                                 detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || detail.person?.style || detail.person?.persona || (detail.person?.tags || []).length
