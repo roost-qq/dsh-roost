@@ -2522,12 +2522,12 @@ test('开关搬迁：各页真的把该管的开关画出来了，权限页不�
   }
 })
 
-test('4.1：人物页五节 01–05，人物墙 + 详情四栏 + 原三节全保留', () => {
+test('4.1：人物页六节 01–06，人物墙 + 详情四栏 + 原三节 + 遗忘', () => {
   const rt = makeReact()
   const mod = loadClient(rt.React)
   const tree = expand(mod.PeopleTab(tabProps()), rt)
-  /** 4.1 新增人物墙（01）与详情（02），原三节顺延 03/04/05 */
-  assert.deepEqual(numsOf(tree), ['01', '02', '03', '04', '05'], '人物页编号应 01–05 连续')
+  /** 4.1 新增人物墙（01）与详情（02），原三节顺延 03/04/05；06 是按人遗忘 */
+  assert.deepEqual(numsOf(tree), ['01', '02', '03', '04', '05', '06'], '人物页编号应 01–06 连续')
   const txt = textOf(tree)
   for (const must of [
     /** 01 人物墙（「搜名字」是 placeholder 属性不进 textOf，用源码断言补在下面） */
@@ -2539,6 +2539,8 @@ test('4.1：人物页五节 01–05，人物墙 + 详情四栏 + 原三节全保
     '她知道的关系', '3 个实体', '阿岚 —喜欢→ 猫',
     '她最近做过的事（1）', '发了张图', '去记忆页',
     '清空人物档案', '清空这些经历',
+    /** 06 按人遗忘：三档 + 待确认别名 */
+    '遗忘与身份别名', '已遗忘的人', '待确认的别名', '用已确认别名补旧数据归属',
   ]) {
     assert.ok(txt.includes(must), `人物页缺少「${must}」`)
   }
@@ -4124,3 +4126,13 @@ test('前端渲染：04 段有「导出诊断包」，并说清和「复制」�
   assert.ok(txt.includes('导出诊断包'), '导出按钮没渲染出来');
   assert.ok(txt.includes('拖进群'), '不说用途，用户不知道它和「复制」有什么区别');
 });
+
+test('称呼（T4）：面板分「通用 / 这个群」两栏，且走 persona.address 不混进档案 patch', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("'称呼（通用）'"), '要有通用称呼一栏')
+  assert.ok(src.includes("'这个群里的称呼'"), '要有本群称呼一栏')
+  assert.match(src, /quick\('persona\.address', \{ key, scope: '\*', value/, '通用称呼走 persona.address')
+  assert.match(src, /const \{ address, addressScope, addressLocal, \.\.\.patch \} = editForm/,
+    '称呼要从档案 patch 里摘出去（否则会被当成整段档案的 ownerFields）')
+  assert.ok(src.includes('别人的叫法：'), '详情要展示别名，且标明那是别人的叫法')
+})

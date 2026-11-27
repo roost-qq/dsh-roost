@@ -725,9 +725,15 @@ function createSqliteStore(file, log) {
       const d = open();
       if (!d) return 0;
       const list = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
+      /**
+       * 按人遗忘（`forget:<id>`）同样可恢复。不认它，「撤回遗忘」就只是文案：
+       * 用户点恢复返回 0，记忆回不来。`retention` 是本功能自己的标记，
+       * 两者都是「可逆的软删」，其余（改口 `supersededBy=<消息id>`）仍然不放回。
+       */
+      const cond = `invalid_at>0 AND (superseded_by='retention' OR superseded_by LIKE 'forget:%')`;
       const sql = list.length
-        ? `UPDATE journal SET invalid_at=0, superseded_by='' WHERE invalid_at>0 AND superseded_by='retention' AND id IN (${marks(list.length)})`
-        : `UPDATE journal SET invalid_at=0, superseded_by='' WHERE invalid_at>0 AND superseded_by='retention'`;
+        ? `UPDATE journal SET invalid_at=0, superseded_by='' WHERE ${cond} AND id IN (${marks(list.length)})`
+        : `UPDATE journal SET invalid_at=0, superseded_by='' WHERE ${cond}`;
       const upd = d.prepare(sql);
       let n = 0;
       d.exec('BEGIN');
@@ -739,6 +745,25 @@ function createSqliteStore(file, log) {
         throw e;
       }
       return n;
+    },
+
+    /**
+     * 按标记精确恢复（按人遗忘用）：只放回 `superseded_by=<tag>` 那批。
+     * 不能用 `restore()` 无参——那会把**别人**的遗忘标记也一起放回。
+     */
+    restoreTag(tag) {
+      const d = open();
+      const t = String(tag ?? '');
+      if (!d || !t) return 0;
+      try {
+        return Number(
+          /** 已抹正文的行不放回：恢复出来只会是一条占位符，用户以为"恢复了"其实什么都没回来 */
+          d.prepare('UPDATE journal SET invalid_at=0, superseded_by=\'\' WHERE invalid_at>0 AND superseded_by=? AND text<>?').run(t, ERASED).changes || 0,
+        );
+      } catch (e) {
+        log(`按标记恢复失败：${e.message}`);
+        return 0;
+      }
     },
 
     /** 排查看：列出已失效的行（原文与 `superseded_by` 都在），不进任何注入集 */
@@ -795,6 +820,56 @@ function createSqliteStore(file, log) {
         throw e;
       }
       return n;
+    },
+
+    /**
+     * 按人遗忘：把「这个人说的」和「他的私聊」整批处理。
+     *
+     * 为什么要按人扫全库：日记是按会话存的，一个人可能横跨私聊 + 很多群，
+     * 只清当前会话等于「说了忘掉、下一条又想起来了」。
+     *
+     * 两个条件都必须给上：
+     *   · `senders`：群聊里 `sender` 就是说话人（历史存的是显示名，所以
+     *     调用方必须只传**确认过的**名字，宁漏不误）；
+     *   · `chatIds`：私聊键 `private:<openid>`，比显示名可靠得多，优先命中。
+     *
+     * `mode`：
+     *   · `unlink`（默认）—— 只打失效标记 `forget:<id>`，正文一字不动，可恢复；
+     *   · `hard` —— 先抹正文（占位符 + 清摘要/快照/向量），再打标记，
+     *     这样时间线还在但内容与检索都读不到，且不可恢复。
+     *
+     * @returns {{matched:number, changed:number}}
+     */
+    forgetPerson({ senders = [], chatIds = [], mode = 'unlink', at = Date.now(), tag = '' } = {}) {
+      const d = open();
+      if (!d) return { matched: 0, changed: 0 };
+      const s = [...new Set((senders || []).map((x) => String(x || '').trim()).filter(Boolean))];
+      const c = [...new Set((chatIds || []).map((x) => String(x || '').trim()).filter(Boolean))];
+      if (!s.length && !c.length) return { matched: 0, changed: 0 };
+      const conds = [];
+      const args = [];
+      if (s.length) { conds.push(`sender IN (${marks(s.length)})`); args.push(...s); }
+      if (c.length) { conds.push(`chat_id IN (${marks(c.length)})`); args.push(...c); }
+      let ids = [];
+      try {
+        ids = d
+          .prepare(`SELECT id FROM journal WHERE invalid_at=0 AND (${conds.join(' OR ')})`)
+          .all(...args)
+          .map((r) => String(r.id));
+      } catch (e) {
+        log(`按人查日记失败：${e.message}`);
+        return { matched: 0, changed: 0 };
+      }
+      if (!ids.length) return { matched: 0, changed: 0 };
+      /** 只数不改（面板二次确认前先给用户看影响面） */
+      if (String(mode) === 'count') return { matched: ids.length, changed: 0 };
+      if (String(mode) === 'hard') {
+        const erased = this.erase(ids);
+        /** 抹完还要打标记：占位符本身也不该被注入回来 */
+        this.invalidate(ids, { at, supersededBy: tag });
+        return { matched: ids.length, changed: erased };
+      }
+      return { matched: ids.length, changed: this.invalidate(ids, { at, supersededBy: tag }) };
     },
 
     /**
@@ -1488,15 +1563,36 @@ function createJsonlStore(file, log) {
       return n;
     },
 
-    /** 同 SQLite 后端：只把 `supersededBy='retention'` 的行放回，别动改口作废的 */
+    /** 同 SQLite 后端：`retention` 与 `forget:<id>` 都可放回，别动改口作废的 */
     restore(ids) {
       load();
       const list = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))];
       const want = list.length ? new Set(list) : null;
       let n = 0;
       for (const r of rows) {
-        if (isActive(r) || String(r.supersededBy ?? r.superseded_by ?? '') !== 'retention') continue;
+        if (isActive(r)) continue;
+        const by = String(r.supersededBy ?? r.superseded_by ?? '');
+        if (by !== 'retention' && !by.startsWith('forget:')) continue;
         if (want && !want.has(String(r.id))) continue;
+        r.invalidAt = 0;
+        r.supersededBy = '';
+        n += 1;
+      }
+      if (n) rewrite();
+      return n;
+    },
+
+    /** 按标记精确恢复（同 SQLite 后端） */
+    restoreTag(tag) {
+      load();
+      const t = String(tag ?? '');
+      if (!t) return 0;
+      let n = 0;
+      for (const r of rows) {
+        if (isActive(r)) continue;
+        if (String(r.supersededBy ?? r.superseded_by ?? '') !== t) continue;
+        /** 同 SQLite 后端：已抹正文的行不放回 */
+        if (String(r.text ?? '') === ERASED) continue;
         r.invalidAt = 0;
         r.supersededBy = '';
         n += 1;
@@ -1540,6 +1636,26 @@ function createJsonlStore(file, log) {
         rewrite();
       }
       return n;
+    },
+
+    /** 按人遗忘（同 SQLite 后端）：扫全部行，按 sender / chatId 命中后失效或抹除 */
+    forgetPerson({ senders = [], chatIds = [], mode = 'unlink', at = Date.now(), tag = '' } = {}) {
+      load();
+      const s = new Set((senders || []).map((x) => String(x || '').trim()).filter(Boolean));
+      const c = new Set((chatIds || []).map((x) => String(x || '').trim()).filter(Boolean));
+      if (!s.size && !c.size) return { matched: 0, changed: 0 };
+      const ids = rows
+        .filter((r) => isActive(r) && (s.has(String(r.sender || '')) || c.has(String(r.chatId || ''))))
+        .map((r) => String(r.id));
+      if (!ids.length) return { matched: 0, changed: 0 };
+      /** 只数不改（面板二次确认前先给用户看影响面） */
+      if (String(mode) === 'count') return { matched: ids.length, changed: 0 };
+      if (String(mode) === 'hard') {
+        const erased = this.erase(ids);
+        this.invalidate(ids, { at, supersededBy: tag });
+        return { matched: ids.length, changed: erased };
+      }
+      return { matched: ids.length, changed: this.invalidate(ids, { at, supersededBy: tag }) };
     },
 
     clearChat(chatId, aliases = []) {
@@ -2353,6 +2469,15 @@ export function createJournal({ file, embed = null, log = () => {}, now = () => 
     invalidated: (opts = {}) => get().invalidated(opts),
     /** D11 retention 的一键恢复：只把本功能作废的行放回；ids 为空 = 全库 */
     restore: (ids) => get().restore(ids),
+
+    /**
+     * 按人遗忘（`forget-person.js` 的底层）：扫全库按 `sender` / 私聊 `chatId`
+     * 命中后整批失效或抹除。两个后端同一签名。
+     */
+    forgetPerson: (opts) => get().forgetPerson(opts),
+    /** 按标记精确恢复（撤回某人的遗忘），别把别人的一起放回 */
+    restoreTag: (tag) => get().restoreTag(tag),
+
     /** E4 / D11 备份还原：原样插回一行，保留 accessed / invalidAt / vec */
     insertRaw: (row) => get().insertRaw(row),
 

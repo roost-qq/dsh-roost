@@ -10,6 +10,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, existsSync, readFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import {
   createSetup, healthDirHash, instanceAlive,
   assertCanWipe, keepListOf, KEEPABLE,
@@ -194,7 +195,9 @@ test('启动: 实例表里还有活着的 Roost 就不 spawn 第二个', async (
           () => setup.start(),
           (e) => {
             assert.match(e.message, /已经有一个 Roost 在跑/, '必须拒绝，不能再拉一个');
-            assert.match(e.message, /实例锁/, '要告诉用户去哪清记录');
+            // 面板里**没有**「设置 → 实例锁」这一页，旧文案把人指到不存在的地方。
+            // 正确出路：先停 → 等心跳过期（30 秒）→ 删 data/instances.json 那条记录。
+            assert.match(e.message, /data\/instances\.json/, '要告诉用户真正能清记录的地方');
             return true;
           },
         );
@@ -740,4 +743,152 @@ test('卸载: 端口上另有 Roost 在应答，不阻塞本目录卸载', async
     assert.equal(r.ok, true, '端口上别人的应答不该拦住卸载');
   });
   assert.match(readFileSync(join(dir, 'src', 'main.js'), 'utf8'), /fresh 9\.9\.9/, '程序文件要被换成新版');
+});
+
+/**
+ * 1.4.7 回归：填完 AppID 会走 createBot 的「停旧进程 → 拉新进程」。
+ * 旧进程的 exit 是异步事件，晚到时以前无条件 `child = null`，
+ * 会把刚拉起来的新进程引用一起清掉，启动轮询立刻误报「马上退出」。
+ * 这里用注入的假进程，精确控制 exit 事件在新进程 spawn 之后才到。
+ */
+test('启动竞态: 旧进程的 exit 晚到，不得误清新拉起的 child', async () => {
+  const dir = makeRoost();
+  const logs = [];
+  const procs = [];
+  let healthOk = false;
+  const down = { ok: false, status: 503, text: async () => JSON.stringify({ ok: false }) };
+  const setup = createSetup({
+    cfgOf: () => ({ server: { port: 17321, token: '' }, setup: { roostDir: dir, version: 'v0.8.6' } }),
+    setCfg: () => {},
+    dataDir: () => dir,
+    log: (s) => logs.push(String(s)),
+    spawnRoost: () => {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.kill = () => { proc.killed = true; };
+      procs.push(proc);
+      healthOk = true; // spawn 之后面板才算起来
+      if (procs.length === 2) {
+        // 关键：A 的 exit 在 B 已经 spawn、写进 child 之后才到
+        queueMicrotask(() => procs[0].emit('exit', 0));
+      }
+      return proc;
+    },
+  });
+
+  await withFetch(
+    async () => {
+      // 每次只认一次健康应答，让 stopOnce 能在 kill 后立刻返回
+      if (healthOk) {
+        healthOk = false;
+        return okRes();
+      }
+      return down;
+    },
+    async () => {
+      const first = await setup.start();
+      assert.equal(first.ok, true, first.message);
+      assert.equal(procs.length, 1);
+
+      healthOk = true; // createBot 的 isRunning 要认「在跑」，才会触发重启
+      const r = await setup.createBot({ appId: '102056878', appSecret: 'secret' });
+      assert.equal(r.restarted, true, `配置已写但重启没成功：${r.message}`);
+      assert.equal(procs.length, 2, '停旧进程后必须只拉起一个新进程');
+      assert.equal(procs[0].killed, true, '旧进程要被停掉');
+      assert.match(logs.join('\n'), /已重启 Roost，新凭证生效/);
+      assert.match(logs.join('\n'), /Roost 进程退出（退出码 0）/, '旧进程的退出仍要记日志');
+
+      // child 没被旧 exit 清掉：再点一次启动应认「已经在跑了」
+      healthOk = true;
+      const again = await setup.start();
+      assert.match(again.message, /已经在跑/, '新进程的引用不能被旧 exit 事件抹掉');
+    },
+  );
+});
+
+test('启动竞态: 真退出时提示要带退出码和进程输出，不再只有固定猜测', async () => {
+  const dir = makeRoost();
+  const setup = createSetup({
+    cfgOf: () => ({ server: { port: 17321, token: '' }, setup: { roostDir: dir, version: 'v0.8.6' } }),
+    setCfg: () => {},
+    dataDir: () => dir,
+    log: () => {},
+    spawnRoost: () => {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.kill = () => {};
+      queueMicrotask(() => {
+        proc.stderr.emit('data', Buffer.from('bad config: appid missing'));
+        proc.emit('exit', 3);
+      });
+      return proc;
+    },
+  });
+
+  await withFetch(
+    async () => {
+      throw new Error('ECONNREFUSED');
+    },
+    async () => {
+      await assert.rejects(
+        () => setup.start(),
+        (e) => {
+          assert.match(e.message, /启动后马上退出了/);
+          assert.match(e.message, /退出码 3/, '退出码要带出来');
+          assert.match(e.message, /bad config: appid missing/, 'stderr 尾部要带出来');
+          return true;
+        },
+      );
+    },
+  );
+});
+
+/**
+ * 用户反馈「开了「探活身份校验」也没恢复」——开关只改 isRunning() 的口径，
+ * 改不了 exit 回调的竞态。这里钉死：严格校验开着时，重启链同样不能被旧 exit 误伤。
+ */
+test('启动竞态: 探活身份校验开启时也不会误报', async () => {
+  const dir = makeRoost();
+  const procs = [];
+  let healthOk = false;
+  const strictOk = () => okRes({ dirHash: healthDirHash(dir) });
+  const down = { ok: false, status: 503, text: async () => JSON.stringify({ ok: false }) };
+  const setup = createSetup({
+    cfgOf: () => ({
+      server: { port: 17321, token: '' },
+      setup: { roostDir: dir, version: 'v0.8.6', verifyIdentity: true },
+    }),
+    setCfg: () => {},
+    dataDir: () => dir,
+    log: () => {},
+    spawnRoost: () => {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.kill = () => { proc.killed = true; };
+      procs.push(proc);
+      healthOk = true;
+      if (procs.length === 2) queueMicrotask(() => procs[0].emit('exit', 0));
+      return proc;
+    },
+  });
+
+  await withFetch(
+    async () => {
+      if (healthOk) {
+        healthOk = false;
+        return strictOk();
+      }
+      return down;
+    },
+    async () => {
+      assert.equal((await setup.start()).ok, true);
+      healthOk = true;
+      const r = await setup.createBot({ appId: '102056878', appSecret: 'secret' });
+      assert.equal(r.restarted, true, `严格校验下也应完成重启：${r.message}`);
+      assert.equal(procs.length, 2);
+    },
+  );
 });

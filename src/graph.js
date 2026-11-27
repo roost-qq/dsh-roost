@@ -59,7 +59,7 @@ const edgeView = (r) => ({
  * @param {string} o.file  graph.sqlite 路径
  * @param {(m:string)=>void} [o.log]
  */
-export function createGraph({ file, log = () => {} } = {}) {
+export function createGraph({ file, log = () => {}, forgetFilter = null } = {}) {
   let db = null;
   let ready = false;
   let broken = false;
@@ -242,6 +242,12 @@ export function createGraph({ file, log = () => {} } = {}) {
     if (!d) return 0;
     const r0 = String(rel ?? '').trim().slice(0, 40);
     if (!src || !dst || !r0) return 0;
+    /** 按人遗忘：这个人的关系不再新建（已有的照旧，撤回后还能看到） */
+    if (typeof forgetFilter?.isEntity === 'function') {
+      try {
+        if (forgetFilter.isEntity(src) || forgetFilter.isEntity(dst)) return 0;
+      } catch { /* 过滤器坏了不拦写入 */ }
+    }
     const t = Number(at) || Date.now();
     const sid = ensureEntity(src, { chatId, at: t });
     const did = ensureEntity(dst, { chatId, at: t });
@@ -619,7 +625,16 @@ export function createGraph({ file, log = () => {} } = {}) {
    */
   function text({ chatId = '', max = 300, limit = 10, aliases = [] } = {}) {
     if (!enabled()) return '';
-    const rows = nowEdges({ chatId, limit, aliases });
+    let rows = nowEdges({ chatId, limit, aliases });
+    /**
+     * 按人遗忘：一条边只要任一端是这个已遗忘的人，就不注入。
+     * 只过滤渲染结果，**不动库**——撤回后关系原样回来（断链不擦除）。
+     */
+    if (typeof forgetFilter?.isEntity === 'function' && rows.length) {
+      try {
+        rows = rows.filter((e) => !forgetFilter.isEntity(e.src) && !forgetFilter.isEntity(e.dst));
+      } catch { /* 过滤器坏了就当没过滤，别让注入整段消失 */ }
+    }
     if (!rows.length) return '';
     const lines = rows.map((e) => `${oneLine(e.src)}—${oneLine(e.rel)}→${oneLine(e.dst)}`);
     let out = '';

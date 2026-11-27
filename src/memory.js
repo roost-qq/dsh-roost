@@ -57,7 +57,7 @@ const FACTS_MAX = 40;
  *   · 文件版本 > 当前支持 → 隔离（quarantine）+ 空视图，绝不写回
  *   · 迁移函数从 v1 逐级跑上来，每级只做一件事
  */
-export const MEMORY_SCHEMA_VERSION = 2;
+export const MEMORY_SCHEMA_VERSION = 3;
 /**
  * v(n) → v(n+1)：入参是整份对象，返回迁移后的对象；保持纯函数便于单测。
  *
@@ -83,6 +83,18 @@ const SCHEMA_MIGRATIONS = Object.freeze({
     for (const [cid, list] of Object.entries(raw.chats || {})) fill(list, meta.chats?.[cid]);
     return raw;
   },
+  /**
+   * v2 → v3：给事实加「关于谁」（`meta[*].about`）的**结构位**。
+   *
+   * 为什么这一档什么都不补：老数据只有 `src.speaker`（显示名，会改名、会重名），
+   * 拿它猜 about 就是给「删错人」埋雷。归属只在**主人确认过别名**之后由
+   * `backfillAbout()` 精确补，没确认的宁可留着空——空 about 在按人遗忘时
+   * 一律保留，不会误删。
+   *
+   * 这一档存在的意义是版本号：让 v2 的库能继续被读，也让以后真有字段要补时
+   * 有地方挂。
+   */
+  2: (raw) => raw,
 });
 export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze(
   [1, ...Object.keys(SCHEMA_MIGRATIONS).map(Number)],
@@ -439,6 +451,73 @@ function writeEvidence(meta, next) {
   return meta;
 }
 
+/**
+ * 变更留痕：`changes[]`（参照 mem0 的 history 表，只取"会丢信息"的那几种动作）
+ * ==========================================================================
+ *
+ * ## 为什么叫 changes 而不叫 history
+ *
+ * 仓里已经有 `memory-history.js` 管"**历史说法**"——把被 `supersede` 掉的旧条目
+ * 投影成一条演变链。那是"同一件事先后怎么说"，读的是**别的行**。
+ * 这里记的是"**这一行自己**被谁动过"，读的是**本行的字段**。两件事，名字必须分开，
+ * 否则面板上两个「历史」会互相打脸。
+ *
+ * ## 为什么 supersede 不记
+ *
+ * 被顶掉时已经写了 `until`（何时失效）+ `supersededBy`（被谁顶掉）双指针，
+ * `memory-history.js` 能据此还原整条链。再往 `changes` 里抄一遍就是**双份真相**，
+ * 两处一旦不同步，排查时不知道该信谁。所以只记"没有别的字段能表达"的动作：
+ *
+ * | 事件 | 为什么必须记 |
+ * |---|---|
+ * | `edit` | 改了正文 → 旧说法原本会被 `delete mm[旧文本]` 直接抹掉，不记就永久丢失 |
+ * | `archive` / `unarchive` | 软隐藏只有 `archivedAt` 一个时间点，说不出是"面板归档"还是"按人遗忘" |
+ * | `expire` | `until` + `expiredBy` 只说"谁让它过期"，说不出"什么时候、被哪次整理" |
+ * | `restore` | 恢复后 `until` 被删掉，等于把"曾经失效过"这件事擦干净了 |
+ *
+ * ## 与 `at` / `updatedAt` 的分工（三个时间别混）
+ *
+ * · `at`        = **最后一次被提到**（重提会覆盖它，这是既有行为，不动）
+ * · `updatedAt` = **最后一次结构性修改**（编辑/作废/恢复/归档；只在真改时落盘）
+ * · `changes[].at` = 每次修改**分别**的时间
+ *
+ * 老库没有这两个字段，读出时 `updatedAt` 缺省当 `at`、`changes` 当空数组——
+ * **不写盘就等于不存在**，所以升级后老库仍是逐字节一样的文件。
+ */
+export const FACT_CHANGES_MAX = 6;
+/** 旧正文只留前 80 字：够认出"原来是哪句"，不是备份 */
+const CHANGE_TEXT_MAX = 80;
+
+/** 读出规范化后的变更记录（老库/坏数据 → 空数组，从不抛） */
+export function changesOf(meta) {
+  const rows = Array.isArray(meta?.changes) ? meta.changes : [];
+  return rows
+    .filter((h) => h && typeof h === 'object' && Number(h.at) > 0)
+    .slice(-FACT_CHANGES_MAX)
+    .map((h) => ({
+      event: String(h.event || '').slice(0, 16),
+      at: Number(h.at),
+      ...(h.from ? { from: String(h.from).slice(0, CHANGE_TEXT_MAX) } : {}),
+      ...(h.to ? { to: String(h.to).slice(0, CHANGE_TEXT_MAX) } : {}),
+      ...(h.by ? { by: String(h.by).slice(0, 24) } : {}),
+    }));
+}
+
+/** 追加一条变更事件并环形成 6 条；空记录不落盘（老库字节一致） */
+function pushChange(meta, entry) {
+  if (!entry || !(Number(entry.at) > 0)) return meta;
+  const rows = changesOf(meta);
+  rows.push({
+    event: String(entry.event || '').slice(0, 16),
+    at: Number(entry.at),
+    ...(entry.from ? { from: String(entry.from).slice(0, CHANGE_TEXT_MAX) } : {}),
+    ...(entry.to ? { to: String(entry.to).slice(0, CHANGE_TEXT_MAX) } : {}),
+    ...(entry.by ? { by: String(entry.by).slice(0, 24) } : {}),
+  });
+  meta.changes = rows.slice(-FACT_CHANGES_MAX);
+  return meta;
+}
+
 /** 正文 → 稳定短 id（djb2）；同一句话永远同一个 id，编辑后自然换新 id */
 export function factIdOf(text) {
   let h = 5381;
@@ -643,8 +722,23 @@ function scoreOfAliasFact(meta, now = Date.now()) {
   return scoreOfFact({ ...meta, at: now - capped * DAY_MS }, now);
 }
 
-export function createMemory({ now = () => Date.now(), capacityOf = null, log = () => {} } = {}) {
+export function createMemory({ now = () => Date.now(), capacityOf = null, factFilter = null, log = () => {} } = {}) {
   const file = () => join(dataDir(), 'memory.json');
+  /**
+   * 遗忘闸门（按人遗忘）：`keep({text, about})` 为 false 的条目**读不出、写不进**。
+   *
+   * 为什么不散在调用点：注入有浅注入 / deep 派生 / 召回 / 巩固读回好几条路径，
+   * 少拦一处就是「档案清了她还知道这个人」。收口在这里，所有读写都得过。
+   * 不传 = 恒 true，老行为逐字节不变。
+   */
+  const visible = (text, meta) => {
+    if (typeof factFilter?.keep !== 'function') return true;
+    try {
+      return factFilter.keep({ text, about: String(meta?.about || '') }) !== false;
+    } catch {
+      return true;
+    }
+  };
   let cache = null;
   /**
    * 读盘遇到 ENOENT 之外的错误（EBUSY / EACCES / EIO）时置位。
@@ -878,6 +972,17 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     // 收口在这里：所有写入路径（模型标记、面板手记、以后新增的）都过一遍
     const src = normalizeSrc(opts.src);
     /**
+     * 这条事实**关于谁**（稳定 id）。只在调用方明确给时落盘：
+     * 老调用点不传 → 字段不出现，老库字节不变（默认行为零变化的落点）。
+     * 空值不覆盖已有归属——重提一句没带归属，不该把之前判定的归属抹掉。
+     */
+    const about = String(opts.about ?? '').trim().toLowerCase().replace(/^@+/, '').slice(0, 64);
+    /**
+     * 写入闸门：这个人已经「不再记住」了，就别再把他的事写进来。
+     * 返回原列表而不是报错——调用方不该因为一条被挡掉的事实而中断整轮。
+     */
+    if (!visible(f, { about })) return list;
+    /**
      * 调用方不传 = **没表态**（不是"说这是真的"）。
      *
      * 区分这两种很重要：老调用点、`<<remember>>`、面板手记都不传，
@@ -922,7 +1027,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
          * （factIdOf 由正文派生，不落正文副本，省空间）。没有它时，
          * memory-history 只能靠相似度推断配对、不能宣称因果链（见该文件头注释）。
          */
-        metaMap[other] = { ...om, until: t, supersededBy: factIdOf(f) };
+        /**
+         * `updatedAt` 一起写：这是"这条被改动过"的结构性修改。
+         * 不写 `changes` 事件——`until` + `supersededBy` 已经能还原整条链
+         * （见 `changesOf` 上方注释：不造双份真相）。
+         */
+        metaMap[other] = { ...om, until: t, supersededBy: factIdOf(f), updatedAt: t };
       }
     };
 
@@ -953,6 +1063,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (!Number.isFinite(Number(next.occurredAt)) && Number(opts.occurredAt) > 0) next.occurredAt = Number(opts.occurredAt);
       /** 显式指令重提仍是指令（不会因为再提一次就降级成普通事实） */
       if (opts.directive === true) next.directive = true;
+      /** 归属：只在这次明确给了才改，没给就保留原归属（老库没有则继续没有） */
+      if (about) next.about = about;
       /**
        * 标签：只在调用方明确给时改，没给就保留原标签（重提一句不该悄悄抹掉归类）。
        * 给空数组 = 显式清空（面板清标签用），此时删字段保持老库字节不变。
@@ -1001,6 +1113,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       ...(Number(opts.validUntil) > 0 ? { validUntil: Number(opts.validUntil) } : {}),
       /** 标签：默认 [] 不落盘，老库与旧调用方字节不变 */
       ...(normalizeTags(opts.tags).length ? { tags: normalizeTags(opts.tags) } : {}),
+      /** 归属：只在明确给时落盘，老调用方字节不变 */
+      ...(about ? { about } : {}),
     };
     /** 新建就带出处＝第一条证据；老调用点不传 evidence，这一行是空操作 */
     if (opts.evidence) writeEvidence(fresh, applyEvidence({}, 'reinforce', opts.evidence));
@@ -1107,7 +1221,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
           .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt)
           /** E3 时效：还没生效 / 已过期的条目不当"活事实"给调用方 */
           /** 用注入的 now，不直接用 Date.now()——测试/补跑历史时口径才一致 */
-          .filter((text) => isValidAt(mm?.[text], now()));
+          .filter((text) => isValidAt(mm?.[text], now()))
+          /** 按人遗忘：被遗忘者的条目对调用方不存在（**只过滤返回行，不改盘**） */
+          .filter((text) => visible(text, mm?.[text]));
       return {
         global: alive(m.global, m.meta.global),
         chat: alive(c.list, c.meta),
@@ -1169,6 +1285,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
            */
           .filter((text) => !mm?.[text]?.until && !mm?.[text]?.archivedAt
             && isValidAt(mm?.[text], t)
+            /** 按人遗忘：浅注入与 deep 都用这一处，漏了就是「档案清了她还知道他」 */
+            && visible(text, mm?.[text])
             && statusOf(mm?.[text]) !== 'guess'
             && !(skipDirective && mm?.[text]?.directive === true)
             && !(skipStale && ['stale', 'weakening'].includes(trendOf(evidenceOf(mm?.[text]).evidence, t)))
@@ -1205,7 +1323,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     listFull(chatId, aliases = [], opts = {}) {
       const m = load();
       const one = (list, mm) =>
-        (Array.isArray(list) ? list : []).map((text) => {
+        (Array.isArray(list) ? list : [])
+          /** 按人遗忘：deep 派生块从这里取，必须在映射前就滤掉 */
+          .filter((text) => visible(text, mm?.[text]))
+          .map((text) => {
           const x = mm?.[text] || {};
           return {
             text,
@@ -1221,6 +1342,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
              */
             status: statusOf(x),
             speaker: String(x.src?.speaker ?? ''),
+            /**
+             * 这条事实**关于谁**（稳定 id：QQ 号优先，其次 openid）。
+             * 老库没有这个字段 → 空串，表示"不知道关于谁"，按人遗忘时
+             * 一律保留（宁漏不误）。不写回磁盘。
+             */
+            about: String(x.about || ''),
             /** 以下都是可选扩展字段，老库没有时给默认，不写回磁盘 */
             tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
             /** A2 双时态：种类 + 事发时间（缺省回退到 at，老库表现不变） */
@@ -1446,6 +1573,82 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
     },
 
     /**
+     * 给老事实**精确补归属**（`meta[*].about`）。
+     *
+     * 为什么不能自动猜：老数据只有 `src.speaker`，是**显示名**——会改名、
+     * 会重名。拿它当条件补 about，等于给「删错人」埋雷。所以只接受调用方
+     * 给的 `resolve(speaker)`，而调用方只喂**主人确认过的别名**
+     * （`persons.aliases`，经 `pending-aliases` 确认）。解析不出来的一律
+     * 留着空——空 about 在按人遗忘时保留，不会误删。
+     *
+     * @param {{resolve?: (speaker:string)=>(string|'')}} opts
+     * @returns {{checked:number, changed:number}}
+     */
+    backfillAbout({ resolve = null } = {}) {
+      if (typeof resolve !== 'function') return { checked: 0, changed: 0 };
+      const m = load();
+      let checked = 0;
+      let changed = 0;
+      const walk = (list, mm) => {
+        if (!mm || typeof mm !== 'object') return;
+        for (const text of Array.isArray(list) ? list : []) {
+          const x = mm[text];
+          if (!x || typeof x !== 'object') continue;
+          checked += 1;
+          if (String(x.about || '').trim()) continue;
+          const sp = String(x.src?.speaker || '').trim();
+          if (!sp) continue;
+          const id = String(resolve(sp) || '').trim().toLowerCase();
+          if (!id) continue;
+          x.about = id;
+          changed += 1;
+        }
+      };
+      walk(m.global, m.meta.global);
+      for (const [cid, list] of Object.entries(m.chats || {})) walk(list, m.meta.chats?.[cid]);
+      if (changed) save();
+      return { checked, changed };
+    },
+
+    /**
+     * 按人物理删事实（hard 档专用）：`about` 精确命中 **或** 正文提到
+     * 这个名字的条目一起删，两层（全局 + 所有会话）都扫。
+     *
+     * 为什么不做成「按会话 + 关键词」的循环：`remove()` 一次一个会话一个词，
+     * 一个人可能横跨十几个群 + 多个键，循环调用既慢又会漏（别名键没枚举到）。
+     *
+     * 只给「用户明确要求彻底忘掉」用——正文删了不可恢复。
+     * @returns {number} 删掉几条
+     */
+    removePerson({ about = '', names = [] } = {}) {
+      const a = String(about ?? '').trim().toLowerCase();
+      const ns = (Array.isArray(names) ? names : [])
+        .map((x) => String(x ?? '').trim())
+        .filter(Boolean);
+      if (!a && !ns.length) return 0;
+      const m = load();
+      /** 单字名会误删一大片（「明」），和遗忘闸门同一个底线 */
+      const safe = ns.filter((n) => n.length >= 2);
+      const hit = (f, meta) => {
+        if (a && String(meta?.about || '').toLowerCase() === a) return true;
+        return safe.some((n) => f.includes(n));
+      };
+      let n = 0;
+      const drop = (list, mm) => {
+        const gone = (Array.isArray(list) ? list : []).filter((f) => hit(f, mm?.[f]));
+        for (const f of gone) delete mm[f];
+        n += gone.length;
+        return (Array.isArray(list) ? list : []).filter((f) => !gone.includes(f));
+      };
+      m.global = drop(m.global, m.meta.global);
+      for (const k of Object.keys(m.chats || {})) {
+        m.chats[k] = drop(m.chats[k], (m.meta.chats[k] = m.meta.chats[k] || {}));
+      }
+      if (n) save();
+      return n;
+    },
+
+    /**
      * 清本群层，不动全局。
      *
      * 别名键一起清：「这个群忘了」是**对这个人/这个群**说的，
@@ -1531,6 +1734,24 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
         const v = Number(patch.archivedAt);
         if (v > 0) meta.archivedAt = v;
         else delete meta.archivedAt;
+      }
+      /**
+       * 变更留痕：只记"别的字段表达不出来"的动作。
+       *
+       * 改正文时把旧说法留在 `from` 里——因为下面 `delete mm[text]` 一执行，
+       * 旧的那句话就**永久消失**了（这条正是参照 mem0 的 history 表补的）。
+       */
+      const changedText = nextText !== text;
+      const changedMeta = patch.pin !== undefined || patch.tier !== undefined
+        || patch.tags !== undefined || patch.archivedAt !== undefined;
+      if (changedText || changedMeta) {
+        const t = now();
+        meta.updatedAt = t;
+        pushChange(meta, {
+          event: patch.archivedAt !== undefined ? (Number(patch.archivedAt) > 0 ? 'archive' : 'unarchive') : 'edit',
+          at: t,
+          ...(changedText ? { from: text, to: nextText } : {}),
+        });
       }
       if (nextText !== text) {
         list[list.indexOf(text)] = nextText;
@@ -1669,6 +1890,11 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
           if (meta.until || meta.archivedAt) continue;
           if (!isValidAt(meta, t)) continue;
           if (statusOf(meta) === 'guess') continue;
+          /**
+           * 按人遗忘：待跟进也是「她会主动提起他」的一条路。
+           * 不过闸门的话，忘掉一个人之后下一句还是「他考试怎么样了」。
+           */
+          if (!visible(text, meta)) continue;
           out.push({
             text,
             scope,
@@ -1901,6 +2127,13 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
               /** 阶段8：被哪条事实顶替（新条目稳定 id）；清理→还原不能丢，否则真链断了 */
               supersededBy: String(x.supersededBy || ''),
               /**
+               * 变更留痕：同 `status` 的教训——不导出，「清理→后悔→还原」就把
+               * "这条被改过什么"抹干净，用户看不出少的是哪一层。
+               * 0 / [] 都按"没有"导出，`insertRaw` 据此不落盘，老库逐字节一致。
+               */
+              updatedAt: Number(x.updatedAt) > 0 ? Number(x.updatedAt) : 0,
+              changes: changesOf(x),
+              /**
                * E2 待跟进：**必须一起导出**。
                * 不导出的话，「清理 → 后悔 → 还原」之后这条事实回来了，
                * 但「到点该问一句」悄悄没了——用户看不出哪里少了东西。
@@ -1934,7 +2167,15 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
         for (const it of Array.isArray(items) ? items : []) {
           const hit = locateFact(m, it);
           if (!hit || hit.mm[hit.text]?.until) continue;
-          hit.mm[hit.text] = { ...(hit.mm[hit.text] || {}), until: t, expiredBy: 'retention' };
+          const next = {
+            ...(hit.mm[hit.text] || {}),
+            until: t,
+            expiredBy: 'retention',
+            /** 结构性修改留痕：`expiredBy` 只说"谁让它过期"，说不出是哪一次整理 */
+            updatedAt: t,
+          };
+          pushChange(next, { event: 'expire', at: t });
+          hit.mm[hit.text] = next;
           n += 1;
         }
         if (n) save();
@@ -1958,6 +2199,13 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
             const next = { ...x };
             delete next.until;
             delete next.expiredBy;
+            /**
+             * 恢复后 `until` 被删掉，"曾经失效过"这件事只剩这条记录能说明。
+             * 不留痕的话，面板上"为什么这条突然又活了"永远查不到。
+             */
+            const t = now();
+            next.updatedAt = t;
+            pushChange(next, { event: 'restore', at: t });
             mm[text] = next;
             n += 1;
           }
@@ -2038,6 +2286,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, log = 
       if (Number(row.archivedAt) > 0) meta.archivedAt = Number(row.archivedAt);
       /** 阶段8：还原被取代指针（空不落盘，老库逐字节一致） */
       if (row.supersededBy) meta.supersededBy = String(row.supersededBy);
+      /** 变更留痕：0 / 空数组不落盘，老库与升级前的文件逐字节一致 */
+      if (Number(row.updatedAt) > 0) meta.updatedAt = Number(row.updatedAt);
+      const ch = changesOf({ changes: row.changes });
+      if (ch.length) meta.changes = ch;
       /** E2 待跟进：同样默认不落盘，还原后与升级前的老库逐字节一致 */
       if (row.followUp && Number(row.followUp.at) > 0) {
         meta.followUp = {

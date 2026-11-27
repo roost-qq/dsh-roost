@@ -45,6 +45,7 @@ import { stripFaceMarks } from './face-table.js';
  */
 import { guardOutgoing } from './outbound-guard.js';
 import { cleanOutbound } from './outbound-clean.js';
+import { createOutboundDedupe } from './outbound-dup.js';
 
 /** 框架协议认可的四种会话类型（与 bot/src/host/dispatch.js 的 CHAT_KINDS 一致） */
 const SEND_KINDS = new Set(['group', 'c2c', 'guild', 'dm']);
@@ -225,7 +226,10 @@ function fileTypeOfName(p) {
 export function createRoostHostChannel({
   host, log = () => {}, markdownEnabled = true,
   dryRunOf = () => false, masterOffOf = () => false,
+  /** 近似去重阈值（热读，0 = 关）；默认关，见 outbound-dup.js 的设计说明 */
+  dupSimilarityOf = () => 0,
 } = {}) {
+  const dedupe = createOutboundDedupe({ similarityOf: dupSimilarityOf });
   if (!host?.rpc) throw new Error('roost 通道需要 createRoostHost 实例');
   /** 旧 ai-chat 面板的 `markdown` 开关；热读，面板关掉下一轮就生效 */
   const wantMarkdown = () => (typeof markdownEnabled === 'function' ? markdownEnabled() : markdownEnabled);
@@ -348,6 +352,19 @@ export function createRoostHostChannel({
       }
       const hasCard = Boolean(card && typeof card === 'object');
       if (!target) return { ok: false, message: '缺 target' };
+      /**
+       * 近似去重（`chat.dupSimilarity`，默认 0 = 关）。
+       *
+       * 放这里是因为**四条出站路最后都掉进这个 `send`**（主动消息 / 主回复 /
+       * `qq_send` / 扩展 `/v1/message`）——只改其中一条等于没改。
+       * 拦下时返回 `ok:true`：从"该不该发"的角度它已经处理完了；
+       * 另带 `skipped:'duplicate'` 让日志和账本能分清"发了"与"按重复跳过"。
+       */
+      const dup = dedupe.check(String(target), t, { hasCard });
+      if (dup.skip) {
+        log(`出站去重：与上一条相似 ${Math.round(dup.score * 100)}%，已跳过`);
+        return { ok: true, message: '内容与上一条重复，已跳过', skipped: 'duplicate' };
+      }
       /**
        * 只有静默、没有正文是合法的——`<<silence:2h>>` 单独出现就是
        * 「我要安静，没什么要说的」。不该拦，也不该发一条空消息。

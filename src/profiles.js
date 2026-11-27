@@ -46,14 +46,52 @@ export const PERSON_TAGS_MAX = 8;
 export const PERSON_TAG_LEN = 8;
 export const SPECIAL_TAGS = Object.freeze(['喜欢', '讨厌']);
 
+/**
+ * 称呼映射（对齐 rabbit 的 addresses / nicknames 分离）
+ * ==================================================
+ *
+ * 两件事必须分开，这是最容易做错的一层：
+ *
+ * · `addresses`  = **我该怎么叫他**（主人指定，最高优先级）
+ * · `nicknames`  = **别人怎么叫他**（群名片 / 别人 @ 时平台给的名字）
+ *
+ * 混成一张表，模型就会把「别人叫他老王」当成「我该叫他老王」——rabbit 那边
+ * 专门写了一句「这不一定是你对他的称呼」，就是踩过这个坑。
+ *
+ * **按场景存**：同一人在 A 群是「老王」、在 B 群是「小明」很常见。
+ * rabbit 是「按群存人」所以需要 `addressLocalOnly` 锁 + 两个跨群补丁；
+ * 我方在**人这一行上挂 scope 键**，读时 `addresses[当前会话] ?? addresses['*']`，
+ * 于是「仅本群生效」= 只写 scope、不写 `*`，一个字段就够了。
+ *
+ * 老字段 `alias` 保留为**全局称呼的兜底**——它以前在面板上能填但 `render()`
+ * 完全没读（假功能），从这里起它会真的生效，不需要用户重填。
+ */
+export const ADDRESS_MAX = 24;
+export const NICKNAME_MAX = 24;
+/** 一个人在一个场景里最多记几个别名（群名片会改，留几个常见的就够） */
+export const NICKNAME_PER_SCOPE = 6;
+/** 称呼注入段最多几行——它挤的是 facts 的预算，宁少勿多 */
+export const ADDRESS_LINES_MAX = 6;
+
+/** scope 归一：空 = 全局。用 chatId 本身当键，不另造 id */
+export function scopeOf(chatId) {
+  return String(chatId ?? '').trim() || '*';
+}
+
 /** 按码点截，别把 emoji 的 surrogate pair 切一半（budget.js 的 clipForBudget 同款顾虑） */
 export function clipChars(s, max) {
   const a = Array.from(String(s ?? ''));
   return a.length <= max ? a.join('') : a.slice(0, max).join('');
 }
 
-/** 本地日历日。凌晨 4 点巩固时，UTC 日期还停在昨天，不能用 toISOString() */
-export function dayKey(ts = Date.now()) {
+/**
+ * 人物键归一：档案 key 的比对口径。
+ * 大小写、首尾空白、开头的 `@` 都不算差异——面板传「@小明」和库里存的
+ * 「小明」必须是同一个人，否则设称呼会报"还没有这个人的档案"。
+ */
+const keyOf = (x) => String(x ?? '').trim().toLowerCase().replace(/^@+/, '');
+
+/** 本地日历日。凌晨 4 点巩固时，UTC 日期还停在昨天，不能用 toISOString() */export function dayKey(ts = Date.now()) {
   const d = new Date(ts);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
@@ -125,11 +163,23 @@ export function createProfiles({
   file,
   max = PROFILE_MAX,
   now = () => Date.now(),
+  /** 按人遗忘的权威在 `persons`（`noMemory` 只是镜像），注入/写入都要问它 */
+  isForgotten = null,
   log = () => {},
 } = {}) {
   let rows = null;
   /** { day, value }：同一天的渲染结果冻结，跨天才重算（保 prompt cache） */
   let renderCache = null;
+
+  /** 判一个人是不是已「不再记住」。没注入回调 = 只认本地标记（老行为） */
+  function forgotten(key) {
+    if (!key || typeof isForgotten !== 'function') return false;
+    try {
+      return isForgotten(key) === true;
+    } catch {
+      return false;
+    }
+  }
 
   function save() {
     try {
@@ -153,8 +203,53 @@ export function createProfiles({
     return rows;
   }
 
+  /* ---------------- 称呼映射（addresses / nicknames） ---------------- */
+
+  const mapOf = (row, field) => (row && typeof row[field] === 'object' && row[field] ? row[field] : {});
+
+  /** 这个人在这处我该怎么叫：本场景优先 → 全局 → 老字段 alias 兜底 */
+  function addrOf(row, chatId) {
+    const m = mapOf(row, 'addresses');
+    const own = m[scopeOf(chatId)] ?? m['*'];
+    if (own) return clipChars(String(own).trim(), ADDRESS_MAX);
+    /** `alias` 是旧面板留下的单值字段，以前填了没人读；现在当全局称呼用 */
+    return clipChars(String(row?.alias ?? '').trim(), ADDRESS_MAX);
+  }
+
+  /** 别人怎么叫他：本场景 + 全局合并去重（只用于听懂"别人在说谁"） */
+  function nicksOf(row, chatId) {
+    const m = mapOf(row, 'nicknames');
+    const s = scopeOf(chatId);
+    const list = [
+      ...(Array.isArray(m[s]) ? m[s] : []),
+      ...(Array.isArray(m['*']) ? m['*'] : []),
+    ].map((x) => clipChars(String(x ?? '').trim(), NICKNAME_MAX)).filter(Boolean);
+    return [...new Set(list)];
+  }
+
+  function addressLines(chatId, limit) {
+    const out = [];
+    for (const r of [...load()].reverse()) {
+      if (!r || r.noMemory || forgotten(r.key)) continue;
+      const label = clipChars(String(r.name || r.key || '').trim(), ADDRESS_MAX);
+      /** 拿不到人类可读名字就不进这段：把 openid 塞给模型既浪费又没意义 */
+      if (!label || label.length > 16) continue;
+      const addr = addrOf(r, chatId);
+      const nicks = nicksOf(r, chatId).filter((n) => n !== addr && n !== label);
+      if (!addr && !nicks.length) continue;
+      const parts = [];
+      if (addr) parts.push(`叫他「${addr}」`);
+      if (nicks.length) parts.push(`别人也说${nicks.slice(0, 3).map((n) => `「${n}」`).join('、')}`);
+      out.push(`· ${label}：${parts.join('；')}`);
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
   function render(limit) {
-    const list = load().filter((r) => r.impression || r.tips || r.dislikes || r.style || r.persona);
+    /** `noMemory` 的人在档案段一律不注入，哪怕旧数据里还留着正文字段 */
+    const list = load().filter((r) => !r.noMemory && !forgotten(r.key)
+      && (r.impression || r.tips || r.dislikes || r.style || r.persona));
     const picked = limit > 0 ? list.slice(-limit).reverse() : [...list].reverse();
     if (!picked.length) return '';
     const lines = picked.map((r) => {
@@ -191,16 +286,26 @@ export function createProfiles({
       const name = clipChars(String(who || openid || key).trim(), 24) || key;
       const cur = all.find((r) => r.key === key);
       if (cur) {
+        /** 不再记住的人：模型继续提炼也别再写回档案（面板标记优先） */
+        if (cur.noMemory || forgotten(key)) return 0;
+        /**
+         * 主人手填的字段不再被模型提炼冲掉（对齐 aurabot #604 的 ownerFields）。
+         * 锁的是「字段」而不是「值」：主人清空某字段等于交还给自动印象，
+         * 下次巩固就能重新写。老数据没有 ownerFields 字段时全部照旧。
+         */
+        const manual = new Set(Array.isArray(cur.ownerFields) ? cur.ownerFields : []);
         cur.name = name || cur.name;
-        cur.impression = accumulate(cur.impression, impression, IMPRESSION_MAX);
-        cur.tips = accumulate(cur.tips, tips, TIPS_MAX);
+        if (!manual.has('impression')) cur.impression = accumulate(cur.impression, impression, IMPRESSION_MAX);
+        if (!manual.has('tips')) cur.tips = accumulate(cur.tips, tips, TIPS_MAX);
         /** E4：只有真的提炼到讨厌项才写，空串不覆盖已有的 */
-        if (bad) cur.dislikes = accumulate(cur.dislikes, dislikes, DISLIKES_MAX);
-        if (sty) cur.style = accumulate(cur.style || '', style, STYLE_MAX);
-        if (per) cur.persona = accumulate(cur.persona || '', persona, PERSONA_MAX);
+        if (bad && !manual.has('dislikes')) cur.dislikes = accumulate(cur.dislikes, dislikes, DISLIKES_MAX);
+        if (sty && !manual.has('style')) cur.style = accumulate(cur.style || '', style, STYLE_MAX);
+        if (per && !manual.has('persona')) cur.persona = accumulate(cur.persona || '', persona, PERSONA_MAX);
         cur.at = now();
         cur.hits = Number(cur.hits || 0) + 1;
       } else {
+        /** 已遗忘的人不新建档案——否则巩固一次就长出半条，第二天又注入了 */
+        if (forgotten(key)) return 0;
         all.push({ key, name, impression: imp, tips: tip, dislikes: bad, style: sty, persona: per, at: now(), hits: 1 });
       }
       if (all.length > max) all.splice(0, all.length - max);
@@ -241,9 +346,11 @@ export function createProfiles({
     },
 
     /**
-     * 人物墙人工编辑（对齐 aurabot /persona/person/save）。
+     * 人物墙人工编辑（对齐 aurabot /persona/person/save 与 #604 ownerFields）。
      * 只覆盖 patch 里显式给的字段，模型提炼的其余字段原样留着；
      * 用户主动改 → 当场作废当日渲染缓存（隐私优先于 prompt cache）。
+     * 手工填过的字段记进 ownerFields，后续 note() 不再自动覆盖；
+     * 清空某字段（传空串）＝交还给自动印象，从 ownerFields 里移除。
      * @returns {{ok:boolean, message:string}}
      */
     edit(key, patch = {}, { isOwner = false } = {}) {
@@ -256,6 +363,7 @@ export function createProfiles({
       const fields = ['alias', 'impression', 'tips', 'dislikes', 'style', 'persona'];
       const has = (f) => Object.prototype.hasOwnProperty.call(patch, f);
       if (!fields.some(has) && !has('tags') && !has('name')) return { ok: false, message: '没有要保存的内容' };
+      const manual = new Set(Array.isArray(row.ownerFields) ? row.ownerFields : []);
       let tags;
       if (has('tags')) {
         const r = normalizePersonTags(patch.tags, { isOwner });
@@ -273,23 +381,109 @@ export function createProfiles({
         const v = clipChars(String(patch[f] ?? '').trim(), max);
         if (f === 'impression' || f === 'tips' || f === 'dislikes') row[f] = accumulate('', v, max);
         else row[f] = v;
+        /** 填了就锁住，清空就交还自动提炼；alias 不参与模型写入，记了也无害 */
+        if (v) manual.add(f);
+        else manual.delete(f);
       }
       if (has('name')) row.name = clipChars(String(patch.name ?? '').trim(), 24) || row.name;
       if (tags !== undefined) { row.tags = tags; row.tagsBy = 'owner'; }
+      if (manual.size) row.ownerFields = [...manual];
+      else delete row.ownerFields;
       row.at = now();
       renderCache = null;
       save();
       return { ok: true, message: '人物印象已保存' };
     },
 
-    /** 不再记住某人：面板开关，只标记不删档案（撤回来还在） */
+    /**
+     * 称呼注入段（T3）。
+     *
+     * **不能塞进档案段**：`render()` 按日历日冻结（保 prompt cache），
+     * 而称呼是"跟着当前会话走"的——同一个她，在 A 群叫老王、B 群叫小明，
+     * 混进日缓存就会串群。所以单独一段、每轮现算。
+     *
+     * 没有内容就返回空串：不占 token，且与升级前逐字节一致。
+     */
+    addressText({ chatId = '', limit = ADDRESS_LINES_MAX } = {}) {
+      const lines = addressLines(chatId, limit);
+      if (!lines.length) return '';
+      return `【怎么称呼他们】\n${lines.join('\n')}\n（「叫他」是你开口时的叫法；「别人也说」只用来听懂别人在说谁，不是让你也这么叫。）`;
+    },
+
+    /**
+     * 设定「我该怎么叫他」：scope 给 chatId 就是只在这个场景生效，
+     * 不给（'*'）就是全局。清空格值 = 删掉这个场景的称呼。
+     */
+    setAddress(key, value, { scope = '*' } = {}) {
+      const k = keyOf(key);
+      if (!k) return { ok: false, message: '缺人物 key' };
+      const row = load().find((r) => keyOf(r.key) === k);
+      if (!row) return { ok: false, message: '还没有这个人的档案' };
+      const s = scopeOf(scope === '*' ? '' : scope);
+      const v = clipChars(String(value ?? '').trim(), ADDRESS_MAX);
+      const m = { ...mapOf(row, 'addresses') };
+      if (v) m[s] = v;
+      else delete m[s];
+      if (Object.keys(m).length) row.addresses = m;
+      else delete row.addresses;
+      /**
+       * 不再往 `alias` 里写：它只是读时的兜底，写进去就成了两处真相，
+       * 面板改了地址而 alias 还是旧的，排查时不知道该信哪个。
+       */
+      row.at = now();
+      renderCache = null;
+      save();
+      return { ok: true, message: v ? '称呼已记下' : '已清掉这个称呼', scope: s };
+    },
+
+    /**
+     * 记一条「别人怎么叫他」（T2）：来源是平台给的 `mentions[].username`，
+     * 也就是别人 @ 他那一刻的群名片——最可靠的别名，不是模型猜的。
+     *
+     * 只增不覆盖，且只认**已经存在档案**的人：没有档案说明还没聊过，
+     * 为一条 @ 就给他建半条空档案，人物墙会被灌满噪音。
+     * @returns {boolean} 是否真的新增了一条（false = 重复/没人/被遗忘）
+     */
+    addNickname(key, name, { scope = '' } = {}) {
+      const k = keyOf(key);
+      const n = clipChars(String(name ?? '').trim(), NICKNAME_MAX);
+      if (!k || !n) return false;
+      const row = load().find((r) => keyOf(r.key) === k);
+      if (!row || row.noMemory || forgotten(row.key)) return false;
+      const s = scopeOf(scope);
+      const m = { ...mapOf(row, 'nicknames') };
+      const list = Array.isArray(m[s]) ? [...m[s]] : [];
+      if (list.includes(n)) return false;
+      list.push(n);
+      m[s] = list.slice(-NICKNAME_PER_SCOPE);
+      row.nicknames = m;
+      save();
+      return true;
+    },
+
+    /**
+     * 不再记住某人（对齐 aurabot setNoMemory + deleteExisting 的轻量版）。
+     *
+     * 打开：当场清掉档案正文（印象/相处/雷区/风格/性格/标签/ownerFields），
+     * 只留 key + noMemory 标记——档案段当天就不再注入这个人（render 过滤）。
+     * 日记/facts 是纯文本、没有「关于谁」的结构字段，物理删除要动数据模型，
+     * 这一档不做；撤回标记后旧日记仍会被正常想起（对应用户目的「不再记住」优先）。
+     * 关闭：只撤标记，正文已经清掉，不会自动长回来（下次巩固重新提炼）。
+     */
     setNoMemory(key, enabled = true) {
       const k = String(key ?? '').trim().toLowerCase();
       if (!k) return false;
       const row = load().find((r) => String(r.key ?? '').trim().toLowerCase() === k);
       if (!row) return false;
-      if (enabled) row.noMemory = true;
-      else delete row.noMemory;
+      if (enabled) {
+        row.noMemory = true;
+        /** 称呼/别名一起清：既然"不再记住"，就没人该被称呼了 */
+        for (const f of ['impression', 'tips', 'dislikes', 'style', 'persona', 'alias', 'tags', 'tagsBy', 'ownerFields', 'addresses', 'nicknames']) {
+          delete row[f];
+        }
+      } else {
+        delete row.noMemory;
+      }
       renderCache = null;
       save();
       return true;
@@ -310,6 +504,16 @@ export function createProfiles({
       renderCache = null;
       save();
       return true;
+    },
+
+    /**
+     * 只作废当日渲染缓存，**不动数据**。
+     *
+     * 给「按人遗忘」用：档案段按天冻结（保 prompt cache），但用户点了
+     * 「不再记住」，那一秒就必须生效——等到明天才不提他，等于没做。
+     */
+    invalidate() {
+      renderCache = null;
     },
 
     /** 独立清空入口（契约 §3④）；隐私优先，当场作废渲染缓存 */

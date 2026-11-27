@@ -51,6 +51,7 @@ async function boot() {
     quick: (op, arg) => call('/roost/api/quick', { viaExt: '@panel', op, arg }),
     call,
     profiles: () => JSON.parse(readFileSync(join(data, 'profiles.json'), 'utf8')),
+    persons: () => { try { return JSON.parse(readFileSync(join(data, 'persons.json'), 'utf8')); } catch { return { persons: {} }; } },
     done: () => {
       for (const c of cleanups) { try { c(); } catch {} }
       if (oldEnv === undefined) delete process.env.DSH_ROOST_DATA;
@@ -82,15 +83,19 @@ test('quick(persona.edit) 标签护栏端到端生效', async () => {
   } finally { b.done(); }
 });
 
-test('quick(persona.noMemory) 真 host 跑通：标记与撤销', async () => {
+test('quick(persona.noMemory) 真 host 跑通：标记与撤销（权威在 persons，档案正文不动）', async () => {
   const b = await boot();
   try {
     let r = await b.quick('persona.noMemory', { key: 'u123', enabled: true });
     assert.equal(r.ok, true);
-    assert.equal(b.profiles()[0].noMemory, true);
+    /** 新语义：默认 unlink 只断链，档案正文一个字都不删（可恢复） */
+    assert.equal(b.persons().persons['u123']?.noMemory, true, 'persons 里立了标记');
+    assert.equal(b.profiles()[0].impression, '爱打球', '断链不擦除：正文还在');
+
     r = await b.quick('persona.noMemory', { key: 'u123', enabled: false });
     assert.equal(r.ok, true);
-    assert.equal(b.profiles()[0].noMemory, undefined);
+    /** 撤回后标记不再为 true（空壳记录会被清掉，所以不能断言 === false） */
+    assert.notEqual(b.persons().persons['u123']?.noMemory, true, '撤回后标记清掉');
   } finally { b.done(); }
 });
 
@@ -141,5 +146,35 @@ test('G7：/person 详情带出 style/persona（真 host）', async () => {
     assert.equal(r.ok !== false, true, r.message || '详情失败');
     assert.equal(r.person.style, '说话直');
     assert.equal(r.person.persona, '急性子');
+  } finally { b.done(); }
+});
+
+test('quick(persona.address)：按场景写称呼，清空即删', async () => {
+  const b = await boot();
+  try {
+    /** 全局 */
+    let r = await b.quick('persona.address', { key: 'u123', value: '小明' });
+    assert.equal(r.ok, true, r.message);
+    /** 本群 */
+    r = await b.quick('persona.address', { key: 'u123', scope: 'group:G1', value: '老王' });
+    assert.equal(r.ok, true, r.message);
+
+    let row = b.profiles()[0];
+    assert.deepEqual(row.addresses, { '*': '小明', 'group:G1': '老王' });
+
+    /** 清掉本群那条：不是写空串，是真删键 */
+    r = await b.quick('persona.address', { key: 'u123', scope: 'group:G1', value: '' });
+    assert.equal(r.ok, true);
+    row = b.profiles()[0];
+    assert.deepEqual(row.addresses, { '*': '小明' }, '本群那条要真删掉');
+  } finally { b.done(); }
+});
+
+test('quick(persona.address)：没有档案的人返回 400（不建半条空档案）', async () => {
+  const b = await boot();
+  try {
+    const r = await b.quick('persona.address', { key: 'nobody', value: '老王' });
+    assert.equal(r.ok, false);
+    assert.equal(b.profiles().length, 1, '不能为一次设称呼建空档案');
   } finally { b.done(); }
 });

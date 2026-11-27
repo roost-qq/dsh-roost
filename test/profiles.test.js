@@ -172,6 +172,67 @@ test('E4 画像雷区：dislikes 单独成字段、渲染标"别踩"、空串不
   assert.equal(p.recent(10).find((r) => r.key === 'o1').dislikes, '别叫他小名', '空串不覆盖');
 });
 
+test('不再记住某人：当天从注入里消失，正文清空，模型不再写回', (t) => {
+  const { file } = fresh(t);
+  const p = createProfiles({ file });
+  p.note({ who: '小明', openid: 'o1', impression: '爱聊游戏', tips: '直接点', dislikes: '别叫小名' });
+  assert.ok(p.text({ enabled: true, day: DAY }).includes('小明'), '原先会注入');
+  assert.equal(p.setNoMemory('o1', true), true);
+  assert.equal(p.text({ enabled: true, day: DAY }), '', '当天就不再注入这个人');
+  const row = p.recent(10).find((x) => x.key === 'o1');
+  assert.equal(row.noMemory, true, '保留标记便于面板回显');
+  for (const f of ['impression', 'tips', 'dislikes', 'style', 'persona', 'tags', 'ownerFields']) {
+    assert.equal(row[f], undefined, `${f} 已清掉`);
+  }
+  p.note({ who: '小明', openid: 'o1', impression: '最近迷上篮球' });
+  assert.equal(p.recent(10).find((x) => x.key === 'o1').impression, undefined, '模型不能写回');
+  /** 撤回标记：正文不会自己长回来，等下次巩固重新提炼 */
+  assert.equal(p.setNoMemory('o1', false), true);
+  assert.equal(p.recent(10).find((x) => x.key === 'o1').impression, undefined);
+  p.note({ who: '小明', openid: 'o1', impression: '重新认识他' });
+  assert.equal(p.recent(10).find((x) => x.key === 'o1').impression, '重新认识他', '恢复后能重新写');
+});
+
+test('ownerFields：主人手填的字段不被每天巩固的模型结果冲掉', (t) => {
+  const { file } = fresh(t);
+  const p = createProfiles({ file });
+  p.note({ who: '小明', openid: 'o1', impression: '爱聊游戏', tips: '直接点' });
+  const r = p.edit('o1', { impression: '他其实不爱玩游戏', style: '慢条斯理' });
+  assert.equal(r.ok, true, r.message);
+  const locked = p.recent(10).find((x) => x.key === 'o1');
+  assert.deepEqual(locked.ownerFields.sort(), ['impression', 'style'], '填了的字段记成手写');
+  /** 模型连续提炼三天，锁住的字段纹丝不动，没锁的照常更新 */
+  for (const imp of ['喜欢篮球', '喜欢足球', '爱看球赛']) {
+    p.note({ who: '小明', openid: 'o1', impression: imp, tips: '先给结论', style: '快人快语', persona: '外向' });
+  }
+  const after = p.recent(10).find((x) => x.key === 'o1');
+  assert.equal(after.impression, '他其实不爱玩游戏', '手填印象不被冲掉');
+  assert.equal(after.style, '慢条斯理', '手填说话方式不被冲掉');
+  assert.equal(after.tips, '直接点；先给结论', '没锁的字段继续自动追加');
+  assert.equal(after.persona, '外向', '没锁的新字段照常写入');
+});
+
+test('ownerFields：清空字段＝交还自动印象，下次巩固能重新写', (t) => {
+  const { file } = fresh(t);
+  const p = createProfiles({ file });
+  p.note({ who: '小明', openid: 'o1', impression: '爱聊游戏' });
+  p.edit('o1', { impression: '他其实不爱玩游戏' });
+  assert.equal(p.recent(10).find((x) => x.key === 'o1').impression, '他其实不爱玩游戏');
+  p.edit('o1', { impression: '' });
+  assert.ok(!p.recent(10).find((x) => x.key === 'o1').ownerFields?.includes('impression'), '交还后不再锁');
+  p.note({ who: '小明', openid: 'o1', impression: '最近迷上篮球' });
+  assert.equal(p.recent(10).find((x) => x.key === 'o1').impression, '最近迷上篮球', '清空后自动能写');
+});
+
+test('ownerFields：老档案没有这个字段时行为跟从前一样', (t) => {
+  const { file } = fresh(t);
+  const p = createProfiles({ file });
+  p.note({ who: '小明', openid: 'o1', impression: '爱聊游戏' });
+  delete p.recent(10).find((x) => x.key === 'o1').ownerFields;
+  p.note({ who: '小明', openid: 'o1', impression: '喜欢篮球' });
+  assert.equal(p.recent(10).find((x) => x.key === 'o1').impression, '爱聊游戏；喜欢篮球', '老数据照常追加');
+});
+
 test('E4 雷区可单独撤销：清 dislikes 保留印象/相处', (t) => {
   const { file } = fresh(t);
   const p = createProfiles({ file });

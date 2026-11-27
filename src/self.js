@@ -71,9 +71,19 @@ const dayOf = (ts) => {
 
 const mmdd = (day) => String(day || '').slice(5);
 
-export function createSelf({ log = () => {}, now = () => Date.now() } = {}) {
+export function createSelf({ log = () => {}, now = () => Date.now(), hideText = null } = {}) {
   const file = () => join(dataDir(), 'self.json');
   let cache = null;
+
+  /** 这一句还能不能注入（按人遗忘：已遗忘的人名出现在自述里就不给） */
+  function hidden(text) {
+    if (typeof hideText !== 'function') return false;
+    try {
+      return hideText(text) === true;
+    } catch {
+      return false;
+    }
+  }
 
   function load() {
     if (cache) return cache;
@@ -175,7 +185,12 @@ export function createSelf({ log = () => {}, now = () => Date.now() } = {}) {
     text(n = 3) {
       const m = load();
       const k = Math.max(1, Number(n) || 3);
-      const notes = m.notes.slice(-k);
+      /**
+       * 自述是自由文本，可能写着「和小明聊得很来」。按人遗忘之后还把它注入，
+       * 就是「档案清了她还是知道这个人」。这里只**不注入**含已遗忘名字的那几条，
+       * 原文一律不动（断链不擦除，撤回后原样回来）。
+       */
+      const notes = m.notes.filter((x) => !hidden(x.text)).slice(-k);
       if (!notes.length) return '';
       return [
         '【你自己最近写下的】（这些是你自己写的，不是别人对你的评价）',

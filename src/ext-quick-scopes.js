@@ -147,6 +147,8 @@ export const OP_SCOPE = Object.freeze({
   /** 阶段6：人物墙人工编辑/不再记住——改的是档案，归 prompt:write */
   'persona.edit': 'prompt:write',
   'persona.noMemory': 'prompt:write',
+  /** 称呼（T4）：改的是档案里按场景的称呼表，同样属于提示词可见内容 */
+  'persona.address': 'prompt:write',
   /** 阶段7：群印象档案读写，改的是独立档案文件，归 prompt:write */
   'chatprofile.save': 'prompt:write',
   'chatprofile.clear': 'prompt:write',

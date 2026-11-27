@@ -178,6 +178,27 @@ export function l3Candidates(rows, { maxRows = 12 } = {}) {
   return { ids: high.map((r) => r.id), before, lines };
 }
 
+/**
+ * 模型抽出来的「废话条目」：她对自己能力的元评论、模糊的自我性格评价。
+ *
+ * 为什么只拦这两类，且必须**以「我/她」开头**：
+ * `我有点社恐` 记下来只会让她照着演；但 `主人有点社恐` 是**关于主人的有用事实**，
+ * 一起拦掉就是误伤。这条线划在"说的是谁"上，不划在词上。
+ *
+ * 三条都不碰显式入口：`<<remember>>`、面板手记是用户明确要求记的，
+ * 哪怕内容像自我评价也必须记——用户的意思优先于启发式。
+ */
+const SELF_META_RE = /^(?:我|她)(?:会|能|可以|一直|都|总是)?\s*(?:帮你|为你|替你)?\s*(?:记住|记着|记得|提醒|保存|记录下来)/;
+const SELF_MEMORY_RE = /^(?:我|她)的?记忆(?:力)?/;
+const SELF_TRAIT_RE = /^(?:我|她)(?:有点|有些|比较|很|特别|稍微|总是|好像)?\s*(?:社恐|社牛|内向|外向|慢热|敏感|emo|话痨|高冷|健忘|怕生|不擅长聊天)/;
+
+/** 纯函数，便于测边界；`true` = 不该进长期事实 */
+export function isNoiseFact(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  return SELF_META_RE.test(t) || SELF_MEMORY_RE.test(t) || SELF_TRAIT_RE.test(t);
+}
+
 /** 拼提示词 */
 /** 旧事实进 prompt 的上限（D6）：多了既烧 token，又让模型挑花眼 */
 export const MAX_PROMPT_FACTS = 10;
@@ -190,7 +211,14 @@ export const MAX_PROMPT_FACTS = 10;
  * 就让模型去「作废某条旧约定」，等于给它一张空白支票。
  */
 export function normalizeAgreement(raw) {
-  if (typeof raw === 'string') return { text: raw.trim(), op: 'add', old: '', status: 'fact' };
+  /**
+   * 老格式（纯字符串）走的是**提前返回**，不经过下面的检查链——
+   * 噪声过滤必须在这里也过一遍，否则老盘上的输出照样能把「我有点社恐」写进事实。
+   */
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    return { text: isNoiseFact(t) ? '' : t, op: 'add', old: '', status: 'fact' };
+  }
   const o = raw && typeof raw === 'object' ? raw : {};
   const text = String(o.text ?? '').trim();
   const want = String(o.op ?? '').toLowerCase();
@@ -205,6 +233,11 @@ export function normalizeAgreement(raw) {
    */
   const status = String(o.status ?? '').toLowerCase() === 'hearsay' ? 'hearsay' : 'fact';
   if (!text) return { text: '', op: 'add', old: '', status: 'fact' };
+  /**
+   * 元评论 / 自我性格评价不进长期事实。返回空 text，调用方 (`if (!item.text) continue`)
+   * 会静默跳过——**不新增输出字段**，巩固的输出形状与升级前一致。
+   */
+  if (isNoiseFact(text)) return { text: '', op: 'add', old: '', status: 'fact' };
   if (!old && op !== 'add') return { text, op: 'add', old: '', status, degraded: '缺 old 定位词' };
   /**
    * 待跟进（可选）：约定带一个「该问结果」的时点。
@@ -1125,6 +1158,48 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
     /** 过期压缩（宿主每 10 分钟调一次，和按天巩固解耦） */
     compressDue,
     dueDay,
+    /**
+     * 待整理进度（面板「还有多少没整理」）。
+     *
+     * 判据和 `dueDay()` **完全一致**：这一天这个会话有没有 `day:<day>:<chat>`
+     * 摘要行。不复用另一套口径——两处判据一旦不同，面板说"整理完了"而定时器
+     * 还在跑（或者反过来），用户会以为功能坏了。
+     *
+     * 只回**没整理**的：已整理的不列，避免用户看到一屏绿勾还以为有事要做。
+     * 按天倒序查询（最多 90 天），每次请求几十条索引查询，面板点开才算。
+     */
+    backlog({ days = 14, at = now() } = {}) {
+      const n = Math.max(1, Math.min(90, Number(days) || 14));
+      const items = [];
+      let rows = 0;
+      for (let i = 1; i <= n; i += 1) {
+        const day = dayOf(at - i * 86_400_000);
+        const list = journal.byDay(day);
+        if (!list.length) continue;
+        /** 按会话分组：一个群的缺口不能因为另一个群整理过就被算成已完成 */
+        const byChat = new Map();
+        for (const r of list) {
+          const cid = String(r.chatId || '');
+          byChat.set(cid, (byChat.get(cid) || 0) + 1);
+        }
+        for (const [cid, cnt] of byChat) {
+          if (done(day, cid)) continue;
+          items.push({ day, chatId: cid, rows: cnt });
+          rows += cnt;
+        }
+      }
+      return {
+        ok: true,
+        scannedDays: n,
+        /** 有几个「天 × 会话」没整理 */
+        pending: items.length,
+        /** 一共积压多少条日记 */
+        rows,
+        oldest: items.length ? items[items.length - 1].day : '',
+        newest: items.length ? items[0].day : '',
+        items: items.slice(0, 20),
+      };
+    },
     done,
     status: () => last,
     /** 供测试注入假时钟 */

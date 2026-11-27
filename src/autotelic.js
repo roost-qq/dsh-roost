@@ -368,6 +368,11 @@ export function createAutotelic({
    */
   planner = null,
   /**
+   * 按人遗忘（可选注入）：`hideText(text) === true` 的观察不进决策。
+   * 闭包延迟取值——宿主里 `forgetFilter` 比 autotelic 建得晚。
+   */
+  hideText = null,
+  /**
    * 行动单执行器（阶段 4，可选注入）：{ execute(ticket) } = createExecV5 实例。
    * 不注入就没有 execute() 能力，老调用方零影响。
    */
@@ -729,7 +734,16 @@ export function createAutotelic({
        * 注意传的是 `tag` 不是 `source`：抑制表按 tag 记（「别再刷B站」抑制的是「B站」这类 tag），
        * 传 source（'ledger'/'observe'）永远匹配不上，抑制等于没生效。
        */
-      .filter((o) => !feedback || typeof feedback.weightOf !== 'function' || feedback.weightOf(o.tag || o.source) > 0);
+      .filter((o) => !feedback || typeof feedback.weightOf !== 'function' || feedback.weightOf(o.tag || o.source) > 0)
+      /**
+       * 按人遗忘：观察里提到已遗忘的人就当没看见。
+       * 不过滤的话，她自驱时会一直围绕那个人立项（「问问他考试怎么样」），
+       * 而这个决定**不进任何注入段**，用户只能从她的主动消息里发现。
+       */
+      .filter((o) => {
+        if (typeof hideText !== 'function') return true;
+        try { return hideText(o.text) !== true; } catch { return true; }
+      });
     const r = await planner.decideRound({
       round,
       persona: { summary: '', instinctExtra: '' },

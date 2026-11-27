@@ -6737,6 +6737,20 @@ window.__ModuleLoader__.load({
                 reload()
               },
             }, '手动跑一次巩固'),
+            /**
+             * 待整理进度：判据与定时器同源（那天那个会话有没有摘要行），
+             * 所以面板说"还剩 3 天"就是定时器真会去跑的那几天，不会自说自话。
+             */
+            h('button', {
+              type: 'button', className: 'roost-btn',
+              onClick: async () => {
+                const r = await get('/memory/backlog')
+                if (r?.ok === false) return toast(r.message || '读不到待整理进度')
+                toast(r.pending
+                  ? `还有 ${r.pending} 个「天 × 会话」没整理（共 ${r.rows} 条日记，最早 ${r.oldest}）`
+                  : `最近 ${r.scannedDays} 天都整理完了`)
+              },
+            }, '看还有多少没整理'),
             h('div', { className: 'roost-note', style: { margin: 0, alignSelf: 'center' } },
               '平时每天凌晨自动跑（错过会补）'),
           ),
@@ -8250,6 +8264,24 @@ window.__ModuleLoader__.load({
       const [chatEditId, setChatEditId] = useState('')
       const [chatEditForm, setChatEditForm] = useState(null)
       const [chatEditBusy, setChatEditBusy] = useState(false)
+      /**
+       * 按人遗忘（三档）+ 待确认别名。
+       *
+       * 数据来自新接口 `/person/forgotten` 与 `/person/alias/pending`：
+       * 与 `mem.profiles` 分开取，因为这两个是**低频变更的状态**，
+       * 不该跟着记忆刷新一起重拉。
+       */
+      const [forgotten, setForgotten] = useState(null)
+      const [aliasQueue, setAliasQueue] = useState(null)
+      const [forgetBusy, setForgetBusy] = useState('')
+      const loadForgetState = async () => {
+        try {
+          const [a, b] = await Promise.all([get('/person/forgotten'), get('/person/alias/pending')])
+          if (a?.ok) setForgotten(a)
+          if (b?.ok) setAliasQueue(b.items || [])
+        } catch { /* 读不到就空着，别把整页带崩 */ }
+      }
+      useEffect(() => { loadForgetState() }, [])
       const saveChatProfile = async (chatId) => {
         if (!chatEditForm) return
         setChatEditBusy(true)
@@ -8276,9 +8308,20 @@ window.__ModuleLoader__.load({
       const [editBusy, setEditBusy] = useState(false)
       const [editTagInput, setEditTagInput] = useState('')
       const startEdit = (p) => {
+        /**
+         * 称呼是**按场景**存的（`addresses[chatId]`，`'*'` 是通用），
+         * 所以编辑时需要"当前在改哪个场景"。默认取他已经设过的第一个场景，
+         * 没有就取第一个群——避免让用户手填 chatId。
+         */
+        const addrMap = p?.addresses && typeof p.addresses === 'object' ? p.addresses : {}
+        const scopes = Object.keys(addrMap).filter((s) => s && s !== '*')
+        const first = scopes[0] || (chatProfiles[0]?.chatId || '')
         setEditForm({
           name: p?.name || '',
-          alias: p?.alias || '',
+          /** 通用称呼：新表优先，老 `alias` 兜底（老数据就存在那儿） */
+          address: addrMap['*'] || p?.alias || '',
+          addressScope: first,
+          addressLocal: first ? (addrMap[first] || '') : '',
           impression: p?.impression || '',
           style: p?.style || '',
           persona: p?.persona || '',
@@ -8293,7 +8336,15 @@ window.__ModuleLoader__.load({
         setEditBusy(true)
         try {
           const key = picked.key || picked.name
-          const r = await quick('persona.edit', { key, patch: editForm })
+          /** 称呼单独走 `persona.address`（按场景的键值），不混进档案 patch */
+          const { address, addressScope, addressLocal, ...patch } = editForm
+          const r = await quick('persona.edit', { key, patch })
+          if (r?.ok !== false) {
+            await quick('persona.address', { key, scope: '*', value: String(address || '').trim() })
+            if (addressScope) {
+              await quick('persona.address', { key, scope: addressScope, value: String(addressLocal || '').trim() })
+            }
+          }
           toast(r?.message || (r?.ok ? '已保存' : '没存上'), r?.ok === false ? 'err' : 'ok')
           if (r?.ok !== false) {
             setEditForm(null)
@@ -8307,7 +8358,31 @@ window.__ModuleLoader__.load({
         const key = picked.key || picked.name
         const r = await quick('persona.noMemory', { key, enabled: !on })
         toast(r?.message || '已更新', r?.ok === false ? 'err' : 'ok')
-        if (r?.ok !== false) { await openPerson(picked); if (reload) reload() }
+        if (r?.ok !== false) { await openPerson(picked); await loadForgetState(); if (reload) reload() }
+      }
+      /**
+       * 归档 / 彻底遗忘：先看影响面、再确认。
+       *
+       * 为什么不直接调：`hard` 不可恢复（正文抹掉、事实删除），
+       * 而用户点按钮时并不知道会动多少条。所以先拿 `/person/forget/plan`
+       * 的计数摆在确认框里，看清楚再点。
+       */
+      const forgetAs = async (mode) => {
+        if (!picked) return
+        const key = picked.key || picked.name
+        setForgetBusy('mode')
+        try {
+          let plan = null
+          try { plan = await get('/person/forget/plan?id=' + encodeURIComponent(key)) } catch { plan = null }
+          const tail = plan?.message ? ('\n影响面：' + plan.message) : ''
+          const ask = mode === 'hard'
+            ? '彻底遗忘不可恢复：日记正文会被抹掉，关于他的事实会被删除。' + tail + '\n\n继续？'
+            : '会把这个人当前的状态归档一份快照（留档核对用），然后不再提起他；数据仍然不删，随时可以「恢复记住」。' + tail + '\n\n继续？'
+          if (!globalThis.confirm(ask)) return
+          const r = await post('/person/forget', { id: key, mode, confirm: mode === 'hard' })
+          toast(r?.message || '已处理', r?.ok === false ? 'err' : 'ok')
+          if (r?.ok !== false) { await openPerson(picked); await loadForgetState(); if (reload) reload() }
+        } finally { setForgetBusy('') }
       }
       const stateWordOf = (at) => {
         if (!at) return '没记过时间'
@@ -8416,8 +8491,47 @@ window.__ModuleLoader__.load({
                           ),
                           editForm
                             ? h('div', null,
+                                /**
+                                 * 称呼（T4）：两栏分开——「通用」写 `addresses['*']`，
+                                 * 「这个群」写 `addresses[选中的群]`。
+                                 * 以前只有一个 `alias` 输入框，而且 `render()` 根本不读它，
+                                 * 填了等于没填；现在两栏都真的进注入，且互不串群。
+                                 */
+                                h('label', { style: { display: 'block', marginBottom: 6, fontSize: 12 } }, '称呼（通用）',
+                                  h('input', {
+                                    className: 'roost-input', value: editForm.address || '',
+                                    placeholder: '你平时怎么叫他',
+                                    style: { display: 'block', width: '100%', marginTop: 2 },
+                                    onChange: (e) => setEditForm({ ...editForm, address: e.target.value }),
+                                  })),
+                                h('label', { style: { display: 'block', marginBottom: 6, fontSize: 12 } }, '这个群里的称呼',
+                                  h('div', { style: { display: 'flex', gap: 4, marginTop: 2 } },
+                                    h(Dropdown, {
+                                      className: 'roost-input',
+                                      style: { width: 'auto', padding: '3px 8px', fontSize: 11.5, flex: '0 0 auto' },
+                                      value: editForm.addressScope || '',
+                                      onChange: (e) => {
+                                        const s = e.target.value
+                                        setEditForm({
+                                          ...editForm,
+                                          addressScope: s,
+                                          /** 切场景时把该场景已存的值带出来，别让人重打一遍 */
+                                          addressLocal: (detail?.person?.addresses?.[s]) || '',
+                                        })
+                                      },
+                                    },
+                                      h('option', { value: '' }, '（不单独设）'),
+                                      (chatProfiles || []).map((c) => h('option', { key: c.chatId, value: c.chatId }, c.name || c.chatId)),
+                                    ),
+                                    h('input', {
+                                      className: 'roost-input', value: editForm.addressLocal || '',
+                                      placeholder: '只在这个群这么叫',
+                                      style: { flex: '1 1 auto', minWidth: 0 },
+                                      onChange: (e) => setEditForm({ ...editForm, addressLocal: e.target.value }),
+                                    }),
+                                  )),
                                 ...[
-                                  ['impression', '印象'], ['alias', '称呼'],
+                                  ['impression', '印象'],
                                   ['persona', '性格'], ['style', '说话方式'],
                                   ['tips', '怎么相处'], ['dislikes', '雷区（别踩）'],
                                 ].map(([k, label]) => h('label', { key: k, style: { display: 'block', marginBottom: 6, fontSize: 12 } },
@@ -8462,12 +8576,37 @@ window.__ModuleLoader__.load({
                                     type: 'checkbox', checked: Boolean(detail.person?.noMemory),
                                     onChange: (e) => toggleNoMemory(e.target.checked),
                                   }),
-                                  '不再记住这个人（撤回来档案还在）'),
+                                  '不再记住这个人（只断链：不再提起他，数据不删，可恢复）'),
+                                h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 } },
+                                  h('button', {
+                                    type: 'button', className: 'roost-btn', disabled: forgetBusy === 'mode',
+                                    onClick: () => forgetAs('archive'),
+                                  }, '归档后遗忘'),
+                                  h('button', {
+                                    type: 'button', className: 'roost-btn',
+                                    style: { color: 'var(--bad)' }, disabled: forgetBusy === 'mode',
+                                    onClick: () => forgetAs('hard'),
+                                  }, '彻底遗忘…')),
                               )
                             : h('div', null,
                                 detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || detail.person?.style || detail.person?.persona || (detail.person?.tags || []).length
                                   ? h('div', { className: 'roost-note' },
-                                      (detail.person.alias ? `称呼：${detail.person.alias}；` : '')
+                                      /**
+                                       * 称呼分两档显示：通用（`addresses['*']`，老数据在 `alias`）
+                                       * + 各群单独的称呼。别名只作展示——它是"别人怎么叫他"，
+                                       * 拿来当自己的称呼就是错的。
+                                       */
+                                      (() => {
+                                        const p = detail.person
+                                        const addr = p.addresses && typeof p.addresses === 'object' ? p.addresses : {}
+                                        const global = addr['*'] || p.alias || ''
+                                        const locals = Object.entries(addr).filter(([s, v]) => s !== '*' && v)
+                                        const nicks = Object.values(p.nicknames && typeof p.nicknames === 'object' ? p.nicknames : {})
+                                          .flat().filter(Boolean)
+                                        return (global ? `称呼：${global}；` : '')
+                                          + (locals.length ? `本群称呼：${locals.map(([, v]) => v).join('、')}；` : '')
+                                          + (nicks.length ? `别人的叫法：${[...new Set(nicks)].join('、')}；` : '')
+                                      })()
                                       + (detail.person.impression || '（没有印象）')
                                       + (detail.person.persona ? `（性格：${detail.person.persona}）` : '')
                                       + (detail.person.style ? `（说话方式：${detail.person.style}）` : '')
@@ -8625,6 +8764,84 @@ window.__ModuleLoader__.load({
                   }, chatEditId === c.chatId ? '收起' : '编辑'),
                 )))
             : h('div', { className: 'roost-empty' }, '还没写下群印象。'),
+        ),
+
+        /**
+         * 遗忘与身份别名（2026-11-27）。
+         *
+         * 为什么单独一节、而不是塞进人物详情的一个勾选框：遗忘是**跨模块**
+         * 动作（身份 / 日记 / 事实 / 档案 / 图谱），点一下到底动了多少东西
+         * 必须能看见；而且「待确认的别名」不属于任何一个人，是全局队列。
+         */
+        h(Sec, { n: '06', title: '遗忘与身份别名' },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '默认「不再记住」只断链：不再提起他、不参与回忆，但数据一个字都不删，随时可恢复。'),
+          h('div', { className: 'roost-diag-h' }, '已遗忘的人'),
+          (forgotten?.items || []).length
+            ? (forgotten.items).map((p) => h('div', {
+                key: p.id, className: 'roost-item',
+                style: { alignItems: 'center', justifyContent: 'space-between' },
+              },
+                h('span', null,
+                  (p.names || []).join('、') || p.id,
+                  h('span', { className: 'd' }, p.at ? ' ' + shortTime(p.at) : '')),
+                h('button', {
+                  type: 'button', className: 'roost-btn', disabled: forgetBusy === p.id,
+                  onClick: async () => {
+                    setForgetBusy(p.id)
+                    try {
+                      const r = await post('/person/forget/restore', { id: p.id })
+                      toast(r?.message || '已恢复', r?.ok === false ? 'err' : 'ok')
+                      await loadForgetState()
+                      if (reload) reload()
+                    } finally { setForgetBusy('') }
+                  },
+                }, '恢复记住')))
+            : h('div', { className: 'roost-empty' }, '还没有人被遗忘。'),
+          h('div', { className: 'roost-diag-h', style: { marginTop: 12 } }, '最近归档'),
+          (forgotten?.archived || []).length
+            ? (forgotten.archived).map((a, i) => h('div', {
+                key: 'ar' + i, className: 'roost-note',
+              }, '· ' + (a.id || '') + '　' + (a.at ? shortTime(a.at) : '')
+                + '　档案 ' + (a.hasProfile ? 1 : 0) + ' 条 / 事实 ' + (a.facts || 0) + ' 条'))
+            : h('div', { className: 'roost-empty' }, '还没有归档。归档只留一份快照（可导出核对），不会删数据。'),
+          h('div', { className: 'roost-diag-h', style: { marginTop: 12 } }, '待确认的别名（模型猜的「显示名 ≈ QQ」，确认后才用于清理老数据）'),
+          (aliasQueue || []).length
+            ? (aliasQueue).map((a) => h('div', {
+                key: a.alias + '|' + a.person, className: 'roost-item',
+                style: { alignItems: 'center', justifyContent: 'space-between' },
+              },
+                h('span', null, a.alias + ' → ' + a.person,
+                  h('span', { className: 'd' }, ' 提到 ' + a.hits + ' 次')),
+                h('span', null,
+                  h('button', {
+                    type: 'button', className: 'roost-btn roost-primary',
+                    onClick: async () => {
+                      const r = await post('/person/alias/confirm', { alias: a.alias, person: a.person })
+                      toast(r?.message || '已确认', r?.ok === false ? 'err' : 'ok')
+                      await loadForgetState()
+                    },
+                  }, '确认'),
+                  h('button', {
+                    type: 'button', className: 'roost-btn', style: { marginLeft: 6 },
+                    onClick: async () => {
+                      await post('/person/alias/ignore', { alias: a.alias, person: a.person })
+                      await loadForgetState()
+                    },
+                  }, '忽略'))))
+            : h('div', { className: 'roost-empty' },
+                '没有待确认的别名。老数据的显示名不会被自动猜成某个人——猜错等于删错人。'),
+          h('div', { style: { marginTop: 10 } },
+            h('button', {
+              type: 'button', className: 'roost-btn', disabled: forgetBusy === 'backfill',
+              onClick: async () => {
+                setForgetBusy('backfill')
+                try {
+                  const r = await post('/person/alias/backfill', {})
+                  toast(r?.message || '已补归属', r?.ok === false ? 'err' : 'ok')
+                } finally { setForgetBusy('') }
+              },
+            }, '用已确认别名补旧数据归属')),
         ),
 
         /** 事实 / 日记 / 召回记录仍只在记忆页：那是「记了什么」，不是「记得谁」 */
@@ -11880,7 +12097,7 @@ window.__ModuleLoader__.load({
        * 与撤回时限说明。这边再画一份就是两份 UI 写同一份 `config.qqTools`，
        * 谁也看不见对方改了什么——所以这里只留一行指路。
        */
-      const SAY = ['qqTools', 'closing', 'sendFile']
+      const SAY = ['qqTools', 'closing', 'sendFile', 'chatDupSimilarity']
       const QUEUE = ['steerInGroup', 'queueMax', 'queueMinBudgetSec']
       /**
        * 兜底：`FEATURE_HOME` 以后新增的 talk 开关如果没被上面两个清单点到名，
