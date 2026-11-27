@@ -321,6 +321,7 @@ import { formGoalHypotheses, goalToCandidate, DEFAULT_DRIVES } from './purpose-e
 import { collectPurposeMaterials, collectBiliMaterials } from './purpose-collect.js';
 import { createPurposeRunner } from './purpose-run.js';
 import { createObserve, createEmotionBridge } from './autotelic-observe.js';
+import { createChatObserveSync } from './chat-observe-sync.js';
 import { createSchedule } from './autotelic-schedule.js';
 import { createBook } from './autotelic-book.js';
 import { evaluatePurposeTick, planNextFire, markPurposeDelivered } from './purpose-schedule.js';
@@ -2936,6 +2937,8 @@ export function apply(ctx) {
   const autotelicObserve = createObserve({
     file: join(dataDir(), 'observations.jsonl'),
   });
+  /** 聊天观察同步器：journal 到后段才建，第一次心跳时惰性注入 */
+  let chatObserveSync = null;
 
   /**
    * 情绪桥（P3 对照补齐）：把心情接进观察层，让她「想事」时看得到自己现在的状态。
@@ -10099,33 +10102,28 @@ export function apply(ctx) {
       /**
        * 观察同步（P1）：把主人最近说的话增量写进 observations.jsonl。
        * 不改消息主流程（那会牵动投递/会话），改成每分钟从 journal 拉一次——
-       * 自驱本身就是分钟级节奏，这点延迟无所谓。已同步过的用「时刻+前 40 字」比对去重。
+       * 自驱本身就是分钟级节奏，这点延迟无所谓。
+       * 去重走 chatObserveSync 的进程内滑动窗口（上限 6 万），不再每轮
+       * 从 observe 取 60 条重建 Set——窗口一超 60 就会整窗重写。
        */
       try {
-        const owner = String(ownerId() || '').trim();
-        if (owner) {
-          const rows = journal.listChat(owner, 20);
-          const seen = new Set(autotelicObserve.list({ limit: 60 }).map((r) => `${r.ts}|${String(r.text || '').slice(0, 40)}`));
-          for (const row of rows) {
-            const role = String(row?.role || '');
-            if (role !== 'user' && role !== 'member' && role !== 'bot') continue;
-            const text = String(row?.text || row?.digest || '').replace(/\s+/g, ' ').trim();
-            if (!text) continue;
-            const at = Number(row?.at) || Date.now();
-            if (seen.has(`${at}|${text.slice(0, 40)}`)) continue;
-            /** 主人纠偏单独走 observeCorrection（最高显著度 + 回调），其余按普通观察 */
-            if (role === 'user' && autotelicObserve.observeCorrection(text, { tag: '牵挂' })) continue;
-            autotelicObserve.append({
-              source: 'chat',
-              tag: role === 'user' ? '牵挂' : role === 'bot' ? '余韵' : '好奇',
-              text,
-              ts: at,
-            });
-          }
-        }
+        /**
+         * 聊天观察同步（aurabot 去重修复）：进程内持久的滑动 seen 集合，
+         * 不再每轮从 observe 只取 60 条重建——窗口一大就整窗重写。
+         * journal 在 apply() 后段才建（4105 行附近），这里惰性注入，避免 TDZ。
+         */
+        chatObserveSync ||= createChatObserveSync({
+          journal,
+          observe: autotelicObserve,
+          ownerId: () => ownerId(),
+          log: (s) => log.warn(s),
+        });
+        chatObserveSync.collect();
+      } catch (e) { log.warn(`观察同步失败：${e?.message || e}`); }
+      try {
         /** 情绪桥（P3）：心情明显偏离中性时写一条观察；内部有一小时节流，不会刷屏 */
         emotionBridge.collect();
-      } catch (e) { log.warn(`观察同步失败：${e?.message || e}`); }
+      } catch (e) { log.warn(`情绪桥失败：${e?.message || e}`); }
       /**
        * 回话/解封扫描（P3）：**必须在 feedback.tick 之前**——
        * tick 会把到期窗口判 ignored，先扫一遍才不会把「主人其实回了」误记成没回。
