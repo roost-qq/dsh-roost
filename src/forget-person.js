@@ -206,6 +206,11 @@ export function createForgetPerson({
         if (display) persons?.see?.(info.id, { name: display });
       } catch { /* 记不住名字不影响主流程 */ }
       try { forgetFilter?.invalidate?.(); } catch { /* 缓存失效失败不拦主流程 */ }
+      /**
+       * 档案段按天冻结（保 prompt cache），但「不再记住」必须**当场**生效：
+       * 不作废缓存的话，同一天里她照样能把这个人说出来，用户会以为没做成。
+       */
+      try { profiles?.invalidate?.(); } catch { /* 同上 */ }
 
       /** ② 日记：unlink 打失效标记 / hard 抹正文，然后同样打标记 */
       try {
@@ -309,6 +314,7 @@ export function createForgetPerson({
         log(`撤销标记失败：${e.message}`);
       }
       try { forgetFilter?.invalidate?.(); } catch { /* 同上 */ }
+      try { profiles?.invalidate?.(); } catch { /* 恢复也要当场生效 */ }
       try {
         audit?.({ op: 'person.forget.restore', peer, peerId: info.id, note: `journal=${back}` });
       } catch { /* 审计失败不影响操作 */ }

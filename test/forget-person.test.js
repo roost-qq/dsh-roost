@@ -154,6 +154,16 @@ test('count 模式只数不改：预览不能有副作用', (t) => {
   assert.equal(persons.remembers('10001'), true, '预览不标遗忘');
 });
 
+test('档案：同一天里点完**立刻**生效（按天冻结的渲染缓存必须作废）', (t) => {
+  const { fp, profiles } = rig(t);
+  /** 先渲染一次把当日缓存坐实 */
+  assert.match(profiles.text({ day: '2026-11-27' }), /小明/);
+  fp.run('10001', { mode: 'unlink' });
+  assert.equal(profiles.text({ day: '2026-11-27' }), '', '同一天也要当场不提他，否则等于没做');
+  fp.restore('10001');
+  assert.match(profiles.text({ day: '2026-11-27' }), /小明/, '撤回后当场复活');
+});
+
 test('没有身份记录的人：照样能按名字清（但只按名字），不崩', (t) => {
   const { fp, memory } = rig(t);
   const r = fp.run('小明', { mode: 'unlink' });

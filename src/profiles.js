@@ -358,6 +358,16 @@ export function createProfiles({
       return true;
     },
 
+    /**
+     * 只作废当日渲染缓存，**不动数据**。
+     *
+     * 给「按人遗忘」用：档案段按天冻结（保 prompt cache），但用户点了
+     * 「不再记住」，那一秒就必须生效——等到明天才不提他，等于没做。
+     */
+    invalidate() {
+      renderCache = null;
+    },
+
     /** 独立清空入口（契约 §3④）；隐私优先，当场作废渲染缓存 */
     clear() {
       rows = [];
