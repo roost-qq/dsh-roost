@@ -4526,6 +4526,8 @@ export function apply(ctx) {
     profilesEnabled: () => cfg.profiles?.enabled === true,
     /** E2 待跟进：开关实时读 cfg（面板改了不用重启） */
     followUpEnabled: () => cfg.memory?.followUp?.enabled === true,
+    /** 相关链接：默认关；开着时巩固结束后多调一次模型判「同一实体的不同事」 */
+    linksEnabled: () => cfg.memory?.links?.enabled === true,
     /** 巩固时补算日记向量（之前漏了这一步，语义检索的向量路一直是空的） */
     embed: embedder,
     log: (m) => log.info(m),

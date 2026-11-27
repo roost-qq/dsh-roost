@@ -5868,6 +5868,11 @@ window.__ModuleLoader__.load({
         if (evCount >= 2) parts.push(`${evCount} 条佐证`)
         /** 阶段 2 标签：跟在出处后面，不另起一行（老库没有 tags = 不显示） */
         if (Array.isArray(d.tags) && d.tags.length) parts.push(d.tags.map((t) => '#' + t).join(' '))
+        /**
+         * 相关链接（`links`）：同一实体的不同事（"狗叫 Max" 与 "带 Max 去露营"）。
+         * 只显示条数——它们是**线索**，不是这条事实的内容；老库没有就一个字不显示。
+         */
+        if (Array.isArray(d.links) && d.links.length) parts.push(`相关 ${d.links.length}`)
         return parts.join(' · ')
       }
 

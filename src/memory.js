@@ -443,6 +443,20 @@ export function trendOf(evidence, now = Date.now(), { recentDays = TREND_RECENT_
   return 'stable';
 }
 
+/** 每条事实最多链几条：多了会让「顺链想起」变成一锅粥 */
+export const LINKS_MAX = 3;
+
+/** 加一条相关链接：去重、环形成 LINKS_MAX 条；空不落盘（老库字节一致） */
+export function addLink(meta, id) {
+  const want = String(id || '').trim();
+  if (!meta || !want) return meta;
+  const cur = Array.isArray(meta.links) ? meta.links.map(String).filter(Boolean) : [];
+  if (cur.includes(want)) return meta;
+  cur.push(want);
+  meta.links = cur.slice(-LINKS_MAX);
+  return meta;
+}
+
 /** 把算出的证据字段写进 meta；默认值删掉不落盘（老库字节一致） */
 function writeEvidence(meta, next) {
   if (next.proofs > 0) meta.proofs = next.proofs; else delete meta.proofs;
@@ -1348,6 +1362,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
              * 一律保留（宁漏不误）。不写回磁盘。
              */
             about: String(x.about || ''),
+            /** 相关链接（别的 fact 的稳定 id）：面板显示「相关 N」，不参与注入 */
+            links: Array.isArray(x.links) ? x.links.map(String) : [],
             /** 以下都是可选扩展字段，老库没有时给默认，不写回磁盘 */
             tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
             /** A2 双时态：种类 + 事发时间（缺省回退到 at，老库表现不变） */
@@ -1487,6 +1503,39 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
      * @param {{at?:number}} [opts]
      * @returns {{ok:boolean, text?:string, scope?:string, why?:string, candidates?:string[]}}
      */
+    /**
+     * 建立「相关链接」（由巩固里那次模型判定调用）。
+     *
+     * 为什么判据不在这一层：字符相似度在这件事上是**反的**（本仓实测
+     * 「狗叫 Max」vs「带 Max 露营」0.21，而「喜欢咖啡」vs「喜欢喝茶」0.57），
+     * 任何阈值都会既漏又误。所以判断交给模型，这里只做**校验与落账**：
+     * 两条都必须在这一层、都还活着、不是同一条，否则整对丢弃（宁漏不误）。
+     *
+     * @returns {{ok:boolean, linked:number, why?:string}}
+     */
+    link(chatId, aText, bText, { scope = 'chat' } = {}) {
+      const m = load();
+      const layer = scope === 'global'
+        ? { list: m.global, mm: m.meta.global }
+        : (() => {
+          const id = String(chatId || '');
+          return { list: m.chats[id], mm: m.meta.chats[id] };
+        })();
+      const a = String(aText ?? '').trim();
+      const b = String(bText ?? '').trim();
+      if (!a || !b || a === b) return { ok: false, linked: 0, why: '两条得都不一样且有内容' };
+      const { list, mm } = layer;
+      if (!Array.isArray(list) || !mm) return { ok: false, linked: 0, why: '这一层没有事实' };
+      if (!list.includes(a) || !list.includes(b)) return { ok: false, linked: 0, why: '有一句不在这一层' };
+      if (mm[a]?.until || mm[b]?.until || mm[a]?.archivedAt || mm[b]?.archivedAt) {
+        return { ok: false, linked: 0, why: '已作废/已归档的不链' };
+      }
+      addLink(mm[a], factIdOf(b));
+      addLink(mm[b], factIdOf(a));
+      save();
+      return { ok: true, linked: 1 };
+    },
+
     supersede(chatId, needle, opts = {}) {
       const w = String(needle ?? '').trim();
       if (!w) return { ok: false, why: '要替换的旧说法不能为空' };
@@ -2133,6 +2182,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
                */
               updatedAt: Number(x.updatedAt) > 0 ? Number(x.updatedAt) : 0,
               changes: changesOf(x),
+              /** 相关链接：清理→还原不能丢，否则'顺链想起'在还原后静默消失 */
+              links: Array.isArray(x.links) ? x.links.map(String).slice(-LINKS_MAX) : [],
               /**
                * E2 待跟进：**必须一起导出**。
                * 不导出的话，「清理 → 后悔 → 还原」之后这条事实回来了，
@@ -2288,6 +2339,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
       if (row.supersededBy) meta.supersededBy = String(row.supersededBy);
       /** 变更留痕：0 / 空数组不落盘，老库与升级前的文件逐字节一致 */
       if (Number(row.updatedAt) > 0) meta.updatedAt = Number(row.updatedAt);
+      /** 相关链接：空数组不落盘，老库还原逐字节一致 */
+      if (Array.isArray(row.links) && row.links.length) {
+        for (const id of row.links.slice(-LINKS_MAX)) addLink(meta, id);
+      }
       const ch = changesOf({ changes: row.changes });
       if (ch.length) meta.changes = ch;
       /** E2 待跟进：同样默认不落盘，还原后与升级前的老库逐字节一致 */

@@ -144,6 +144,8 @@ export function normalizeEntry(raw, target, chatId = '') {
      */
     updatedAt: Number(e.updatedAt) > 0 ? Number(e.updatedAt) : 0,
     changes: Array.isArray(e.changes) ? e.changes.slice(-6) : [],
+    /** 相关链接：跟着「四处白名单」契约走，漏了还原就丢链 */
+    links: Array.isArray(e.links) ? e.links.slice(-3) : [],
     /**
      * 证据账本三件套：这一行会一路走到 `memory.insertRaw()`，
      * 少带一个字段就等于「清理→后悔→还原」把证据悄悄抹掉。

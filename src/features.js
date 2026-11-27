@@ -279,6 +279,22 @@ export const FEATURES = [
      * **默认 `'0'`（关）**：短句重复在正常对话里不少见（连说两次「马上」），
      * 一旦被吞，用户会觉得她漏回消息，而这种 bug 极难复现。要开自己开。
      */
+    /**
+     * 相关链接（默认关）：巩固结束后多调一次模型，判断哪些事实是
+     * 「同一实体的不同事」并互相链上。判据必须由模型给——字符相似度在这件事上
+     * 是反的（本仓实测：「狗叫 Max」vs「带 Max 露营」0.21，「喜欢咖啡」vs「喜欢喝茶」0.57）。
+     */
+    id: 'memoryLinks',
+    label: '想起一件能带出另一件',
+    desc: '每天巩固后多问一次模型：哪些事是同一个对象的不同阶段，互相链上（面板显示「相关 N」）',
+    source: 'config',
+    path: ['memory', 'links', 'enabled'],
+    requires: NONE,
+    affects: NONE,
+    offHint: '',
+    advanced: true,
+  },
+  {
     id: 'chatDupSimilarity',
     label: '同一段别发两遍',
     desc: '长回合里她常把「我先看看」「我看了下」这类几乎一样的话发两条；开着会挡掉后一条（短句不挡、只跟上一条比、十分钟窗）',
@@ -801,7 +817,7 @@ export const FEATURE_GROUPS = [
   /** 运行态排最前：它决定后面所有开关生效不生效 */
   { id: 'run', label: '运行', ids: ['botEnabled', 'dryRun'] },
   { id: 'talk', label: '怎么说话', ids: ['qqTools', 'qqRetract', 'quoteReply', 'quotePercent', 'stickers', 'voice', 'chatDupSimilarity'] },
-  { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact'] },
+  { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact', 'memoryLinks'] },
   { id: 'queue', label: '消息来不及回的时候（高级）', ids: ['steerInGroup', 'queueMax', 'queueMinBudgetSec'] },
   { id: 'proactive', label: '会不会主动找你', ids: ['speakUp', 'awake'] },
   { id: 'work', label: '干不干活', ids: ['sendFile', 'personaCommand'] },
@@ -832,7 +848,7 @@ export function visibleGroups(features = visibleFeatures()) {
  * 每个功能开关的「家」：`id → 页面 tab key`。
  *
  * 2026-11-26 面板信息架构调整：权限页不再承接「有没有这个功能」，
- * 34 个开关按语义归到各功能页（见 `FEATURE_HOME`），权限页只留「谁能用」。
+ * 35 个开关按语义归到各功能页（见 `FEATURE_HOME`），权限页只留「谁能用」。
  *
  * 这张表是「零遗漏」的唯一真源，也是唯一能被机器校验的东西：
  * - 不许按 `FEATURE_GROUPS` 整组渲染：`talk` / `memory` / `work` 三组都被拆开了
@@ -878,6 +894,8 @@ export const FEATURE_HOME = {
    * 只搬开关不搬预览会让「改档位 → 点应用」断链，所以那边整卡跟过来。
    */
   memory: 'memory',
+  /** 相关链接：和记忆一页（它是记忆之间的关系） */
+  memoryLinks: 'memory',
   memoryTools: 'memory',
   graphAdjacent: 'memory',
   chatTools: 'memory',

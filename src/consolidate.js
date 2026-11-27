@@ -199,6 +199,38 @@ export function isNoiseFact(text) {
   return SELF_META_RE.test(t) || SELF_MEMORY_RE.test(t) || SELF_TRAIT_RE.test(t);
 }
 
+/**
+ * 相关链接（`links`）的判定提示。
+ *
+ * 为什么必须用模型：字符相似度在这件事上是**反的**——本仓实测
+ * 「狗叫 Max」vs「带 Max 去露营」0.21、「跑步五公里」vs「跑步把膝盖伤了」0.13，
+ * 而「喜欢喝咖啡」vs「喜欢喝喝茶」0.57。同一实体的不同事用词差别大，
+ * 句式相同只换一个词的反而分数高。任何阈值都会既漏又误。
+ *
+ * 但**不需要任何身份标识**（这和按人归属完全不同）：模型只读两句话的文本。
+ * 成本控制靠一次判完：每天巩固调一次，不在写入路径做 N²。
+ */
+export function buildLinkPrompt(packs = []) {
+  const lines = [
+    '下面按会话分组列出她记着的事。请找出**同一件事的不同阶段**或**同一实体的不同侧面**，把它们两两配对。',
+    '',
+    '配对的判据（要严）：',
+    '· 两句在说同一个对象（同一个人、同一只宠物、同一件计划、同一个地方）；',
+    '· 而且互相补充：先后阶段、不同侧面、后续结果。',
+    '· **不要**只因为句式像、或都提到了同一类事物就配（「喜欢咖啡」和「喜欢喝茶」不是同一件事）。',
+    '· 已经在一条里说清楚的事，不要再配。',
+    '',
+    '输出 JSON，什么都别提：',
+    '{"links":[{"l":"分组名","a":1,"b":3}]}',
+    '最多 8 对；没有就输出 {"links":[]}。',
+  ];
+  for (const p of packs) {
+    lines.push('', `—— ${p.key} ——`);
+    p.texts.forEach((t, i) => lines.push(`${i + 1}. ${t}`));
+  }
+  return lines.join('\n');
+}
+
 /** 拼提示词 */
 /** 旧事实进 prompt 的上限（D6）：多了既烧 token，又让模型挑花眼 */
 export const MAX_PROMPT_FACTS = 10;
@@ -436,7 +468,7 @@ export function buildSelfPrompt({ day, said = [], corrected = [] } = {}) {
  * @param {object} [o.self]   createSelf() 的返回（第五层：自我叙述）
  * @param {(p:string)=>Promise<string>} [o.generate] 没给就只做机械压缩
  */
-export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false,
+export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false, linksEnabled = false,
   /**
    * 补算日记向量用（可选）。不传 = 不补（纯关键词）。
    * 之前这里只报 `stats.needVec` 数、注释说"由宿主填充"，但宿主从没调过——
@@ -457,6 +489,52 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
   /** 待跟进：同样运行时读开关 */
   const fuOn = () => (typeof followUpEnabled === 'function'
     ? followUpEnabled() === true : followUpEnabled === true);
+  /** 相关链接：同样运行时读开关 */
+  const linksOn = () => (typeof linksEnabled === 'function'
+    ? linksEnabled() === true : linksEnabled === true);
+
+  /**
+   * 相关链接的整轮判定（默认关）。
+   *
+   * 一天一次、一次判完：把当天有日记的会话（最多 3 个）+ 跨群层的事实编号喂给模型，
+   * 它只回编号对。**用编号而不是文本**：文本稍有出入就丢，编号还能校验边界。
+   * 落账交给 `memory.link()`——那一层校验两条都在这一层、都还活着，
+   * 模型乱写的编号会被静默丢弃（宁漏不误）。
+   */
+  async function writeLinks({ day, maxLayers = 3, maxFacts = 12 } = {}) {
+    if (!generate || !memory?.link) return { linked: 0, why: '没有模型或没有 memory' };
+    const rows = journal.byDay(day);
+    const chatIds = [...new Set(rows.map((r) => String(r.chatId || '')).filter(Boolean))].slice(0, maxLayers);
+    const layers = [{ key: 'global', chatId: '', scope: 'global' }];
+    for (const cid of chatIds) layers.push({ key: cid, chatId: cid, scope: 'chat' });
+    const packs = [];
+    for (const L of layers) {
+      let full = null;
+      try { full = memory.listFull(L.chatId, aliasesOf(L.chatId)); } catch { full = null; }
+      const arr = (L.scope === 'global' ? full?.global : full?.chat) || [];
+      const texts = arr
+        .filter((x) => x && x.text && !x.until && !x.archivedAt)
+        .map((x) => String(x.text))
+        .slice(0, maxFacts);
+      if (texts.length >= 2) packs.push({ key: L.key, chatId: L.chatId, scope: L.scope, texts });
+    }
+    if (!packs.length) return { linked: 0, why: '没有可配的事实' };
+    const raw = await generate(buildLinkPrompt(packs));
+    const plan = parseJsonLoose(raw) || {};
+    let linked = 0;
+    for (const it of (Array.isArray(plan.links) ? plan.links : []).slice(0, 20)) {
+      const L = packs.find((p) => p.key === String(it?.l ?? ''));
+      if (!L) continue;
+      const a = L.texts[Number(it?.a) - 1];
+      const b = L.texts[Number(it?.b) - 1];
+      if (!a || !b) continue;
+      try {
+        const r = memory.link(L.chatId, a, b, { scope: L.scope });
+        if (r?.ok) linked += 1;
+      } catch { /* 单对失败不影响其它 */ }
+    }
+    return { linked, layers: packs.length };
+  }
   /** 上一次的结果，面板和 /consolidate 接口读它 */
   let last = null;
   let running = false;
@@ -658,6 +736,21 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         }
       } catch (e) {
         log(`补算向量失败：${e?.message || e}`);
+      }
+      /**
+       * 相关链接（默认关）：事实都写完之后再判一次，判据交给模型（见 buildLinkPrompt）。
+       * 独立 try：链接失败不该把这一天的巩固判成失败——事实已经落盘了。
+       */
+      if (linksOn() && generate) {
+        try {
+          const lr = await writeLinks({ day: target });
+          if (lr.linked) {
+            stats.links = lr.linked;
+            log(`相关链接：${lr.linked} 对`);
+          }
+        } catch (e) {
+          log(`相关链接没写成（不影响巩固）：${e?.message ?? e}`);
+        }
       }
     } catch (e) {
       stats.ok = false;
