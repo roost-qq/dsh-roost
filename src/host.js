@@ -9943,6 +9943,34 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
           sessions.set(chat.sessionKey, '', { preset: chat.preset, title: chat.name, kind: chat.kind });
           log.warn(`会话被归档或需要人工处理，已解绑 ${chat.chatId.slice(0, 8)}，下一条开新会话`);
         } catch {}
+        /**
+         * 归档恢复的不只是会话映射，还有**上下文**。
+         *
+         * DSH 一侧归档 = 换了个空会话窗口，和主动压缩是同一件事，只是非自愿。
+         * 压缩走 `compact()` 的 `onOpening` 把开场交给 `pendingOpening`；归档
+         * 不经过那条路，若不在这里补，新会话第一条模型手上就只有 facts 和
+         * 「刚才说到」，没有「接着上面聊」的摘要开场。
+         *
+         * 用同一个 `rebuildOpening` 从日记确定性重建，规则与压缩一致：
+         *   · 它不依赖 DSH 会话，归档后照样拼得出来；
+         *   · 盘上只落 `{ at }` 指针，成功注入后才 `clear`，失败留着下次再给。
+         *
+         * `rebuildOpening` 可能抛（日记库打不开），包在 try 里：恢复是增强，
+         * 不能让它把「解绑 + 回话」这条已经走通的失败路径搞炸。
+         */
+        try {
+          const opening = rebuildOpening(chat.chatId);
+          if (opening) pendingOpening.set(chat.chatId, opening);
+        } catch (err) {
+          log.warn(`归档后重建开场失败（不影响解绑）：${err?.message ?? err}`);
+        }
+        /**
+         * `rounds` 也要清：自述（L4）和承诺只在会话边界注入，判据是
+         * `firstRound = !rounds.get(chatId)?.n`。归档换了窗口却不清计数的话，
+         * 下一条会被当成「同一会话的第二轮」，自述不注入——她在新会话里
+         * 想不起自己是谁。清掉还顺带让第一条走 deep 全量（lastDeep=-999）。
+         */
+        rounds.delete(chat.chatId);
       }
 
       /**
@@ -9951,9 +9979,10 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
        * 不回的话 ai-chat 那边会一直等到 180 秒超时，用户看到的是
        * 「宿主没回话」——比「这边出了点问题：xxx」难受得多。
        *
-       * 话术按 kind 分：上游挂了要说「等会儿」，会话归档了要说「重说一遍」，
-       * 其余才报具体错。**不要把内部 JSON 原文糊到群里**——
-       * 用户看不懂「{"kind":"error","error":{...}}」，只会觉得机器人坏了。
+       * 话术按 kind 分：上游挂了要说「等会儿」，blocked 要中性地说「换个地方
+       * 接着聊」（blocked 不只归档——审批没过、模型被拦、图片块也会触发，
+       * 说死「被归档了」会误导），其余才报具体错。**不要把内部 JSON 原文糊到
+       * 群里**——用户看不懂「{"kind":"error","error":{...}}」，只会觉得机器人坏了。
        */
       /**
        * `busy`（同一会话撞上正在跑的轮）2026-11-26 起静默：只记日志不回话。
@@ -9969,7 +9998,7 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
           e?.kind === 'timeout'
             ? '想太久了，先算了。'
             : e?.kind === 'blocked'
-              ? '这条对话在 DSH 里被归档了，我开个新的——再说一遍就行。'
+              ? '我换个地方接着聊——你继续说就行。'
               : e?.kind === 'upstream'
                 ? '模型服务那边暂时抽风了，等会儿再问我一次。'
                 : `这边出了点问题：${e?.message ?? e}`;
