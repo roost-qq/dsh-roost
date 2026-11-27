@@ -27,6 +27,11 @@ test('契约不教已经被停用的写法', () => {
   assert.doesNotMatch(MARKER_CONTRACT, /<<file:/, 'file 只摘不执行，发文件必须走 qq_send_file');
 });
 
+test('引用：教按本轮序号选，不教抄长索引也不教写原话', () => {
+  assert.match(MARKER_CONTRACT, /<<quote: #序号>>/);
+  assert.doesNotMatch(MARKER_CONTRACT, /<<quote: 要引用的话>>/, '出站层只认 #N/REFIDX，写原话会被静默忽略');
+});
+
 test('心情：必须说清取值范围和「只有主人说话那轮才算」', () => {
   assert.match(MARKER_CONTRACT, /valence/, '不写键名模型不知道怎么拼');
   assert.match(MARKER_CONTRACT, /-1～1/, '取值范围和 mood.js 的 clamp 一致');

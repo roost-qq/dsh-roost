@@ -5691,7 +5691,8 @@ export function apply(ctx) {
      */
     /**
      * 自动引用回复：**每轮掷一次骰子**，命中就把「正在回的这条」挂成本轮
-     * 第一条消息的引用（`qqTools.quote.percent`，默认 40）。
+     * 第一条消息的引用（`qqTools.quote.percent`，默认 40）。**只在单条消息
+     * 的一轮里掷**：攒了多条时交给模型用 `<<quote: #N>>` 明确选目标。
      *
      * ## 为什么每轮一次、只挂第一条
      *
@@ -5712,10 +5713,17 @@ export function apply(ctx) {
      * 掷骰子的部分抽到 `quote-auto.js` 了（纯函数、可单测），这里只负责
      * 把配置和「这一轮在回哪条」喂进去。
      */
+    /**
+     * 2026-11-28：**多条攒批时不再自动挂引用**。
+     *
+     * 批里有好几句时，「她在回哪句」只有模型知道（或写 `<<quote: #N>>` 明确
+     * 指定）；固定挂末条就是截图里「回的是 A、引用却指向 B」的根因。单条时
+     * `items[0] === last`，不存在歧义，概率引用照旧。
+     */
     const autoQuoteRef = pickQuoteRef({
       enabled: cfg.qqTools?.quote?.enabled,
       percent: cfg.qqTools?.quote?.percent,
-      refIdx: last?.scene?.msgIdx,
+      refIdx: batch.count === 1 ? last?.scene?.msgIdx : '',
     });
     /** 本轮是否已经用掉这次引用机会（失败会还回去，见下面 `send`） */
     let quoteSpent = false;
@@ -5772,6 +5780,13 @@ export function apply(ctx) {
         replyTo: String(last?.replyTo ?? ''),
         /** 自动引用的目标；显式 `<<quote:>>` 优先，出站层自己判 */
         quoteRef: wantQuote ? autoQuoteRef : '',
+        /**
+         * 批内 `#N` → `REFIDX_xxx` 的映射，给 `<<quote: #N>>` 用。
+         *
+         * 只传映射、不传裸索引给模型：模型写 `#2`，程序查表换成 135 字符的
+         * 官方索引。模型抄长串必错（2026-11-26 的 7 字符截断事故就是这么来的）。
+         */
+        quoteRefs: batch.refs,
       });
       /**
        * 没真发出去就把机会还回去：这一段失败（网络 / 限频）之后还会发下一段，
@@ -5821,9 +5836,13 @@ export function apply(ctx) {
     }
     if (batch.count > 1) {
       payload.text = batch.text;
-      payload.rendered = buildRendered(merged, batch.text, { images: payload.images });
+      /**
+       * 模型看的是 `rendered`，不是 `text`：序号只加在这里，`text` 照旧进
+       * 日记/检索/记忆抽取，免得 `#1` 这种内部记号污染长期记忆。
+       */
+      payload.rendered = buildRendered(merged, batch.numberedText || batch.text, { images: payload.images });
       /** 多条批次里每条已经自带 `名字(openid)：`，上层不要再套统一标签 */
-      payload.batch = { count: batch.count, multi: batch.multi };
+      payload.batch = { count: batch.count, multi: batch.multi, refs: batch.refs };
       /**
        * **合并批的出处必须补全**（2026-11-25 修）。
        *

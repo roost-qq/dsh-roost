@@ -23,7 +23,8 @@
  *   · `<<voice: 路径>>`      单独发一条已有音频文件，不经过 TTS
  *   · `<<button: 标签|指令>>` 挂到本条 Markdown 的 keyboard（type:2 指令型）
  *   · `<<pick: 标签|值>>`    回调型按钮（type:1），同组点一个其余变灰
- *   · `<<quote: 引用索引>>`  让这条回复挂引用样式（不写就不挂）
+ *   · `<<quote: #序号>>`     引用本轮某条消息（序号在模型眼前的正文上）；
+ *                            也接受 `REFIDX_xxx` 直写，但不教模型抄长索引
  *   · `<<card: 标题|描述|https://链接|https://图片>>`
  *                            官方图文卡片（`msg_type=8`），**独占一条消息**：
  *                            正文先发、卡片后发，一轮最多一张
@@ -668,7 +669,11 @@ export function createActionRunner({
     eventId = '',
     /** 4.6：互动召回，官方 is_wakeup 消息（不校验 msg_id/event_id 有效期） */
     isWakeup = false,
-    /** `<<quote:>>` 留空时的兜底：入站 `replyTo`（被引用那条的 message_id） */
+    /**
+     * 入站 `replyTo`（用户这条消息引用了谁）。**不再当引用兜底**：
+     * 那是「用户引用了谁」，不是「她在回谁」，拿它兜底会引用到更早的
+     * 第三方头上（2026-11-27 截图那类错位）。留着兼容只传这个字段的老调用方。
+     */
     replyTo = '',
     /**
      * 宿主掷骰子决定的自动引用目标（`qqTools.quote.percent`，每轮只给第一条）。
@@ -680,6 +685,11 @@ export function createActionRunner({
      * 而且不报错、不写日志。下面 `...rest` 那行就是为了让这类漏接**出声**。
      */
     quoteRef = '',
+    /**
+     * 本轮消息 `#N` → `REFIDX_xxx` 的映射，来自攒批的 `batch.refs`。
+     * 模型写 `<<quote: #2>>`，这里查表换成官方索引——不让模型抄 135 字符。
+     */
+    quoteRefs = [],
     /**
      * `senderId` 是**说话的人**，不是会话 id——`<<say>>` 的语音额度按人扣。
      * 没有真人（主动搭话 / 事件轮）时留空，配额退回按会话算。
@@ -837,31 +847,46 @@ export function createActionRunner({
     const keyboard = combineKeyboards([buildKeyboard(buttons), pickKeyboard]);
 
     /**
-     * `<<quote: 索引>>`：这条回复挂引用样式。
+     * `<<quote: #N>>`：这条回复挂引用样式，N 是本轮消息前的序号。
      *
-     * 两条来源，**显式优先**：
-     *   1. 模型/扩展写的 `<<quote:>>`——写了值用值，留空退回 `replyTo`；
-     *   2. 宿主掷骰子给的**顶层** `quoteRef`（`qqTools.quote.percent`，每轮一次）。
-     *      模型明确要求引用时不该被概率覆盖，所以显式存在就不看自动的。
+     * 2026-11-28 起两种写法：
+     *   · `#N` —— 查 `quoteRefs`（攒批时建的映射）换成 `REFIDX_xxx`；
+     *     这是给模型用的写法，序号和正文一起出现在它眼前。
+     *   · `REFIDX_xxx` —— 直写官方索引，兼容扩展/老模型。
      *
-     * 自动引用是 2026-11-26 加的。原先这里写着「自动给所有回复挂引用，最坏
-     * 情况是整条发不出去」——那是**没验证过**时的保守判断。真机跑过四条对照
-     * （`plugins/quotetest`：`msg_type=2 + message_reference`）之后这条顾虑
-     * 不成立：引用块正常、markdown 照常渲染，所以才有按概率自动挂载。
+     * `<<quote:>>` 留空 → 用自动引用目标（只有单条消息轮才有），**不再退回
+     * `replyTo`**：那是「用户引用了谁」，拿它当目标会引用到更早的第三方。
      *
-     * 值必须是 `REFIDX_xxx`（取自 `message_scene.ext.msg_idx`），**不是** message_id。
+     * 写了一个本轮不存在的序号（模型编的 #9）→ **不引用**，记日志。猜一个
+     * 索引发出去比不引用糟得多：QQ 会把它当成真的引用块贴在别人消息上。
      * 只取最后一个标记，多个没有意义。
      */
     const quoteActions = actions.filter((a) => a.type === 'quote');
-    const explicitQuote = quoteActions.length
-      ? String(quoteActions[quoteActions.length - 1].value || replyTo || '').trim().slice(0, MAX_REF_IDX)
+    const rawQuote = quoteActions.length
+      ? String(quoteActions[quoteActions.length - 1].value ?? '').trim()
       : '';
+    let explicitQuote = '';
+    if (rawQuote) {
+      const byNo = /^#(\d{1,2})$/.exec(rawQuote);
+      if (byNo) {
+        const n = Number(byNo[1]);
+        const hit = Array.isArray(quoteRefs)
+          ? quoteRefs.find((r) => Number(r?.n) === n)
+          : null;
+        explicitQuote = String(hit?.refIdx ?? '').trim().slice(0, MAX_REF_IDX);
+        if (!explicitQuote) log(`<<quote: #${n}>> 本轮没有对应索引，这条不挂引用`);
+      } else if (rawQuote.startsWith('REFIDX_')) {
+        explicitQuote = rawQuote.slice(0, MAX_REF_IDX);
+      } else {
+        log(`<<quote:>> 只认 #序号 或 REFIDX_ 索引，收到「${rawQuote.slice(0, 30)}」已忽略`);
+      }
+    }
     /** 自动引用只读**顶层** `quoteRef`（宿主传的那个），不再兼容 `extra.quoteRef`——两种位置并存只会让人搞不清谁在生效 */
     const autoQuote = explicitQuote ? '' : String(quoteRef ?? '').trim().slice(0, MAX_REF_IDX);
     const quoteTarget = explicitQuote || autoQuote;
     const messageReference = quoteTarget ? { message_id: quoteTarget } : null;
     if (quoteActions.length && !messageReference) {
-      log('<<quote:>> 没给索引、入站也没有 replyTo，这条按普通回复发');
+      log('<<quote:>> 没解析出可用索引，这条按普通回复发');
     }
 
     const silenceMs = Math.max(
