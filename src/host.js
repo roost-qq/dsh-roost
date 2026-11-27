@@ -12755,6 +12755,22 @@ export function apply(ctx) {
             }
 
             /**
+             * 称呼（T4）：单独一条 op，不并进 `persona.edit`。
+             *
+             * 为什么不并：`edit` 的 patch 是「一整个人的字段」，而称呼是
+             * **按场景**的键值（`addresses[scope]`）——塞进 flat patch 里
+             * 只能表达一个值，且会被 `ownerFields` 误当成"锁住整段档案"。
+             * `scope` 不传 = 全局（`*`）；传空串显式清掉该场景。
+             */
+            case 'persona.address': {
+              const key = String(arg?.key ?? '').trim();
+              if (!key) return send(res, 400, { ok: false, message: '缺人物 key' });
+              const scope = arg?.scope === undefined || arg?.scope === null ? '*' : String(arg.scope);
+              const r = profiles.setAddress(key, arg?.value ?? '', { scope });
+              return send(res, r?.ok === false ? 400 : 200, r);
+            }
+
+            /**
              * 阶段6：不再记住某人。
              *
              * 现在走 `forgetPerson`（完整版），不再是「只清档案正文」的轻量版：
@@ -14125,6 +14141,12 @@ export function apply(ctx) {
               key,
               name,
               alias: row?.alias || '',
+              /**
+               * 称呼映射（T4）：面板要能分开看到「我该怎么叫」和「别人怎么叫」，
+               * 以及它们各自在哪些场景生效。原样给出去，展示逻辑留在面板。
+               */
+              addresses: row?.addresses && typeof row.addresses === 'object' ? row.addresses : {},
+              nicknames: row?.nicknames && typeof row.nicknames === 'object' ? row.nicknames : {},
               openid: row?.openid || (row?.key !== name ? row?.key : '') || '',
               impression: row?.impression || '',
               /** G7：说话方式/性格独立维度（handle 沿用 tips） */

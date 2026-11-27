@@ -4126,3 +4126,13 @@ test('前端渲染：04 段有「导出诊断包」，并说清和「复制」�
   assert.ok(txt.includes('导出诊断包'), '导出按钮没渲染出来');
   assert.ok(txt.includes('拖进群'), '不说用途，用户不知道它和「复制」有什么区别');
 });
+
+test('称呼（T4）：面板分「通用 / 这个群」两栏，且走 persona.address 不混进档案 patch', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("'称呼（通用）'"), '要有通用称呼一栏')
+  assert.ok(src.includes("'这个群里的称呼'"), '要有本群称呼一栏')
+  assert.match(src, /quick\('persona\.address', \{ key, scope: '\*', value/, '通用称呼走 persona.address')
+  assert.match(src, /const \{ address, addressScope, addressLocal, \.\.\.patch \} = editForm/,
+    '称呼要从档案 patch 里摘出去（否则会被当成整段档案的 ownerFields）')
+  assert.ok(src.includes('别人的叫法：'), '详情要展示别名，且标明那是别人的叫法')
+})

@@ -148,3 +148,33 @@ test('G7：/person 详情带出 style/persona（真 host）', async () => {
     assert.equal(r.person.persona, '急性子');
   } finally { b.done(); }
 });
+
+test('quick(persona.address)：按场景写称呼，清空即删', async () => {
+  const b = await boot();
+  try {
+    /** 全局 */
+    let r = await b.quick('persona.address', { key: 'u123', value: '小明' });
+    assert.equal(r.ok, true, r.message);
+    /** 本群 */
+    r = await b.quick('persona.address', { key: 'u123', scope: 'group:G1', value: '老王' });
+    assert.equal(r.ok, true, r.message);
+
+    let row = b.profiles()[0];
+    assert.deepEqual(row.addresses, { '*': '小明', 'group:G1': '老王' });
+
+    /** 清掉本群那条：不是写空串，是真删键 */
+    r = await b.quick('persona.address', { key: 'u123', scope: 'group:G1', value: '' });
+    assert.equal(r.ok, true);
+    row = b.profiles()[0];
+    assert.deepEqual(row.addresses, { '*': '小明' }, '本群那条要真删掉');
+  } finally { b.done(); }
+});
+
+test('quick(persona.address)：没有档案的人返回 400（不建半条空档案）', async () => {
+  const b = await boot();
+  try {
+    const r = await b.quick('persona.address', { key: 'nobody', value: '老王' });
+    assert.equal(r.ok, false);
+    assert.equal(b.profiles().length, 1, '不能为一次设称呼建空档案');
+  } finally { b.done(); }
+});

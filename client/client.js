@@ -8294,9 +8294,20 @@ window.__ModuleLoader__.load({
       const [editBusy, setEditBusy] = useState(false)
       const [editTagInput, setEditTagInput] = useState('')
       const startEdit = (p) => {
+        /**
+         * 称呼是**按场景**存的（`addresses[chatId]`，`'*'` 是通用），
+         * 所以编辑时需要"当前在改哪个场景"。默认取他已经设过的第一个场景，
+         * 没有就取第一个群——避免让用户手填 chatId。
+         */
+        const addrMap = p?.addresses && typeof p.addresses === 'object' ? p.addresses : {}
+        const scopes = Object.keys(addrMap).filter((s) => s && s !== '*')
+        const first = scopes[0] || (chatProfiles[0]?.chatId || '')
         setEditForm({
           name: p?.name || '',
-          alias: p?.alias || '',
+          /** 通用称呼：新表优先，老 `alias` 兜底（老数据就存在那儿） */
+          address: addrMap['*'] || p?.alias || '',
+          addressScope: first,
+          addressLocal: first ? (addrMap[first] || '') : '',
           impression: p?.impression || '',
           style: p?.style || '',
           persona: p?.persona || '',
@@ -8311,7 +8322,15 @@ window.__ModuleLoader__.load({
         setEditBusy(true)
         try {
           const key = picked.key || picked.name
-          const r = await quick('persona.edit', { key, patch: editForm })
+          /** 称呼单独走 `persona.address`（按场景的键值），不混进档案 patch */
+          const { address, addressScope, addressLocal, ...patch } = editForm
+          const r = await quick('persona.edit', { key, patch })
+          if (r?.ok !== false) {
+            await quick('persona.address', { key, scope: '*', value: String(address || '').trim() })
+            if (addressScope) {
+              await quick('persona.address', { key, scope: addressScope, value: String(addressLocal || '').trim() })
+            }
+          }
           toast(r?.message || (r?.ok ? '已保存' : '没存上'), r?.ok === false ? 'err' : 'ok')
           if (r?.ok !== false) {
             setEditForm(null)
@@ -8458,8 +8477,47 @@ window.__ModuleLoader__.load({
                           ),
                           editForm
                             ? h('div', null,
+                                /**
+                                 * 称呼（T4）：两栏分开——「通用」写 `addresses['*']`，
+                                 * 「这个群」写 `addresses[选中的群]`。
+                                 * 以前只有一个 `alias` 输入框，而且 `render()` 根本不读它，
+                                 * 填了等于没填；现在两栏都真的进注入，且互不串群。
+                                 */
+                                h('label', { style: { display: 'block', marginBottom: 6, fontSize: 12 } }, '称呼（通用）',
+                                  h('input', {
+                                    className: 'roost-input', value: editForm.address || '',
+                                    placeholder: '你平时怎么叫他',
+                                    style: { display: 'block', width: '100%', marginTop: 2 },
+                                    onChange: (e) => setEditForm({ ...editForm, address: e.target.value }),
+                                  })),
+                                h('label', { style: { display: 'block', marginBottom: 6, fontSize: 12 } }, '这个群里的称呼',
+                                  h('div', { style: { display: 'flex', gap: 4, marginTop: 2 } },
+                                    h(Dropdown, {
+                                      className: 'roost-input',
+                                      style: { width: 'auto', padding: '3px 8px', fontSize: 11.5, flex: '0 0 auto' },
+                                      value: editForm.addressScope || '',
+                                      onChange: (e) => {
+                                        const s = e.target.value
+                                        setEditForm({
+                                          ...editForm,
+                                          addressScope: s,
+                                          /** 切场景时把该场景已存的值带出来，别让人重打一遍 */
+                                          addressLocal: (detail?.person?.addresses?.[s]) || '',
+                                        })
+                                      },
+                                    },
+                                      h('option', { value: '' }, '（不单独设）'),
+                                      (chatProfiles || []).map((c) => h('option', { key: c.chatId, value: c.chatId }, c.name || c.chatId)),
+                                    ),
+                                    h('input', {
+                                      className: 'roost-input', value: editForm.addressLocal || '',
+                                      placeholder: '只在这个群这么叫',
+                                      style: { flex: '1 1 auto', minWidth: 0 },
+                                      onChange: (e) => setEditForm({ ...editForm, addressLocal: e.target.value }),
+                                    }),
+                                  )),
                                 ...[
-                                  ['impression', '印象'], ['alias', '称呼'],
+                                  ['impression', '印象'],
                                   ['persona', '性格'], ['style', '说话方式'],
                                   ['tips', '怎么相处'], ['dislikes', '雷区（别踩）'],
                                 ].map(([k, label]) => h('label', { key: k, style: { display: 'block', marginBottom: 6, fontSize: 12 } },
@@ -8519,7 +8577,22 @@ window.__ModuleLoader__.load({
                             : h('div', null,
                                 detail.person?.impression || detail.person?.tips || detail.person?.dislikes || detail.person?.alias || detail.person?.style || detail.person?.persona || (detail.person?.tags || []).length
                                   ? h('div', { className: 'roost-note' },
-                                      (detail.person.alias ? `称呼：${detail.person.alias}；` : '')
+                                      /**
+                                       * 称呼分两档显示：通用（`addresses['*']`，老数据在 `alias`）
+                                       * + 各群单独的称呼。别名只作展示——它是"别人怎么叫他"，
+                                       * 拿来当自己的称呼就是错的。
+                                       */
+                                      (() => {
+                                        const p = detail.person
+                                        const addr = p.addresses && typeof p.addresses === 'object' ? p.addresses : {}
+                                        const global = addr['*'] || p.alias || ''
+                                        const locals = Object.entries(addr).filter(([s, v]) => s !== '*' && v)
+                                        const nicks = Object.values(p.nicknames && typeof p.nicknames === 'object' ? p.nicknames : {})
+                                          .flat().filter(Boolean)
+                                        return (global ? `称呼：${global}；` : '')
+                                          + (locals.length ? `本群称呼：${locals.map(([, v]) => v).join('、')}；` : '')
+                                          + (nicks.length ? `别人的叫法：${[...new Set(nicks)].join('、')}；` : '')
+                                      })()
                                       + (detail.person.impression || '（没有印象）')
                                       + (detail.person.persona ? `（性格：${detail.person.persona}）` : '')
                                       + (detail.person.style ? `（说话方式：${detail.person.style}）` : '')
