@@ -4526,6 +4526,10 @@ export function apply(ctx) {
     profilesEnabled: () => cfg.profiles?.enabled === true,
     /** E2 待跟进：开关实时读 cfg（面板改了不用重启） */
     followUpEnabled: () => cfg.memory?.followUp?.enabled === true,
+    /** 相关链接：默认关；开着时巩固结束后多调一次模型判「同一实体的不同事」 */
+    linksEnabled: () => cfg.memory?.links?.enabled === true,
+    /** 语义改口：默认关；开着时巩固结束后再判一次「旧说法被新说法取代」 */
+    semanticEnabled: () => cfg.memory?.semantic?.enabled === true,
     /** 巩固时补算日记向量（之前漏了这一步，语义检索的向量路一直是空的） */
     embed: embedder,
     log: (m) => log.info(m),
@@ -6555,7 +6559,16 @@ export function apply(ctx) {
    * 都是为了这件事。反过来看，把每轮都变的检索命中塞进 system prompt，
    * 等于每轮主动作废一次缓存。
    */
-  function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
+  /**
+ * C2：平时注入几条事实（deep 时才全量）。
+ *
+ * 抽成常量是因为**面板要说同一组数字**（「库存 40 / 平时只看得到 9」）。
+ * 两处各写一个 6 和 3，改一处忘一处，面板就会开始说假话。
+ */
+const INJECT_FACTS_GLOBAL = 6;
+const INJECT_FACTS_CHAT = 3;
+
+function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
     /**
      * **会话由调用方给，不在这里猜**（2026-11-22）。
      *
@@ -6686,10 +6699,10 @@ export function apply(ctx) {
      * 而不是最新的那几条 —— 后者恰恰是 deep 最想铺回来的东西。
      */
     const factsGlobal = m.global.length
-      ? `【你记得的事（通用）】\n${lines(deep ? m.global : m.global.slice(0, 6))}`
+      ? `【你记得的事（通用）】\n${lines(deep ? m.global : m.global.slice(0, INJECT_FACTS_GLOBAL))}`
       : '';
     const factsChat = m.chat.length
-      ? `【这个群特有的事】\n${lines(deep ? m.chat : m.chat.slice(0, 3))}`
+      ? `【这个群特有的事】\n${lines(deep ? m.chat : m.chat.slice(0, INJECT_FACTS_CHAT))}`
       : '';
 
     /**
@@ -9526,6 +9539,16 @@ export function apply(ctx) {
           if (st) {
             text = `${st}\n\n${text}`;
             log.info(`会话边界带上自述（${st.length} 字）`);
+          }
+          /**
+           * B-lite：主人从她的自述里勾过「算数」的那几句，单独一段硬提示。
+           * 和自述分开写：自述是"我最近在想什么"（软状态），这段是
+           * "我答应过要改的"（照着做）。没勾过就是空串，注入与之前逐字节一致。
+           */
+          const pr = self.promises(3);
+          if (pr) {
+            text = `${pr}\n\n${text}`;
+            log.info(`会话边界带上「答应过自己的」（${pr.length} 字）`);
           }
         } catch (e) {
           log.warn(`读自述失败（不影响这轮）：${e.message}`);
@@ -13555,6 +13578,22 @@ export function apply(ctx) {
              * 单独一个动作、不挂在会话级清空上：自述是**跨群汇总**写的一条，
              * 按 chatId 清既清不干净（它不属于任何一个群）又会误伤别的群。
              */
+            /**
+             * B-lite：把某天的自述标成「算数」/ 取消。
+             * 只有标过的才进「你答应过自己的」注入段（见 self.promises）。
+             */
+            case 'self.keep': {
+              const day = String(arg?.day ?? '').trim();
+              const on = arg?.on !== false;
+              const text = String(arg?.text ?? '');
+              const r = self.mark({ day, text, on });
+              return send(res, r.ok ? 200 : 400, {
+                ...r,
+                message: r.ok
+                  ? (on ? '这条算数了：新会话开场会带上' : '取消了')
+                  : (r.why || '没改成'),
+              });
+            }
             case 'self.clear':
               self.clear();
               log.info('自我叙述已重置');
@@ -13846,7 +13885,10 @@ export function apply(ctx) {
           sf = {
             stats: self.stats(),
             /** 最近几条按天写的自述（新的在后） */
-            notes: a.notes.slice(-8).map((n) => ({ day: n.day, at: n.at, text: clip(n.text, 200) })),
+            /** `kept` = 主人勾过「算数」，会进「你答应过自己的」那一段 */
+            notes: a.notes.slice(-8).map((n) => ({
+              day: n.day, at: n.at, text: clip(n.text, 200), kept: n.kept === true,
+            })),
             /** 压成阶段自述的旧条目 */
             chapters: a.chapters.slice(-3).map((c) => ({ from: c.from, to: c.to, text: clip(c.text, 200) })),
           };
@@ -13865,6 +13907,15 @@ export function apply(ctx) {
           facts: { global: facts.global, chat: facts.chat },
           /** 带权重/出处的那一份（面板显示「这条多重、从哪来」） */
           factsDetail,
+          /**
+           * C2：平时注入几条。库存 40 条、可见 9 条这件事**必须摊开说**——
+           * 用户看不到差额时，只会以为"存了但没生效"。deep 每 15 轮才全量一次。
+           */
+          inject: {
+            global: INJECT_FACTS_GLOBAL,
+            chat: INJECT_FACTS_CHAT,
+            deepEvery: Math.max(1, Number(cfg.memory?.deepEvery) || 15),
+          },
           /**
            * 这个会话是不是「不记也不读」。
            *

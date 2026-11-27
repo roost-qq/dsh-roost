@@ -29,11 +29,14 @@
  *   老版本的 `load()` 只认字符串（`filter(x => typeof x === 'string')`），
  *   一旦把 `global` 写成 `[{text:…}]`，降级回旧版就会**静默丢掉全部事实**——
  *   文件还在、内容也在，只是看不见。meta 是并行字段，老版本忽略它照常工作。
- *   代价是元数据以**文本**为 key：同一句话在不同群共用一份。
- *   实际无影响——文本相同就是同一条事实，而且我们从不改写已存的文本。
+ *   代价是元数据以**文本**为 key，且**按层分开**：
+ *   `meta.global[正文]` 与 `meta.chats[群][正文]` 是两份，**跨群不共用**。
+ *   （2026-11-28 修正：这里原来写的是「同一句话在不同群共用一份」，与实现不符——
+ *   实际是各自一份。行为是对的：同一句话在 A 群是「群里的梗」、在 B 群可能是
+ *   「他说过的话」，权重和出处本来就该分开算；错的是注释。）
  */
 
-import { readFileSync, writeFileSync, readdirSync, unlinkSync, copyFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, unlinkSync, copyFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './config.js';
 
@@ -123,7 +126,21 @@ const DAY_MS = 86_400_000;
  * importance 越高 τ 越长。双信号分工：这里只影响衰减，不改 tier（core 升档仍由 evidence 独占）。
  */
 export function retentionOf(meta, now = Date.now(), base = RETENTION_BASE) {
-  const last = Math.max(Number(meta?.at) || 0, Number(meta?.reviewedAt) || 0, Number(meta?.lastHit) || 0);
+  /**
+   * B2（2026-11-28 复核 #3）：衰减起点**不再看 `lastHit`**。
+   *
+   * `lastHit` 是"这条被自动注入过"，不是"被谁复习过"。把它当起点就是
+   * 「注入即加冕」：被注入 → 时钟重置 → 分数不降 → 排得更前 → 更常被注入，
+   * 列表就此冻结，再也换不出一批新的。
+   *
+   * 这跟 `journal.js` 早就立下的规矩是同一条：`accessed` 只由**检索**写入，
+   * 自动注入不算。facts 此前是例外，现在并对齐。
+   *
+   * `hitDays` 仍然在 τ 里（`strength`）——那是 2026-11-24 定的"反复提到的事
+   * 记得更牢"，是**期望行为**。区别在于：它现在只让衰减更慢，**不能把时钟
+   * 拨回今天**，所以不再构成自我强化。
+   */
+  const last = Math.max(Number(meta?.at) || 0, Number(meta?.reviewedAt) || 0);
   /** 无任何时间戳（老库无 meta）时不衰减——保留旧的 start? days:0 语义 */
   const days = last ? Math.max(0, (now - last) / DAY_MS) : 0;
   const strength = 1 + Math.min(10, Math.max(0, Number(meta?.hitDays) || 0));
@@ -231,14 +248,26 @@ export const ARCHIVE_WEIGHT = 0.25;
  */
 export function growTier(meta) {
   const cur = FACT_TIERS.includes(meta?.tier) ? meta.tier : 'long';
-  if (cur === 'core') return 'core';
   /**
    * 信念强度护栏：被反驳到快不信了（confidence<0.5）不许升档。
    * 否则"反驳 4 次"会因为证据条数够了反而升到 core（永久不衰减）——
    * 那等于把"越被证伪越当真"，和证据账本的语义正好相反。
    */
   const confidence = Number(meta?.confidence);
-  if (Number.isFinite(confidence) && confidence < 0.5) return cur;
+  const weak = Number.isFinite(confidence) && confidence < 0.5;
+  /**
+   * B3（2026-11-28 复核 #5）：**core 也能降，一步降回 long**。
+   *
+   * 原来这里是 `if (cur === 'core') return 'core'`——升上去就永久不衰减
+   * （`TIER_DECAY.core = 0`）。升档有护栏、降档没有，这不是"慎重"，是漏洞：
+   * 一条被确认过四次的旧事，后来被反驳到 confidence 0.2、甚至被新说法顶掉，
+   * 仍然稳稳占着"永不衰减"的位置，把真正活着的新事挤在后面。
+   *
+   * 只降**一步**（core → long，不连环降到 short）：一次反驳不该把一条
+   * 长期事实打回临时层，那会让"说错一句就什么都不算了"。
+   */
+  if (cur === 'core') return weak ? 'long' : 'core';
+  if (weak) return cur;
   const ev = Array.isArray(meta?.evidence) ? meta.evidence.length : 0;
   const w = Number(meta?.w) > 0 ? Number(meta.w) : 1;
   if (cur === 'short' && (ev >= 2 || w >= 2)) return 'long';
@@ -441,6 +470,20 @@ export function trendOf(evidence, now = Date.now(), { recentDays = TREND_RECENT_
   if (ratio > 1.5) return 'strengthening';
   if (ratio < 0.5) return 'weakening';
   return 'stable';
+}
+
+/** 每条事实最多链几条：多了会让「顺链想起」变成一锅粥 */
+export const LINKS_MAX = 3;
+
+/** 加一条相关链接：去重、环形成 LINKS_MAX 条；空不落盘（老库字节一致） */
+export function addLink(meta, id) {
+  const want = String(id || '').trim();
+  if (!meta || !want) return meta;
+  const cur = Array.isArray(meta.links) ? meta.links.map(String).filter(Boolean) : [];
+  if (cur.includes(want)) return meta;
+  cur.push(want);
+  meta.links = cur.slice(-LINKS_MAX);
+  return meta;
 }
 
 /** 把算出的证据字段写进 meta；默认值删掉不落盘（老库字节一致） */
@@ -754,6 +797,27 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
   /** 上次尝试重读的时刻：读失败后按 5 秒节流重试，别每次访问都去撞坏路径 */
   let lastRetryAt = 0;
   const RETRY_MS = 5_000;
+  /**
+   * 缓存对应盘上哪个版本（A1，2026-11-28 复核）。
+   *
+   * `cacheMtime` = 上次成功读到（或自己写成功）那份文件的 `mtimeMs`；
+   * **-1 表示当时文件不存在**（首次运行）。`cacheSize` 一起比：
+   * 同一毫秒内两次写且长度相同时 mtime 可能一样，size 能再挡一层。
+   *
+   * 为什么必须校验：`load()` 原来一旦有缓存就**永远不再读盘**。于是
+   * 「开发实例与运行副本共用一个 data 目录」「DSH 重启旧进程未退」这两种
+   * 真实场景下，后写的一方会把另一方刚写进去的事实整份覆盖。
+   * 别的数据坏了能重建，**记忆不能**。
+   */
+  let cacheMtime = -1;
+  let cacheSize = -1;
+  /**
+   * 读进来那一刻的快照，写前发现盘上变了就拿它做三方合并。
+   *
+   * 没有快照就分不清「盘上少了一条」是本进程删的还是别人删的——
+   * 一律补回来会**复活别人刚抹掉的事**，一律不补又会丢自己的新事实。
+   */
+  let snapshot = null;
   /** G8 一次性适配：load 时若从旧 schema 迁移上来，置位等 migrateIfNeeded() 落盘 */
   let schemaPendingWrite = false;
 
@@ -837,8 +901,141 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
     };
   }
 
+  /** 盘上版本戳；文件不存在给 null（≠「读不动」，后者会抛别的错） */
+  function stampOf() {
+    try {
+      const st = statSync(file());
+      return { m: st.mtimeMs, s: st.size };
+    } catch (e) {
+      if (e?.code === 'ENOENT') return null;
+      /** 读不动（EBUSY 等）：当成"不知道"，宁可多读一次盘 */
+      return { m: NaN, s: NaN };
+    }
+  }
+
+  /** 这份缓存与盘上一致吗 */
+  function cacheInSync() {
+    const st = stampOf();
+    if (!st) return cacheMtime === -1;
+    return st.m === cacheMtime && st.s === cacheSize;
+  }
+
+  /** 记下「这份缓存 = 盘上这个版本」，并留一份快照供写前合并 */
+  function markSynced() {
+    const st = stampOf();
+    cacheMtime = st ? st.m : -1;
+    cacheSize = st ? st.s : -1;
+    try {
+      snapshot = cache ? JSON.parse(JSON.stringify(cache)) : null;
+    } catch {
+      snapshot = null;
+    }
+  }
+
+  /** 结构相等（不看键序）：三方合并要判断"这条是不是本进程改过" */
+  function deepSame(a, b) {
+    if (a === b) return true;
+    if (typeof a !== typeof b || a === null || b === null) return false;
+    if (typeof a !== 'object') return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    const ka = Object.keys(a);
+    const kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (const k of ka) {
+      if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+      if (!deepSame(a[k], b[k])) return false;
+    }
+    return true;
+  }
+
+  /**
+   * A2 三方合并：`snapshot`（读进来时）→ `cur`（本进程改完的）对 `disk`（别人写的）。
+   *
+   * 三个方向都要对，少一条就出事：
+   *   · 盘上的列表是**后来**的事实 → 以它为骨架；
+   *   · 我们新增的（快照里没有）→ 补上，否则自己的写入白做；
+   *   · 快照里有、盘上没了 = **别人删的** → 尊重删除，不复活；
+   *   · 元数据/其它顶层键：本进程改过（与快照不同）用我们的，否则用盘上的。
+   *
+   * @returns {boolean} false = 合并不了（读不动 / 解析失败），调用方须放弃这次写入
+   */
+  function mergeWithDisk(cur) {
+    let disk = null;
+    try {
+      disk = normalizeMemory(JSON.parse(readFileSync(file(), 'utf8')) || {});
+    } catch (e) {
+      if (e?.code === 'ENOENT') disk = normalizeMemory({});
+      else {
+        log(`记忆文件在写入前被改动且读不出来（${e?.code || e?.message}），这次不写`);
+        return false;
+      }
+    }
+    const base = snapshot || normalizeMemory({});
+
+    const mergeList = (curList, baseList, diskList) => {
+      const out = Array.isArray(diskList) ? diskList.slice() : [];
+      const seen = new Set(out);
+      for (const text of Array.isArray(curList) ? curList : []) {
+        if (seen.has(text)) continue;
+        /** 快照里就有、现在盘上没了 → 别人删的，不补 */
+        if (Array.isArray(baseList) && baseList.includes(text)) continue;
+        out.push(text);
+        seen.add(text);
+      }
+      return out;
+    };
+    const mergeMeta = (curMap, baseMap, diskMap, texts) => {
+      const out = {};
+      for (const text of texts) {
+        const c = curMap?.[text];
+        const b = baseMap?.[text];
+        const d = diskMap?.[text];
+        const ours = c !== undefined && !deepSame(c, b);
+        const pick = ours ? c : (d !== undefined ? d : c);
+        if (pick !== undefined) out[text] = pick;
+      }
+      return out;
+    };
+    const next = { ...cur };
+    next.global = mergeList(cur.global, base.global, disk.global);
+    next.meta = { ...(cur.meta || {}) };
+    next.meta.global = mergeMeta(cur.meta?.global, base.meta?.global, disk.meta?.global, next.global);
+    const chatIds = [...new Set([...Object.keys(disk.chats || {}), ...Object.keys(cur.chats || {})])];
+    next.chats = {};
+    next.meta.chats = {};
+    for (const cid of chatIds) {
+      const list = mergeList(cur.chats?.[cid], base.chats?.[cid], disk.chats?.[cid]);
+      if (!list.length && !cur.meta?.chats?.[cid] && !disk.meta?.chats?.[cid]) continue;
+      next.chats[cid] = list;
+      next.meta.chats[cid] = mergeMeta(cur.meta?.chats?.[cid], base.meta?.chats?.[cid], disk.meta?.chats?.[cid], list);
+    }
+    /** 其它顶层键（personas / authz / …）：本进程改过就用我们的，否则用盘上的 */
+    for (const k of Object.keys(disk)) {
+      if (k === 'global' || k === 'chats' || k === 'meta') continue;
+      if (next[k] === undefined) next[k] = disk[k];
+      else if (deepSame(cur[k], base[k])) next[k] = disk[k];
+    }
+
+    /** 就地改缓存：调用方手里握着的 `m` 还是同一个对象，写完继续有效 */
+    for (const k of Object.keys(cur)) {
+      if (!(k in next)) delete cur[k];
+    }
+    Object.assign(cur, next);
+    log('记忆写入前发现盘上已被改动，已合并（别人的新增/删除都保留）');
+    return true;
+  }
+
   function load() {
-    if (cache && !ioFailed) return cache;
+    if (cache && !ioFailed) {
+      if (cacheInSync()) return cache;
+      /**
+       * 盘上变了：别的进程（或面板手改）写过。**丢掉缓存重读**，
+       * 绝不能拿旧快照继续当真相——那正是"丢更新"的入口。
+       */
+      log('记忆文件被外部改过，重读');
+      cache = null;
+      snapshot = null;
+    }
     /**
      * 读失败过：**不能就此永久放弃**。
      *
@@ -859,6 +1056,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
         /** 首次运行：空记忆是**真的**空，可以写 */
         ioFailed = false;
         cache = normalizeMemory({});
+        markSynced();
         return cache;
       }
       /** 读不动 ≠ 空：给空视图但禁止落盘，别把盘上还能救的内容盖掉 */
@@ -876,12 +1074,14 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
       quarantine(text, `不是合法 JSON（${e?.message ?? e}）`);
       ioFailed = false;
       cache = normalizeMemory({});
+      markSynced();
       return cache;
     }
     if (typeof raw !== 'object' || Array.isArray(raw)) {
       quarantine(text, '顶层不是对象');
       ioFailed = false;
       cache = normalizeMemory({});
+      markSynced();
       return cache;
     }
     /** schema 版本校验：高版本/非法版本隔离，老库无版本按 v1 迁移上来 */
@@ -905,13 +1105,33 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
     /** 读成功了：解除禁令（可能是从上次的故障里恢复） */
     ioFailed = false;
     cache = normalizeMemory(migrated);
+    markSynced();
     return cache;
   }
 
   function save() {
-    const m = load();
+    /**
+     * **用当前缓存，不在这里 reload。**
+     *
+     * 调用方是「`const m = load()` → 改 `m` → `save()`」这个形状；
+     * 如果这里再 `load()` 一次，而盘上恰好被别人改过，`load()` 会把
+     * `cache` 换成一份**新对象**——调用方刚做的修改就随旧对象一起被丢掉，
+     * 然后我们心平气和地把没改过的内容写回去，还返回 `true`。
+     * 这正是这次要修的"丢更新"，不能自己再造一个。
+     */
+    const m = cache || load();
     /** 读盘失败过：这一轮绝不写，避免用空表覆盖盘上还能救的内容 */
     if (ioFailed) return false;
+    /**
+     * A2：写前再看一眼盘上有没有被别人改过。
+     *
+     * 原来这里是"直接整份覆盖"。两个进程（开发实例 + 运行副本、
+     * 或 DSH 重启后旧进程没退）各自持有一份缓存时，后写的一方会把
+     * 另一方刚写进去的事实**整块抹掉**，而且谁都不会报错。
+     * 现在先比对版本戳：变了就三方合并（见 `mergeWithDisk`），
+     * 合并不了（读不动）就放弃这次写入——宁可少写一条，不能覆盖一片。
+     */
+    if (!cacheInSync() && !mergeWithDisk(m)) return false;
     try {
       /**
        * 写前留一份快照（只留一份 .prev），回滚/迁移出错时能拿回上一版。
@@ -923,6 +1143,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
       } catch { /* 快照写不下去也要继续写正本 */ }
       /** 老库/首次运行没有版本字段，写盘时补上（懒升级，只读启动不惊动） */
       writeJsonAtomic(file(), { ...m, schemaVersion: MEMORY_SCHEMA_VERSION });
+      /** 写完重记版本戳：下一次 save 才不会以为自己落后于盘上的自己 */
+      markSynced();
       return true;
     } catch {
       /* 写不进去就算了，不能因为存记忆把这一轮弄挂 */
@@ -964,7 +1186,12 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
    * @param {{w?:number, src?:object, at?:number}} [opts]
    * @returns {string[]} 新的列表
    */
-  function addInto(list, metaMap, fact, opts = {}) {
+  /**
+   * @param {string[]|null} [dropped] 因容量被挤掉的事实会追加到这里（A3）。
+   *   调用方拿得到它，才能说「这条没能进库」，而不是让 `save()` 成功
+   *   就以为一切正常——写盘成功 ≠ 这条还在库里。
+   */
+  function addInto(list, metaMap, fact, opts = {}, dropped = null) {
     const f = clean(fact);
     if (!f) return list;
     const t = Number(opts.at) > 0 ? Number(opts.at) : now();
@@ -1032,7 +1259,18 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
          * 不写 `changes` 事件——`until` + `supersededBy` 已经能还原整条链
          * （见 `changesOf` 上方注释：不造双份真相）。
          */
-        metaMap[other] = { ...om, until: t, supersededBy: factIdOf(f), updatedAt: t };
+        metaMap[other] = {
+          ...om,
+          until: t,
+          supersededBy: factIdOf(f),
+          updatedAt: t,
+          /**
+           * B3：被顶掉的 core 不再"永久"。
+           * 它已经不作数了，继续占着 `TIER_DECAY.core = 0` 的永不衰减位置
+           * 只会把活着的新事往后挤。只在原来是 core 时才写，老库字节不变。
+           */
+          ...(om.tier === 'core' ? { tier: 'long' } : {}),
+        };
       }
     };
 
@@ -1142,6 +1380,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
         .map((x, i) => ({ x, i, s: scoreOfFact(metaMap[x], t) }))
         .sort((a, b) => b.s - a.s || b.i - a.i);
       const drop = new Set(ranked.slice(q).map((r) => r.x));
+      if (dropped) for (const x of drop) dropped.push(x);
       for (const x of drop) delete metaMap[x];
       kept = kept.filter((x) => !drop.has(x));
     }
@@ -1157,6 +1396,7 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
       .map((text, i) => ({ text, i, s: scoreOfFact(metaMap[text], t) }))
       .sort((a, b) => b.s - a.s || b.i - a.i);
     const keep = new Set(scored.slice(0, total).map((x) => x.text));
+    if (dropped) for (const text of kept) if (!keep.has(text)) dropped.push(text);
     for (const text of kept) if (!keep.has(text)) delete metaMap[text];
     return kept.filter((text) => keep.has(text));
   }
@@ -1195,6 +1435,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
      */
     reload() {
       cache = null;
+      /** 快照也清掉：否则下次写前合并会拿一份过期基准去算"谁改了什么" */
+      snapshot = null;
       /**
        * 也要清掉读失败标记：`reload()` 就是「请重新读一次盘」的显式请求
        * （一键改写 / 一键回退之后必调）。不清的话，之前一次瞬时读故障会让
@@ -1348,6 +1590,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
              * 一律保留（宁漏不误）。不写回磁盘。
              */
             about: String(x.about || ''),
+            /** 相关链接（别的 fact 的稳定 id）：面板显示「相关 N」，不参与注入 */
+            links: Array.isArray(x.links) ? x.links.map(String) : [],
             /** 以下都是可选扩展字段，老库没有时给默认，不写回磁盘 */
             tier: FACT_TIERS.includes(x.tier) ? x.tier : 'long',
             /** A2 双时态：种类 + 事发时间（缺省回退到 at，老库表现不变） */
@@ -1416,6 +1660,14 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
         const target = hit.mm[hit.text];
         const grown = growTier(target);
         if (grown !== (FACT_TIERS.includes(target.tier) ? target.tier : 'long')) target.tier = grown;
+      } else {
+        /**
+         * B3：反证也要能降。`growTier` 只在 reinforce 时调，所以这里补一刀——
+         * 否则一条 core 被反驳到 confidence 0.2 也仍然是"永不衰减"，
+         * 护栏只挡住了升档，没管住已经在顶上的。
+         */
+        const target = hit.mm[hit.text];
+        if (target.tier === 'core' && Number(target.confidence) < 0.5) target.tier = 'long';
       }
       save();
       return { ok: true, confidence: next.confidence, proofs: next.proofs };
@@ -1431,13 +1683,21 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
      */
     add(chatId, fact, scope = 'global', opts = {}) {
       const m = load();
+      /**
+       * A3：调用方可以传 `opts.dropped: []` 进来收"因容量被挤掉的事实"。
+       *
+       * 为什么不改返回值：`add()` 的布尔返回值被 `apply-markers`、面板、
+       * 巩固、测试共十几处当真假用，改成对象会静默把 `=== false` 全变成 false
+       * （"没记上"永远不触发）。收集数组是加法，老调用点一个字都不用改。
+       */
+      const dropped = Array.isArray(opts.dropped) ? opts.dropped : null;
       if (scope === 'chat') {
         if (!chatId) return false;
         const cur = Array.isArray(m.chats[chatId]) ? m.chats[chatId] : [];
         const mm = (m.meta.chats[chatId] = m.meta.chats[chatId] || {});
-        m.chats[chatId] = addInto(cur, mm, fact, opts);
+        m.chats[chatId] = addInto(cur, mm, fact, opts, dropped);
       } else {
-        m.global = addInto(m.global, m.meta.global, fact, opts);
+        m.global = addInto(m.global, m.meta.global, fact, opts, dropped);
       }
       /**
        * **把落盘结果如实回给调用方**（2026-11 复核）。
@@ -1446,6 +1706,9 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
        * 无条件 `return true`：工具回「记住了」、面板回 `ok:true`，可 5 秒后
        * 重读成功时 `cache` 会被盘上内容整体替换——那条事实**内存和磁盘都没了**，
        * 而模型以为记住了。
+       *
+       * 注意：**写盘成功 ≠ 这条还在库里**（容量满了会挤掉一条）。要分清这层
+       * 的调用方传 `dropped` 数组进来，见上面 A3 的说明。
        */
       return save();
     },
@@ -1487,6 +1750,39 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
      * @param {{at?:number}} [opts]
      * @returns {{ok:boolean, text?:string, scope?:string, why?:string, candidates?:string[]}}
      */
+    /**
+     * 建立「相关链接」（由巩固里那次模型判定调用）。
+     *
+     * 为什么判据不在这一层：字符相似度在这件事上是**反的**（本仓实测
+     * 「狗叫 Max」vs「带 Max 露营」0.21，而「喜欢咖啡」vs「喜欢喝茶」0.57），
+     * 任何阈值都会既漏又误。所以判断交给模型，这里只做**校验与落账**：
+     * 两条都必须在这一层、都还活着、不是同一条，否则整对丢弃（宁漏不误）。
+     *
+     * @returns {{ok:boolean, linked:number, why?:string}}
+     */
+    link(chatId, aText, bText, { scope = 'chat' } = {}) {
+      const m = load();
+      const layer = scope === 'global'
+        ? { list: m.global, mm: m.meta.global }
+        : (() => {
+          const id = String(chatId || '');
+          return { list: m.chats[id], mm: m.meta.chats[id] };
+        })();
+      const a = String(aText ?? '').trim();
+      const b = String(bText ?? '').trim();
+      if (!a || !b || a === b) return { ok: false, linked: 0, why: '两条得都不一样且有内容' };
+      const { list, mm } = layer;
+      if (!Array.isArray(list) || !mm) return { ok: false, linked: 0, why: '这一层没有事实' };
+      if (!list.includes(a) || !list.includes(b)) return { ok: false, linked: 0, why: '有一句不在这一层' };
+      if (mm[a]?.until || mm[b]?.until || mm[a]?.archivedAt || mm[b]?.archivedAt) {
+        return { ok: false, linked: 0, why: '已作废/已归档的不链' };
+      }
+      addLink(mm[a], factIdOf(b));
+      addLink(mm[b], factIdOf(a));
+      save();
+      return { ok: true, linked: 1 };
+    },
+
     supersede(chatId, needle, opts = {}) {
       const w = String(needle ?? '').trim();
       if (!w) return { ok: false, why: '要替换的旧说法不能为空' };
@@ -1534,7 +1830,17 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
           candidates: [h.text],
         };
       }
-      h.mm[h.text] = { ...(h.mm[h.text] ?? {}), until: at };
+      h.mm[h.text] = {
+        ...(h.mm[h.text] ?? {}),
+        until: at,
+        /**
+         * 有「新说法」就把因果链补全（`supersededBy` + `updatedAt`）。
+         * 不传 `by` 时一个字段都不加——老的 `<<replace>>` / 面板调用字节不变。
+         */
+        ...(opts.by ? { supersededBy: factIdOf(String(opts.by)), updatedAt: at } : {}),
+        /** B3：被顶掉的 core 不再"永久"（同 addInto 里那条） */
+        ...(h.mm[h.text]?.tier === 'core' ? { tier: 'long' } : {}),
+      };
       save();
       return { ok: true, text: h.text, scope: h.scope };
     },
@@ -2133,6 +2439,8 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
                */
               updatedAt: Number(x.updatedAt) > 0 ? Number(x.updatedAt) : 0,
               changes: changesOf(x),
+              /** 相关链接：清理→还原不能丢，否则'顺链想起'在还原后静默消失 */
+              links: Array.isArray(x.links) ? x.links.map(String).slice(-LINKS_MAX) : [],
               /**
                * E2 待跟进：**必须一起导出**。
                * 不导出的话，「清理 → 后悔 → 还原」之后这条事实回来了，
@@ -2288,6 +2596,10 @@ export function createMemory({ now = () => Date.now(), capacityOf = null, factFi
       if (row.supersededBy) meta.supersededBy = String(row.supersededBy);
       /** 变更留痕：0 / 空数组不落盘，老库与升级前的文件逐字节一致 */
       if (Number(row.updatedAt) > 0) meta.updatedAt = Number(row.updatedAt);
+      /** 相关链接：空数组不落盘，老库还原逐字节一致 */
+      if (Array.isArray(row.links) && row.links.length) {
+        for (const id of row.links.slice(-LINKS_MAX)) addLink(meta, id);
+      }
       const ch = changesOf({ changes: row.changes });
       if (ch.length) meta.changes = ch;
       /** E2 待跟进：同样默认不落盘，还原后与升级前的老库逐字节一致 */

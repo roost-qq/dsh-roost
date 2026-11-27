@@ -5868,6 +5868,11 @@ window.__ModuleLoader__.load({
         if (evCount >= 2) parts.push(`${evCount} 条佐证`)
         /** 阶段 2 标签：跟在出处后面，不另起一行（老库没有 tags = 不显示） */
         if (Array.isArray(d.tags) && d.tags.length) parts.push(d.tags.map((t) => '#' + t).join(' '))
+        /**
+         * 相关链接（`links`）：同一实体的不同事（"狗叫 Max" 与 "带 Max 去露营"）。
+         * 只显示条数——它们是**线索**，不是这条事实的内容；老库没有就一个字不显示。
+         */
+        if (Array.isArray(d.links) && d.links.length) parts.push(`相关 ${d.links.length}`)
         return parts.join(' · ')
       }
 
@@ -6567,6 +6572,18 @@ window.__ModuleLoader__.load({
           ),
           h('div', { style: { marginBottom: 10 } },
             h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 4 } }, '通用（跨群）'),
+            /**
+             * C2：把「库存」和「平时注进去几条」的差额摊开。
+             *
+             * 之前这里只列事实，看起来就是"她全都记得"。实际平时只注
+             * `inject.global`（6 条）+ `inject.chat`（3 条），deep 时才全量，
+             * 而 deep 要等 `deepEvery` 轮。用户以为"存了就在用"，
+             * 遇到"她怎么忘了"时第一反应只能是 bug。
+             */
+            mem?.inject
+              ? h('div', { className: 'roost-note', style: { margin: '0 0 4px' } },
+                  `平时注 ${mem.inject.global} + ${mem.inject.chat} 条，库里共 ${(mem?.global || []).length} + ${(mem?.chat || []).length} 条（更深的那一层每 ${mem.inject.deepEvery || 15} 轮才全量给一次）`)
+              : null,
             (mem?.global || []).some((f) => tagHit('global', f))
               ? h('div', { className: 'roost-list' },
                   mem.global.filter((f) => tagHit('global', f)).map((f, i) => factRow('global', f, i)),
@@ -6746,8 +6763,17 @@ window.__ModuleLoader__.load({
               onClick: async () => {
                 const r = await get('/memory/backlog')
                 if (r?.ok === false) return toast(r.message || '读不到待整理进度')
+                /**
+                 * C2：补过几批的会话要说出「已经补了多少」。
+                 * 只说"还剩 300 条"，用户会以为它一直没干活；说成
+                 * "已补 240 / 还剩 60"才看得出是在往前推。
+                 */
+                const partly = (r.items || []).filter((x) => x.processed > 0)
+                const tail = partly.length
+                  ? `；其中 ${partly.length} 个已补过（${partly.slice(0, 2).map((x) => `${x.processed}/${x.total}`).join('、')}）`
+                  : ''
                 toast(r.pending
-                  ? `还有 ${r.pending} 个「天 × 会话」没整理（共 ${r.rows} 条日记，最早 ${r.oldest}）`
+                  ? `还有 ${r.pending} 个「天 × 会话」没整理完（还剩 ${r.rows} 条日记，最早 ${r.oldest}${tail}）`
                   : `最近 ${r.scannedDays} 天都整理完了`)
               },
             }, '看还有多少没整理'),
@@ -6755,6 +6781,31 @@ window.__ModuleLoader__.load({
               '平时每天凌晨自动跑（错过会补）'),
           ),
         ),
+
+        /* ── 她自己写下的（B-lite） ── */
+        (mem?.self?.notes || []).length
+          ? h(Sec, { n: '02b', title: '她自己写下的', defaultOpen: false },
+              h('div', { className: 'roost-note', style: { marginTop: 0 } },
+                '这些是她每天写给自己的。勾了「算数」的那几条，新会话开场会当成「你答应过自己的」带上；没勾的只是她的自言自语，不进提示词。'),
+              h('div', { className: 'roost-list' },
+                mem.self.notes.slice().reverse().map((n2) =>
+                  h('div', { key: n2.day, className: 'roost-item' },
+                    h('span', { className: 't' }, n2.text),
+                    h('span', { className: 'd' }, `${n2.day}${n2.kept ? ' · 算数' : ''}`),
+                    h('button', {
+                      type: 'button', className: 'roost-btn',
+                      onClick: async () => {
+                        const r = await quick('self.keep', { day: n2.day, text: n2.text, on: !n2.kept })
+                        toast(r?.message || (r?.ok ? '改了' : '没改成'), r?.ok === false ? 'err' : 'ok')
+                        if (r?.ok !== false) reload()
+                      },
+                    }, n2.kept ? '取消' : '算数'),
+                  ),
+                ),
+              ),
+            )
+          : null,
+
 
         /* ── 第三层：图谱 ── */
         h(Sec, { n: '03', title: '她知道的关系', defaultOpen: false },

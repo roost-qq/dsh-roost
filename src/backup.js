@@ -635,6 +635,7 @@ export function restoreRetentionRows({ payload, memory, journal }) {
       /** 变更留痕：跟着 `retention.entries()` 走，漏了还原就丢掉"改过什么" */
       updatedAt: Number(raw.updatedAt) || 0,
       changes: Array.isArray(raw.changes) ? raw.changes.slice(-6) : [],
+      links: Array.isArray(raw.links) ? raw.links.slice(-3) : [],
       /** 标签：跟着 `retention.entries()` 走，漏一个还原就丢归类 */
       tags: Array.isArray(raw.tags) ? raw.tags : [],
       /** 证据账本三件套：跟着 `retention.entries()` 走，漏一个还原就丢证据 */
