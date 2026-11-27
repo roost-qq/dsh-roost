@@ -98,3 +98,17 @@ test('接线守门：通道层在发送前调用，且宿主把配置热读传�
   const cfg = readFileSync(new URL('../src/config.js', import.meta.url), 'utf8');
   assert.match(cfg, /dupSimilarity: 0/, '默认必须是关');
 });
+
+test('面板开关：注册成 select 三档，默认「关」，值走 chat.dupSimilarity', () => {
+  const feat = readFileSync(new URL('../src/features.js', import.meta.url), 'utf8')
+  const i = feat.indexOf("id: 'chatDupSimilarity'")
+  assert.ok(i > 0, '要在功能注册表里，否则面板看不到')
+  const block = feat.slice(i, i + 900)
+  assert.match(block, /path: \['chat', 'dupSimilarity'\]/, '写的必须是去重那个配置')
+  assert.match(block, /kind: 'select'/, '三档用 select，不让人手填 0~1 的小数')
+  assert.match(block, /default: 0,/, '默认关（数字，和 DEFAULTS 同型）')
+  assert.match(block, /value: 0\.95/, '至少要有严格档')
+  /** 字符串值也要能被宿主读成数字（select 写的是 '0.95'） */
+  assert.equal(Number('0.95') || 0, 0.95);
+  assert.equal(Number('0') || 0, 0, 'select 回写字符串时也要读成 0');
+})

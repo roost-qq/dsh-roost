@@ -269,6 +269,34 @@ export const FEATURES = [
     offHint: '不再判断「聊完了」，也就没有「上次聊到哪儿」可以接。',
   },
   {
+    /**
+     * 出站近似去重（参照 mem0/aurabot 的 `chat.dupSimilarity`）。
+     *
+     * 值域是数字（0 = 关，0.85 / 0.95 = 相似度阈值），但这里用 `select` 暴露成
+     * 三档：直接让人填 0~1 的小数没有意义，用户心里想的是「关 / 宽松 / 严格」。
+     * select 写进去的是字符串（`'0.95'`），宿主侧 `Number(...) || 0` 两种都认。
+     *
+     * **默认 `'0'`（关）**：短句重复在正常对话里不少见（连说两次「马上」），
+     * 一旦被吞，用户会觉得她漏回消息，而这种 bug 极难复现。要开自己开。
+     */
+    id: 'chatDupSimilarity',
+    label: '同一段别发两遍',
+    desc: '长回合里她常把「我先看看」「我看了下」这类几乎一样的话发两条；开着会挡掉后一条（短句不挡、只跟上一条比、十分钟窗）',
+    source: 'config',
+    path: ['chat', 'dupSimilarity'],
+    kind: 'select',
+    options: [
+      { value: 0, label: '关（保持现状）' },
+      { value: 0.85, label: '宽松：挡住几乎一样的整段' },
+      { value: 0.95, label: '严格：只挡一字不差' },
+    ],
+    default: 0,
+    requires: NONE,
+    affects: NONE,
+    offHint: '',
+    advanced: true,
+  },
+  {
     id: 'qqTools',
     label: '分段说话 / 退场 / @人',
     desc: '把「说几句、什么时候停」交给她自己决定',
@@ -772,7 +800,7 @@ export function cannotEnable(cfg = {}, store = {}, id) {
 export const FEATURE_GROUPS = [
   /** 运行态排最前：它决定后面所有开关生效不生效 */
   { id: 'run', label: '运行', ids: ['botEnabled', 'dryRun'] },
-  { id: 'talk', label: '怎么说话', ids: ['qqTools', 'qqRetract', 'quoteReply', 'quotePercent', 'stickers', 'voice'] },
+  { id: 'talk', label: '怎么说话', ids: ['qqTools', 'qqRetract', 'quoteReply', 'quotePercent', 'stickers', 'voice', 'chatDupSimilarity'] },
   { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact'] },
   { id: 'queue', label: '消息来不及回的时候（高级）', ids: ['steerInGroup', 'queueMax', 'queueMinBudgetSec'] },
   { id: 'proactive', label: '会不会主动找你', ids: ['speakUp', 'awake'] },
@@ -804,7 +832,7 @@ export function visibleGroups(features = visibleFeatures()) {
  * 每个功能开关的「家」：`id → 页面 tab key`。
  *
  * 2026-11-26 面板信息架构调整：权限页不再承接「有没有这个功能」，
- * 33 个开关按语义归到各功能页（见 `FEATURE_HOME`），权限页只留「谁能用」。
+ * 34 个开关按语义归到各功能页（见 `FEATURE_HOME`），权限页只留「谁能用」。
  *
  * 这张表是「零遗漏」的唯一真源，也是唯一能被机器校验的东西：
  * - 不许按 `FEATURE_GROUPS` 整组渲染：`talk` / `memory` / `work` 三组都被拆开了
@@ -822,6 +850,8 @@ export const FEATURE_HOME = {
   /** 聊天（新页，挂在人设组）：说话方式 + 排队与插话 */
   qqTools: 'talk',
   closing: 'talk',
+  /** 出站去重：和「怎么说出去」同页（聊天 → 说话方式） */
+  chatDupSimilarity: 'talk',
   sendFile: 'talk',
   steerInGroup: 'talk',
   queueMax: 'talk',

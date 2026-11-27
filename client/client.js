@@ -12083,7 +12083,7 @@ window.__ModuleLoader__.load({
        * 与撤回时限说明。这边再画一份就是两份 UI 写同一份 `config.qqTools`，
        * 谁也看不见对方改了什么——所以这里只留一行指路。
        */
-      const SAY = ['qqTools', 'closing', 'sendFile']
+      const SAY = ['qqTools', 'closing', 'sendFile', 'chatDupSimilarity']
       const QUEUE = ['steerInGroup', 'queueMax', 'queueMinBudgetSec']
       /**
        * 兜底：`FEATURE_HOME` 以后新增的 talk 开关如果没被上面两个清单点到名，
