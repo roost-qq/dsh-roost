@@ -191,13 +191,19 @@ export function createProfiles({
       const name = clipChars(String(who || openid || key).trim(), 24) || key;
       const cur = all.find((r) => r.key === key);
       if (cur) {
+        /**
+         * 主人手填的字段不再被模型提炼冲掉（对齐 aurabot #604 的 ownerFields）。
+         * 锁的是「字段」而不是「值」：主人清空某字段等于交还给自动印象，
+         * 下次巩固就能重新写。老数据没有 ownerFields 字段时全部照旧。
+         */
+        const manual = new Set(Array.isArray(cur.ownerFields) ? cur.ownerFields : []);
         cur.name = name || cur.name;
-        cur.impression = accumulate(cur.impression, impression, IMPRESSION_MAX);
-        cur.tips = accumulate(cur.tips, tips, TIPS_MAX);
+        if (!manual.has('impression')) cur.impression = accumulate(cur.impression, impression, IMPRESSION_MAX);
+        if (!manual.has('tips')) cur.tips = accumulate(cur.tips, tips, TIPS_MAX);
         /** E4：只有真的提炼到讨厌项才写，空串不覆盖已有的 */
-        if (bad) cur.dislikes = accumulate(cur.dislikes, dislikes, DISLIKES_MAX);
-        if (sty) cur.style = accumulate(cur.style || '', style, STYLE_MAX);
-        if (per) cur.persona = accumulate(cur.persona || '', persona, PERSONA_MAX);
+        if (bad && !manual.has('dislikes')) cur.dislikes = accumulate(cur.dislikes, dislikes, DISLIKES_MAX);
+        if (sty && !manual.has('style')) cur.style = accumulate(cur.style || '', style, STYLE_MAX);
+        if (per && !manual.has('persona')) cur.persona = accumulate(cur.persona || '', persona, PERSONA_MAX);
         cur.at = now();
         cur.hits = Number(cur.hits || 0) + 1;
       } else {
@@ -241,9 +247,11 @@ export function createProfiles({
     },
 
     /**
-     * 人物墙人工编辑（对齐 aurabot /persona/person/save）。
+     * 人物墙人工编辑（对齐 aurabot /persona/person/save 与 #604 ownerFields）。
      * 只覆盖 patch 里显式给的字段，模型提炼的其余字段原样留着；
      * 用户主动改 → 当场作废当日渲染缓存（隐私优先于 prompt cache）。
+     * 手工填过的字段记进 ownerFields，后续 note() 不再自动覆盖；
+     * 清空某字段（传空串）＝交还给自动印象，从 ownerFields 里移除。
      * @returns {{ok:boolean, message:string}}
      */
     edit(key, patch = {}, { isOwner = false } = {}) {
@@ -256,6 +264,7 @@ export function createProfiles({
       const fields = ['alias', 'impression', 'tips', 'dislikes', 'style', 'persona'];
       const has = (f) => Object.prototype.hasOwnProperty.call(patch, f);
       if (!fields.some(has) && !has('tags') && !has('name')) return { ok: false, message: '没有要保存的内容' };
+      const manual = new Set(Array.isArray(row.ownerFields) ? row.ownerFields : []);
       let tags;
       if (has('tags')) {
         const r = normalizePersonTags(patch.tags, { isOwner });
@@ -273,9 +282,14 @@ export function createProfiles({
         const v = clipChars(String(patch[f] ?? '').trim(), max);
         if (f === 'impression' || f === 'tips' || f === 'dislikes') row[f] = accumulate('', v, max);
         else row[f] = v;
+        /** 填了就锁住，清空就交还自动提炼；alias 不参与模型写入，记了也无害 */
+        if (v) manual.add(f);
+        else manual.delete(f);
       }
       if (has('name')) row.name = clipChars(String(patch.name ?? '').trim(), 24) || row.name;
       if (tags !== undefined) { row.tags = tags; row.tagsBy = 'owner'; }
+      if (manual.size) row.ownerFields = [...manual];
+      else delete row.ownerFields;
       row.at = now();
       renderCache = null;
       save();
