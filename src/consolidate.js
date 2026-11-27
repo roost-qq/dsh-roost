@@ -18,9 +18,62 @@
  * 模型抽风时宁可少改，不能把记忆改坏。
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { dayOf } from './journal.js';
+import { dataDir } from './config.js';
+import { writeJsonAtomic } from './atomic.js';
 import { RE_CORRECTION, MIN_BOT_LINES } from './self.js';
 import { isRevocation, isIdentityFact, isPoliteRevocation } from './journal-bridge.js';
+
+/**
+ * C1：一次 run 里同一个会话最多补几批、整轮最多调几次模型。
+ *
+ * 为什么要上限：一个聊了两千句的群，理论上要拆成 25 批。一次跑完既慢又贵，
+ * 而且失败一次就全白跑。留成"每天补几批、断点续跑"，最多两三天就追平。
+ */
+export const MAX_BATCHES_PER_CHAT = 3;
+export const MAX_MODEL_CALLS_PER_RUN = 8;
+
+/**
+ * 巩固断点（C1）：`<数据目录>/consolidate-progress.json`。
+ *
+ * 键是 `<日期>|<chatId>`，值是 `{ lastAt, summaries }`——"这个会话这天已经
+ * 送到模型的最晚时刻"和"分批产生的几段摘要"。
+ *
+ * 为什么不放 journal：那会多出一种行，所有 `byDay` 的消费方（注入、检索、
+ * 面板）都得再判一次 kind；而断点是**临时状态**，整理完就该消失。
+ * 文件不存在 = 没有断点 = 老行为（摘要行在就算完成），零迁移。
+ */
+const PROGRESS_FILE = () => join(dataDir(), 'consolidate-progress.json');
+
+function readProgress() {
+  try {
+    const raw = JSON.parse(readFileSync(PROGRESS_FILE(), 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch { return {}; }
+}
+/** 断点写不下去不该弄挂巩固：读失败/写失败都当"没有断点" */
+function writeProgress(all) {
+  try { writeJsonAtomic(PROGRESS_FILE(), all); } catch { /* 下次从头补罢了 */ }
+}
+export function progressOf(key) {
+  return readProgress()[key] || null;
+}
+function setProgress(key, val) {
+  const all = readProgress();
+  all[key] = val;
+  const keys = Object.keys(all).sort();
+  /** 只留最近 200 条：断点是临时状态，不该无限长 */
+  for (const k of keys.slice(0, Math.max(0, keys.length - 200))) delete all[k];
+  writeProgress(all);
+}
+function clearProgress(key) {
+  const all = readProgress();
+  if (!(key in all)) return;
+  delete all[key];
+  writeProgress(all);
+}
 
 /** 单次巩固最多改多少条等级。防模型一口气把整天的日记全升成 critical */
 const MAX_RANK_CHANGES = 30;
@@ -129,6 +182,31 @@ export function pickRows(rows, { maxRows = MAX_ROWS, maxChars = MAX_INPUT_CHARS,
 }
 
 /**
+ * C1：按**时间升序**切一个"能整批塞进模型"的窗口。
+ *
+ * 为什么不能直接拿 `pickRows` 的输出来当断点：它按「重要度优先 + 新的优先」
+ * 排序，第一批拿走的是**最新**的 80 条，断点就跳到了当天末尾——中间那批
+ * 旧消息永远轮不到（实测：120 行的会话只喂进去 80 行就判"整理完了"）。
+ * 断点要单调前进，所以取窗口必须按时间；重要度只用来决定**批内**的先后。
+ *
+ * 字数也在这里算，和 `pickRows` 的 `line` 拼法保持一致——窗口内的行必须
+ * 全部能进 prompt，否则"被字数挤掉的行"会随着断点跳过而永久丢失。
+ */
+export function chronoWindow(rows, { maxRows = MAX_ROWS, maxChars = MAX_INPUT_CHARS } = {}) {
+  const ordered = [...(Array.isArray(rows) ? rows : [])].sort((a, b) => a.at - b.at);
+  const out = [];
+  let used = 0;
+  for (const r of ordered) {
+    const len = String(r.text ?? '').length + String(r.id ?? '').length + 24;
+    /** 一条放不下也要收（否则它永远进不去，断点也永远不动） */
+    if (out.length && (out.length >= maxRows || used + len > maxChars)) break;
+    out.push(r);
+    used += len;
+  }
+  return out;
+}
+
+/**
  * **L3 语义兜底的候选集**（批次 2 的第三级，00:5x 补做）。
  *
  * L1（引用精确作废）/ L2（显式改口句式）在写日记时就能确定性命中；
@@ -223,6 +301,37 @@ export function buildLinkPrompt(packs = []) {
     '输出 JSON，什么都别提：',
     '{"links":[{"l":"分组名","a":1,"b":3}]}',
     '最多 8 对；没有就输出 {"links":[]}。',
+  ];
+  for (const p of packs) {
+    lines.push('', `—— ${p.key} ——`);
+    p.texts.forEach((t, i) => lines.push(`${i + 1}. ${t}`));
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 语义改口的判定提示（B1，2026-11-28 复核 #6）。
+ *
+ * 字面取代（`SUPERSEDE_SIM = 0.75`）只抓「同一句改了个尾巴」，
+ * 抓不到「住在杭州」→「搬到上海」（本仓实测相似度 0.10）。这一类只能靠模型：
+ * 它读得懂"这是同一件事的新旧两说"。
+ *
+ * 但**不需要任何身份标识**——和「按人归属」完全不同，模型只读两句话。
+ * 成本控制同 links：一天一次、一次判完，不在写入路径做 N²。
+ */
+export function buildSupersedePrompt(packs = []) {
+  const lines = [
+    '下面按会话分组列出她记着的事，**同一个组内越靠后越新**。请找出「后来的说法已经取代了前面那条」的对子。',
+    '',
+    '判据（要严）：',
+    '· 两条说的是**同一个对象、同一件事**（同一个人住哪 / 同一只宠物叫什么 / 同一个计划的时间 / 同一个偏好）；',
+    '· 而且前面那条**现在已经不成立了**（搬家了、改名了、改主意了、病好了、换了工作）。',
+    '· **不是取代**：同一件事的不同侧面（「喜欢咖啡」与「每天两杯」）、不同对象（「妈妈住苏州」与「爸爸住苏州」）、都还成立的两件事。',
+    '· 拿不准就**不要提**——错顶掉一条真事的代价，比漏掉一条旧事大得多。',
+    '',
+    '输出 JSON，什么都别解释：',
+    '{"supersede":[{"l":"分组名","old":1,"new":3,"why":"搬家"}]}',
+    '最多 6 对；没有就输出 {"supersede":[]}。',
   ];
   for (const p of packs) {
     lines.push('', `—— ${p.key} ——`);
@@ -468,7 +577,7 @@ export function buildSelfPrompt({ day, said = [], corrected = [] } = {}) {
  * @param {object} [o.self]   createSelf() 的返回（第五层：自我叙述）
  * @param {(p:string)=>Promise<string>} [o.generate] 没给就只做机械压缩
  */
-export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false, linksEnabled = false,
+export function createConsolidate({ journal, graph, memory, self = null, generate = null, aliasesOf = () => [], log = () => {}, now = () => Date.now(), profiles = null, profilesEnabled = false, linksEnabled = false, semanticEnabled = false,
   /**
    * 补算日记向量用（可选）。不传 = 不补（纯关键词）。
    * 之前这里只报 `stats.needVec` 数、注释说"由宿主填充"，但宿主从没调过——
@@ -492,6 +601,9 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
   /** 相关链接：同样运行时读开关 */
   const linksOn = () => (typeof linksEnabled === 'function'
     ? linksEnabled() === true : linksEnabled === true);
+  /** 语义改口（B1，默认关）：同样运行时读开关 */
+  const semanticOn = () => (typeof semanticEnabled === 'function'
+    ? semanticEnabled() === true : semanticEnabled === true);
 
   /**
    * 相关链接的整轮判定（默认关）。
@@ -501,8 +613,13 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
    * 落账交给 `memory.link()`——那一层校验两条都在这一层、都还活着，
    * 模型乱写的编号会被静默丢弃（宁漏不误）。
    */
-  async function writeLinks({ day, maxLayers = 3, maxFacts = 12 } = {}) {
-    if (!generate || !memory?.link) return { linked: 0, why: '没有模型或没有 memory' };
+  /**
+   * 取「这次要拿给模型判的几组事实」：跨群层 + 当天有日记的会话（最多 3 个）。
+   *
+   * links 和语义改口共用它——两处口径必须一致，否则同一天同一批事实，
+   * 一处判链接、一处判改口，拿到的编号含义却不同（会错位顶替真事）。
+   */
+  function factPacks({ day, maxLayers = 3, maxFacts = 12 } = {}) {
     const rows = journal.byDay(day);
     const chatIds = [...new Set(rows.map((r) => String(r.chatId || '')).filter(Boolean))].slice(0, maxLayers);
     const layers = [{ key: 'global', chatId: '', scope: 'global' }];
@@ -518,6 +635,12 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         .slice(0, maxFacts);
       if (texts.length >= 2) packs.push({ key: L.key, chatId: L.chatId, scope: L.scope, texts });
     }
+    return packs;
+  }
+
+  async function writeLinks({ day, maxLayers = 3, maxFacts = 12 } = {}) {
+    if (!generate || !memory?.link) return { linked: 0, why: '没有模型或没有 memory' };
+    const packs = factPacks({ day, maxLayers, maxFacts });
     if (!packs.length) return { linked: 0, why: '没有可配的事实' };
     const raw = await generate(buildLinkPrompt(packs));
     const plan = parseJsonLoose(raw) || {};
@@ -534,6 +657,47 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
       } catch { /* 单对失败不影响其它 */ }
     }
     return { linked, layers: packs.length };
+  }
+
+  /**
+   * 语义改口（B1，默认关）：让模型指出「旧说法 → 新说法」，落账走 `memory.supersede`。
+   *
+   * 为什么必须有这一层：字面取代只认 0.75 相似度，「住在杭州」→「搬到上海」
+   * 实测 0.10，两条会长期并存、同时注入，她一会儿说在杭州一会儿说在上海。
+   *
+   * 三道校验（缺一条都可能顶掉真事）：
+   *   1. 编号必须「旧的在前、新的在后」——模型偶尔把两个编号写反；
+   *   2. 落账走 `supersede()`，它自己会拒「匹配到多条」和「听说的顶掉本人说的」；
+   *   3. 顺带把 `by`（新说法）写进 `supersededBy`，因果链才完整。
+   */
+  async function writeSupersedes({ day, maxLayers = 3, maxFacts = 12 } = {}) {
+    if (!generate || !memory?.supersede) return { superseded: 0, why: '没有模型或没有 memory' };
+    const packs = factPacks({ day, maxLayers, maxFacts });
+    if (!packs.length) return { superseded: 0, why: '没有可判的事实' };
+    const raw = await generate(buildSupersedePrompt(packs));
+    const plan = parseJsonLoose(raw) || {};
+    let superseded = 0;
+    for (const it of (Array.isArray(plan.supersede) ? plan.supersede : []).slice(0, 12)) {
+      const L = packs.find((p) => p.key === String(it?.l ?? ''));
+      if (!L) continue;
+      const oldIdx = Number(it?.old);
+      const newIdx = Number(it?.new);
+      /** 只认「旧的靠前、新的靠后」：写反的整对丢弃，不猜 */
+      if (!(oldIdx >= 1 && newIdx > oldIdx)) continue;
+      const oldText = L.texts[oldIdx - 1];
+      const newText = L.texts[newIdx - 1];
+      if (!oldText || !newText) continue;
+      try {
+        const r = memory.supersede(L.chatId, oldText, { scope: L.scope, by: newText });
+        if (r?.ok) {
+          superseded += 1;
+          log(`语义改口：「${String(oldText).slice(0, 20)}」→「${String(newText).slice(0, 20)}」（${String(it?.why || '').slice(0, 20)}）`);
+        } else if (r?.why) {
+          log(`语义改口没落账（${String(oldText).slice(0, 20)}）：${r.why}`);
+        }
+      } catch { /* 单对失败不影响其它 */ }
+    }
+    return { superseded, layers: packs.length };
   }
   /** 上一次的结果，面板和 /consolidate 接口读它 */
   let last = null;
@@ -617,67 +781,129 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         log(`今天有 ${groups.size} 个会话，先处理 ${MAX_CHATS_PER_RUN} 个，其余留到明天`);
       }
 
+      /**
+       * C1（2026-11-28 复核）：**同一天同一会话超出一批的行，不再被静默丢掉**。
+       *
+       * 原来 `pickRows` 超过 `maxRows`/字数上限就 `continue`，被丢的行没人管，
+       * 而摘要行照写——这天这个会话就算"已整理"，永远不再来一遍。聊得热闹的
+       * 那天，较早的普通消息就永久没进长期记忆（critical/important 优先保留，
+       * 被挤掉的正是日常细节）。这是数据静默丢失，不是"效果差一点"。
+       *
+       * 现在：一次 run 里同一会话可以连补几批（有上限），进度写进断点文件；
+       * **全部处理完才写摘要行**，没完就留着断点下次接着来。老摘要行没有断点
+       * → 仍然当"已完成"，零迁移。
+       */
+      const maxBatches = generate ? MAX_BATCHES_PER_CHAT : 1;
+      let modelCalls = 0;
+
       for (const [chatId, list] of todo) {
         stats.chats += 1;
-        /** D1：极短闲聊不送模型复核（原文仍在库），剩下的才进 prompt */
-        const items = pickRows(list, { skipChatter: true });
         const chatName = list.find((r) => r.chatId === chatId)?.chatId?.slice(0, 8) || '';
-        /**
-         * L3 候选在这轮就算好：条件不成立时 `buildPrompt` 不带第 7 项，
-         * 模型连「可以作废」这个选项都看不到，不会自作主张。
-         */
-        const revocation = l3Candidates(list);
-        let plan = null;
+        const pkey = `${target}|${chatId || ''}`;
+        const saved = dry ? null : progressOf(pkey);
+        /** 上次已经送过模型的最晚时刻：只从这之后取，断点续跑不重复烧钱 */
+        let cursor = Number(saved?.lastAt) || 0;
+        const summaries = Array.isArray(saved?.summaries)
+          ? saved.summaries.filter((x) => typeof x === 'string' && x)
+          : [];
+        let finished = false;
+        let batches = 0;
 
-        /**
-         * D1：全是闲聊（items 空）且没有 L3 候选时，不调模型——
-         * 没有可复核的东西，这一轮省一次调用，直接走机械压缩。
-         */
-        if (generate && (items.length || revocation)) {
-          try {
-            const prompt = buildPrompt({
-              day: target, chatName, items, revocation,
-              facts: factsForPrompt(chatId),
-              profiles: profilesForPrompt(),
-              followUp: fuOn(),
-            });
-            let raw = await generate(prompt);
-            plan = parseJsonLoose(raw);
-            if (needsJsonRetry(raw, plan)) {
-              log(`巩固 ${target}/${chatName}：模型没写出 JSON，收紧要求再试一次`);
-              try {
-                raw = await generate(terseJsonPrompt(prompt));
-                plan = parseJsonLoose(raw);
-              } catch (e) {
-                /** 重试失败不算新错误：主调用已经成功，照旧退回机械压缩 */
-                log(`巩固 ${target}/${chatName} 重试失败：${e.message}`);
+        while (batches < maxBatches) {
+          const rest = list.filter((r) => r.at > cursor);
+          if (!rest.length) { finished = true; break; }
+          /** 预算：整轮最多调这么多次模型，剩下的留给下一次 */
+          if (generate && modelCalls >= MAX_MODEL_CALLS_PER_RUN) break;
+
+          /** 按时间切窗（断点必须单调前进，见 chronoWindow 的说明） */
+          const window = chronoWindow(rest);
+          if (!window.length) { finished = true; break; }
+          /** D1：极短闲聊不送模型复核（原文仍在库），剩下的才进 prompt */
+          const items = pickRows(window, { skipChatter: true });
+          /**
+           * L3 候选在这轮就算好：条件不成立时 `buildPrompt` 不带第 7 项，
+           * 模型连「可以作废」这个选项都看不到，不会自作主张。
+           */
+          const revocation = l3Candidates(window);
+          let plan = null;
+
+          /** 没有可复核的行、也没有可作废的，就别花这次调用（老行为，别退化） */
+          if (generate && (items.length || (revocation || []).length)) {
+            try {
+              modelCalls += 1;
+              const prompt = buildPrompt({
+                day: target, chatName, items, revocation,
+                facts: factsForPrompt(chatId),
+                profiles: profilesForPrompt(),
+                followUp: fuOn(),
+              });
+              let raw = await generate(prompt);
+              plan = parseJsonLoose(raw);
+              if (needsJsonRetry(raw, plan)) {
+                log(`巩固 ${target}/${chatName}：模型没写出 JSON，收紧要求再试一次`);
+                try {
+                  raw = await generate(terseJsonPrompt(prompt));
+                  plan = parseJsonLoose(raw);
+                } catch (e) {
+                  /** 重试失败不算新错误：主调用已经成功，照旧退回机械压缩 */
+                  log(`巩固 ${target}/${chatName} 重试失败：${e.message}`);
+                }
               }
+              /**
+               * 解析失败要记一笔——**不管有没有重试**。
+               * 短的非 JSON 输出不走重试（省一次调用），但不代表它没失败；
+               * 漏了这句，账本里"这次巩固很干净"，实际是机械压缩兜的底。
+               */
+              if (!plan) {
+                log(`巩固 ${target}/${chatName}：模型输出不是 JSON，退回机械压缩`);
+                stats.errors.push('模型输出解析失败');
+              }
+            } catch (e) {
+              log(`巩固 ${target}/${chatName} 调模型失败：${e.message}`);
+              stats.errors.push(`调模型失败：${e.message}`);
             }
-            if (!plan) {
-              log(`巩固 ${target}/${chatName}：模型输出不是 JSON，退回机械压缩`);
-              stats.errors.push('模型输出解析失败');
-            }
-          } catch (e) {
-            log(`巩固 ${target}/${chatName} 调模型失败：${e.message}`);
-            stats.errors.push(`调模型失败：${e.message}`);
           }
+
+          const res = apply({ day: target, chatId, list: window, plan, dry, revocation });
+          for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'revoked', 'digests', 'suppressed', 'fallback', 'outdated', 'updated', 'profiles', 'followUps']) {
+            stats[k] += res[k] || 0;
+          }
+          stats.agreementOps.push(...(res.agreementOps || []));
+
+          /**
+           * 这一批最晚的时刻就是新断点。注意**不能**用"这一批全处理完了"当条件：
+           * `pickRows` 可能因为字数上限只收了前 60 行，后面的还在原地等着。
+           */
+          /** 断点取**窗口**的最后一行（不是 pickRows 的最后一行：它会按重要度重排） */
+          const lastAt = window[window.length - 1].at;
+          const hasMore = rest.some((r) => r.at > lastAt);
+          const summary = String(plan?.summary ?? '').trim();
+          if (summary && !summaries.includes(summary)) summaries.push(summary);
+          batches += 1;
+          cursor = lastAt;
+          if (!dry) setProgress(pkey, { lastAt: cursor, summaries });
+          if (!hasMore) { finished = true; break; }
         }
 
-        const res = apply({ day: target, chatId, list, plan, dry, revocation });
-        for (const k of ['ranked', 'compressed', 'triples', 'agreements', 'closed', 'revoked', 'digests', 'suppressed', 'fallback', 'outdated', 'updated', 'profiles', 'followUps']) {
-          stats[k] += res[k] || 0;
+        /**
+         * 没处理完：**不写摘要行**。`done()` 认的就是摘要行，写了就等于宣称
+         * "这天整理完了"，剩下那些行再也不会被送进模型——正是这次要修的 bug。
+         */
+        if (!finished) {
+          stats.incomplete = (stats.incomplete || 0) + 1;
+          log(`巩固 ${target}/${chatName} 这批没跑完，下轮接着来（断点 ${cursor}）`);
+          continue;
         }
-        stats.agreementOps.push(...(res.agreementOps || []));
 
         /**
          * 摘要条目：即使模型给了 summary 也要落一条。
-         * 没有模型时写机械摘要（"这天聊了 N 句"），
-         * 因为注入那边按"有没有摘要"决定深度，缺了会一直深度重注。
+         * 分批补过的话把几段摘要合起来；没有模型时写机械摘要
+         * （"这天聊了 N 句"），因为注入那边按"有没有摘要"决定深度。
          */
         if (!dry) {
-          const summary =
-            String(plan?.summary ?? '').trim() ||
-            `这天聊了 ${list.length} 句${list.length > 6 ? '，其中有些值得记的' : ''}。`;
+          const summary = summaries.length
+            ? summaries.join(' / ')
+            : `这天聊了 ${list.length} 句${list.length > 6 ? '，其中有些值得记的' : ''}。`;
           journal.add({
             id: `day:${target}:${chatId || 'global'}`,
             at: list[list.length - 1].at,
@@ -688,6 +914,8 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
             text: summary.slice(0, 200),
           });
           stats.digests += 1;
+          /** 摘要行已落，断点没用了 */
+          clearProgress(pkey);
         }
       }
 
@@ -750,6 +978,21 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
           }
         } catch (e) {
           log(`相关链接没写成（不影响巩固）：${e?.message ?? e}`);
+        }
+      }
+      /**
+       * 语义改口（默认关）：同样独立 try。它排在链接之后——先把关系接上，
+       * 再判哪条过时；顺序反了的话，刚被顶掉的条目会被链进"活事实"里。
+       */
+      if (semanticOn() && generate) {
+        try {
+          const sr = await writeSupersedes({ day: target });
+          if (sr.superseded) {
+            stats.superseded = sr.superseded;
+            log(`语义改口：${sr.superseded} 对`);
+          }
+        } catch (e) {
+          log(`语义改口没跑成（不影响巩固）：${e?.message ?? e}`);
         }
       }
     } catch (e) {
@@ -1041,11 +1284,14 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
        * `chatId` 为空时（老日记没有归属）退回全局：宁可放错位置，
        * 也不要因为拿不到 id 就把一条约定静默丢掉。
        */
+      /** A3：容量满会挤掉一条；被挤的是刚写这条时，账本里要留痕 */
+      const dropped = [];
       memory.add(
         chatId,
         `约定：${item.text.slice(0, 160)}`,
         chatId ? 'chat' : 'global',
         {
+          dropped,
           status: item.status,
           /**
            * 出处必须符合 `memory.js` 的契约：`journalId` 是**消息 id**
@@ -1084,6 +1330,7 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         },
       );
       graph?.addEdge?.({ src: '主人', rel: '约定', dst: item.text.slice(0, 40), at, chatId });
+      if (dropped.length) log(`容量满，挤掉了 ${dropped.length} 条：${dropped.map((x) => String(x).slice(0, 20)).join('；')}`);
       out.agreements += 1;
       /**
        * 待跟进（E2，默认关）：约定带「该问结果的时点」就顺手挂上。
@@ -1277,8 +1524,17 @@ export function createConsolidate({ journal, graph, memory, self = null, generat
         }
         for (const [cid, cnt] of byChat) {
           if (done(day, cid)) continue;
-          items.push({ day, chatId: cid, rows: cnt });
-          rows += cnt;
+          /**
+           * C2：已经补过几批的会话，断点之前那些行**不算积压**。
+           * 不然面板会说"还有 300 条没整理"，其实模型早看过前 240 条，
+           * 用户只能得出"它一直没干活"的结论。
+           */
+          const pg = progressOf(`${day}|${cid}`);
+          const cut = Number(pg?.lastAt) || 0;
+          const left = cut > 0 ? list.filter((r) => String(r.chatId || '') === cid && r.at > cut).length : cnt;
+          if (!left) continue;
+          items.push({ day, chatId: cid, rows: left, total: cnt, processed: cnt - left });
+          rows += left;
         }
       }
       return {

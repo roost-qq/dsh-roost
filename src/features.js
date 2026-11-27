@@ -295,6 +295,21 @@ export const FEATURES = [
     advanced: true,
   },
   {
+    /**
+     * 语义改口（默认关）：字面取代只认 0.75 相似度，「住在杭州」→「搬到上海」
+     * 实测 0.10，两条会长期并存、同时注入。这一项让模型判「哪条被哪条取代了」。
+     */
+    id: 'memorySemantic',
+    label: '旧说法会被新说法顶掉',
+    desc: '每天巩固后多问一次模型：哪句话已经被后来那句取代了（搬家、改名、改主意），把旧的标成历史，不再同时注入',
+    source: 'config',
+    path: ['memory', 'semantic', 'enabled'],
+    requires: NONE,
+    affects: NONE,
+    offHint: '',
+    advanced: true,
+  },
+  {
     id: 'chatDupSimilarity',
     label: '同一段别发两遍',
     desc: '长回合里她常把「我先看看」「我看了下」这类几乎一样的话发两条；开着会挡掉后一条（短句不挡、只跟上一条比、十分钟窗）',
@@ -817,7 +832,7 @@ export const FEATURE_GROUPS = [
   /** 运行态排最前：它决定后面所有开关生效不生效 */
   { id: 'run', label: '运行', ids: ['botEnabled', 'dryRun'] },
   { id: 'talk', label: '怎么说话', ids: ['qqTools', 'qqRetract', 'quoteReply', 'quotePercent', 'stickers', 'voice', 'chatDupSimilarity'] },
-  { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact', 'memoryLinks'] },
+  { id: 'memory', label: '记不记得', ids: ['memory', 'memoryTools', 'graphAdjacent', 'chatTools', 'crossChatInGroup', 'chatLookForMembers', 'closing', 'compact', 'memoryLinks', 'memorySemantic'] },
   { id: 'queue', label: '消息来不及回的时候（高级）', ids: ['steerInGroup', 'queueMax', 'queueMinBudgetSec'] },
   { id: 'proactive', label: '会不会主动找你', ids: ['speakUp', 'awake'] },
   { id: 'work', label: '干不干活', ids: ['sendFile', 'personaCommand'] },
@@ -848,7 +863,7 @@ export function visibleGroups(features = visibleFeatures()) {
  * 每个功能开关的「家」：`id → 页面 tab key`。
  *
  * 2026-11-26 面板信息架构调整：权限页不再承接「有没有这个功能」，
- * 35 个开关按语义归到各功能页（见 `FEATURE_HOME`），权限页只留「谁能用」。
+ * 36 个开关按语义归到各功能页（见 `FEATURE_HOME`），权限页只留「谁能用」。
  *
  * 这张表是「零遗漏」的唯一真源，也是唯一能被机器校验的东西：
  * - 不许按 `FEATURE_GROUPS` 整组渲染：`talk` / `memory` / `work` 三组都被拆开了
@@ -896,6 +911,8 @@ export const FEATURE_HOME = {
   memory: 'memory',
   /** 相关链接：和记忆一页（它是记忆之间的关系） */
   memoryLinks: 'memory',
+  /** 语义改口：同属记忆（记忆之间的关系） */
+  memorySemantic: 'memory',
   memoryTools: 'memory',
   graphAdjacent: 'memory',
   chatTools: 'memory',

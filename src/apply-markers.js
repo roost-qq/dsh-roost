@@ -46,6 +46,15 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
     const aliases = aliasesOf(chatId);
     let out = String(text ?? '');
     let touched = '';
+    /**
+     * 容量满时被挤掉的事实（A3）。以前「写盘成功」就等于「记住了」，
+     * 可容量满会按分数挤掉一条；被挤的如果是刚写这条，用户和模型都不知道。
+     */
+    const dropped = [];
+    const droppedNote = () => (dropped.length
+      ? `（库满了，挤掉了：${dropped.slice(0, 2).map((x) => String(x).slice(0, 20)).join('；')}）`
+      : '');
+    const withDrop = (msg) => msg + droppedNote();
 
     out = out.replace(markerRe('remember-here'), (_, v) => {
       if (!canWriteFacts) return denyFact('remember-here');
@@ -58,9 +67,9 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
          * 「记住我花生过敏」会因为今天记了 40 条杂事被挤掉。
          */
         /** `add()` 现在如实返回落盘结果：写不进去就别说「记住了」 */
-        touched = memory.add(chatId, f, 'chat', { w: W_EXPLICIT, src, status: 'fact' }) === false
+        touched = memory.add(chatId, f, 'chat', { w: W_EXPLICIT, src, status: 'fact', dropped }) === false
           ? '没记上（记忆文件被占用，稍后再试）'
-          : '记住了（只这个群）';
+          : withDrop('记住了（只这个群）');
       }
       return '';
     });
@@ -69,9 +78,9 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
       if (!canWriteFacts) return denyFact('remember');
       const f = String(v || '').trim();
       if (f) {
-        touched = memory.add(chatId, f, 'global', { w: W_EXPLICIT, src, status: 'fact' }) === false
+        touched = memory.add(chatId, f, 'global', { w: W_EXPLICIT, src, status: 'fact', dropped }) === false
           ? '没记上（记忆文件被占用，稍后再试）'
-          : '记住了';
+          : withDrop('记住了');
       }
       return '';
     });
@@ -96,10 +105,10 @@ export function createMarkerApplier({ memory, journal, self, closing, mood, alia
       const { old: oldNeedle, next } = parsed;
       const r = memory.supersede(chatId, oldNeedle);
       if (!r.ok) log.debug(`replace 没定位到「${oldNeedle}」：${r.why}`);
-      const added = memory.add(chatId, next, 'global', { w: W_EXPLICIT, src, status: 'fact' });
-      touched = added === false
+      const added = memory.add(chatId, next, 'global', { w: W_EXPLICIT, src, status: 'fact', dropped });
+      touched = withDrop(added === false
         ? '没记上（记忆文件被占用，稍后再试）'
-        : r.ok ? '旧说法换成了新的' : `没找到「${oldNeedle}」，只记了新的`;
+        : r.ok ? '旧说法换成了新的' : `没找到「${oldNeedle}」，只记了新的`);
       return '';
     });
 

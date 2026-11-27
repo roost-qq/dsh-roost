@@ -6572,6 +6572,18 @@ window.__ModuleLoader__.load({
           ),
           h('div', { style: { marginBottom: 10 } },
             h('div', { className: 'roost-muted', style: { fontSize: 12, marginBottom: 4 } }, '通用（跨群）'),
+            /**
+             * C2：把「库存」和「平时注进去几条」的差额摊开。
+             *
+             * 之前这里只列事实，看起来就是"她全都记得"。实际平时只注
+             * `inject.global`（6 条）+ `inject.chat`（3 条），deep 时才全量，
+             * 而 deep 要等 `deepEvery` 轮。用户以为"存了就在用"，
+             * 遇到"她怎么忘了"时第一反应只能是 bug。
+             */
+            mem?.inject
+              ? h('div', { className: 'roost-note', style: { margin: '0 0 4px' } },
+                  `平时注 ${mem.inject.global} + ${mem.inject.chat} 条，库里共 ${(mem?.global || []).length} + ${(mem?.chat || []).length} 条（更深的那一层每 ${mem.inject.deepEvery || 15} 轮才全量给一次）`)
+              : null,
             (mem?.global || []).some((f) => tagHit('global', f))
               ? h('div', { className: 'roost-list' },
                   mem.global.filter((f) => tagHit('global', f)).map((f, i) => factRow('global', f, i)),
@@ -6751,8 +6763,17 @@ window.__ModuleLoader__.load({
               onClick: async () => {
                 const r = await get('/memory/backlog')
                 if (r?.ok === false) return toast(r.message || '读不到待整理进度')
+                /**
+                 * C2：补过几批的会话要说出「已经补了多少」。
+                 * 只说"还剩 300 条"，用户会以为它一直没干活；说成
+                 * "已补 240 / 还剩 60"才看得出是在往前推。
+                 */
+                const partly = (r.items || []).filter((x) => x.processed > 0)
+                const tail = partly.length
+                  ? `；其中 ${partly.length} 个已补过（${partly.slice(0, 2).map((x) => `${x.processed}/${x.total}`).join('、')}）`
+                  : ''
                 toast(r.pending
-                  ? `还有 ${r.pending} 个「天 × 会话」没整理（共 ${r.rows} 条日记，最早 ${r.oldest}）`
+                  ? `还有 ${r.pending} 个「天 × 会话」没整理完（还剩 ${r.rows} 条日记，最早 ${r.oldest}${tail}）`
                   : `最近 ${r.scannedDays} 天都整理完了`)
               },
             }, '看还有多少没整理'),

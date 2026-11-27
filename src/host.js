@@ -4528,6 +4528,8 @@ export function apply(ctx) {
     followUpEnabled: () => cfg.memory?.followUp?.enabled === true,
     /** 相关链接：默认关；开着时巩固结束后多调一次模型判「同一实体的不同事」 */
     linksEnabled: () => cfg.memory?.links?.enabled === true,
+    /** 语义改口：默认关；开着时巩固结束后再判一次「旧说法被新说法取代」 */
+    semanticEnabled: () => cfg.memory?.semantic?.enabled === true,
     /** 巩固时补算日记向量（之前漏了这一步，语义检索的向量路一直是空的） */
     embed: embedder,
     log: (m) => log.info(m),
@@ -6557,7 +6559,16 @@ export function apply(ctx) {
    * 都是为了这件事。反过来看，把每轮都变的检索命中塞进 system prompt，
    * 等于每轮主动作废一次缓存。
    */
-  function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
+  /**
+ * C2：平时注入几条事实（deep 时才全量）。
+ *
+ * 抽成常量是因为**面板要说同一组数字**（「库存 40 / 平时只看得到 9」）。
+ * 两处各写一个 6 和 3，改一处忘一处，面板就会开始说假话。
+ */
+const INJECT_FACTS_GLOBAL = 6;
+const INJECT_FACTS_CHAT = 3;
+
+function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
     /**
      * **会话由调用方给，不在这里猜**（2026-11-22）。
      *
@@ -6688,10 +6699,10 @@ export function apply(ctx) {
      * 而不是最新的那几条 —— 后者恰恰是 deep 最想铺回来的东西。
      */
     const factsGlobal = m.global.length
-      ? `【你记得的事（通用）】\n${lines(deep ? m.global : m.global.slice(0, 6))}`
+      ? `【你记得的事（通用）】\n${lines(deep ? m.global : m.global.slice(0, INJECT_FACTS_GLOBAL))}`
       : '';
     const factsChat = m.chat.length
-      ? `【这个群特有的事】\n${lines(deep ? m.chat : m.chat.slice(0, 3))}`
+      ? `【这个群特有的事】\n${lines(deep ? m.chat : m.chat.slice(0, INJECT_FACTS_CHAT))}`
       : '';
 
     /**
@@ -13867,6 +13878,15 @@ export function apply(ctx) {
           facts: { global: facts.global, chat: facts.chat },
           /** 带权重/出处的那一份（面板显示「这条多重、从哪来」） */
           factsDetail,
+          /**
+           * C2：平时注入几条。库存 40 条、可见 9 条这件事**必须摊开说**——
+           * 用户看不到差额时，只会以为"存了但没生效"。deep 每 15 轮才全量一次。
+           */
+          inject: {
+            global: INJECT_FACTS_GLOBAL,
+            chat: INJECT_FACTS_CHAT,
+            deepEvery: Math.max(1, Number(cfg.memory?.deepEvery) || 15),
+          },
           /**
            * 这个会话是不是「不记也不读」。
            *

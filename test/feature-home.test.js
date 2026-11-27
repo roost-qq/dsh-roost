@@ -36,9 +36,9 @@ test('每个可见开关都恰好有一个家，没有遗漏', () => {
   assert.deepEqual(unknown, [], `FEATURE_HOME 指向了不存在的开关：${unknown.join(', ')}`);
 });
 
-test('FEATURE_HOME 覆盖数 = 可见开关数 = 35', () => {
+test('FEATURE_HOME 覆盖数 = 可见开关数 = 36', () => {
   const visible = visibleFeatures();
-  assert.equal(visible.length, 35);
+  assert.equal(visible.length, 36);
   assert.equal(Object.keys(FEATURE_HOME).length, visible.length);
 });
 
