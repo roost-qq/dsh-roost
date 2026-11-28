@@ -1363,6 +1363,25 @@ window.__ModuleLoader__.load({
 .roost-batch-row{display:flex;gap:6px;align-items:flex-start;padding:3px 4px;
   border-radius:6px;font-size:11.5px;line-height:1.5}
 .roost-batch-row:hover{background:var(--tone-foam-2)}
+/* 自驱引擎页（2026-11-28）：一张 Sec = 一个语义块，块内「左标签 + 右控件」两列对齐。
+   只借对面 Card > Row > 控件的层级手法，颜色仍走本仓 --tone-*，不引海蓝。 */
+.roost-at-rows{margin-top:4px}
+.roost-at-row{display:flex;align-items:flex-start;gap:12px;padding:9px 0;
+  border-top:1px solid var(--line-soft)}
+.roost-at-rows > .roost-at-row:first-child{border-top:0}
+.roost-at-label{flex:0 0 190px;font-size:12.5px;font-weight:600;line-height:1.6}
+.roost-at-label small{display:block;font-size:11px;font-weight:400;line-height:1.5;
+  color:var(--dsw-alias-label-tertiary,inherit)}
+.roost-at-ctl{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.roost-at-status{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.roost-at-actions{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 0}
+.roost-at-block{margin-bottom:10px;padding:10px 12px;border:1px solid var(--tone-foam-2);
+  border-radius:10px;background:var(--tone-foam)}
+.roost-at-block:last-child{margin-bottom:0}
+@container (max-width:560px){
+  .roost-at-row{flex-direction:column;gap:4px}
+  .roost-at-label{flex:0 0 auto}
+}
 /* 自定义下拉：原生 select 的弹出层由系统绘制改不了圆角，这里自己画 */
 .roost-dropdown{position:relative;display:inline-flex;min-width:0;
   /* 宿主没给主题变量时的兜底：系统浅色要白底深字，别回到早期的黑底深字 */
@@ -1418,6 +1437,11 @@ window.__ModuleLoader__.load({
     /* ---------------- 小零件 ---------------- */
 
     const Pill = ({ tone, children }) => h('span', { className: 'roost-pill' + (tone ? ' ' + tone : '') }, children)
+
+    /** 左标签 + 右控件：自驱页与聊天命令卡共用，视觉层级与对面 Card > Row 一致 */
+    const AtRow = ({ label, hint, children }) => h('div', { className: 'roost-at-row' },
+      h('div', { className: 'roost-at-label' }, label, hint ? h('small', null, hint) : null),
+      h('div', { className: 'roost-at-ctl' }, children))
 
     /**
      * 分节：编号徽标 + 标题 + 操作槽 + 折叠开关。整个面板的排版骨架。
@@ -2852,9 +2876,11 @@ window.__ModuleLoader__.load({
             },
               h('b', { style: { flex: '0 0 40px', fontSize: 12.5 } }, d.label),
               h('span', { className: 't', style: { flex: '1 1 auto', minWidth: 0 } },
-                h('span', { style: { fontSize: 12 } },
-                  d.items.map(([word, id]) => `${word} ${on(id)}`).join(' · ')),
-                h('span', { className: 'd', style: { display: 'block', marginTop: 2 } }, d.desc),
+                h('span', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 3 } },
+                  d.items.map(([word, id]) => h(Pill, {
+                    key: id, tone: feat ? (feat.on?.[id] ? 'ok' : '') : '',
+                  }, `${word} ${on(id)}`))),
+                h('span', { className: 'd', style: { display: 'block' } }, d.desc),
               ),
               h('button', {
                 type: 'button', className: 'roost-chip', style: { flex: '0 0 auto' },
@@ -4527,6 +4553,27 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'pv-root' },
         /** 5.10：说话方式提炼（只学主人私聊），放在人格隔离之前——它调的是语气，不是归属 */
         h(SpeechStyleBlock, { toast }),
+        /** 私聊 / 群聊规矩：后端真读进提示词，原来只能手改 config.json */
+        h(Sec, { title: '说话规矩（私聊 / 群聊）' },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '这两条会进提示词：私聊可以放开，群聊要短。改完下一轮生效。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            h('label', { style: { flex: '1 1 240px', fontSize: 12 } },
+              '私聊规矩',
+              h('input', {
+                className: 'roost-input', style: { width: '100%', marginTop: 3 },
+                value: config?.persona?.rulesPrivate ?? '',
+                placeholder: '这是和主人的私聊，可以放开聊。',
+                onChange: (e) => save({ persona: { ...(config?.persona || {}), rulesPrivate: e.target.value } }),
+              })),
+            h('label', { style: { flex: '1 1 240px', fontSize: 12 } },
+              '群聊规矩',
+              h('input', {
+                className: 'roost-input', style: { width: '100%', marginTop: 3 },
+                value: config?.persona?.rulesSocial ?? '',
+                placeholder: '这是群聊，说话要短，别刷屏。',
+                onChange: (e) => save({ persona: { ...(config?.persona || {}), rulesSocial: e.target.value } }),
+              })))),
         h(Sec, {
           title: '人格隔离',
           right: h('button', { type: 'button', className: 'roost-btn', onClick: loadScope }, '刷新'),
@@ -6123,6 +6170,58 @@ window.__ModuleLoader__.load({
           }),
         ),
 
+        /** 按人不记 / 巩固时机：后端真接线，原来只能手改 config.json */
+        h(Sec, { title: '按人不记与巩固' },
+          h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+            '「按人不记」填 openid（QQ 号也行，后端会归一），这些人说的话一律不进记忆；'
+            + '「巩固」是每天凌晨把日记压成半句的那一轮，错过就下次检查时补跑。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 } },
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+              h('input', {
+                type: 'checkbox', checked: config?.memory?.freezeSystem !== false,
+                disabled: !saveCfg || Boolean(busy),
+                onChange: (e) => saveCfg({
+                  memory: { ...(config?.memory || {}), freezeSystem: Boolean(e.target.checked) },
+                }),
+              }), '易变内容放到用户消息（默认开，省 prompt cache）'),
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+              '巩固时间',
+              h('input', {
+                className: 'roost-input', type: 'number', min: 0, max: 23, style: { width: 54 },
+                value: config?.memory?.consolidateHour ?? 4,
+                onChange: (e) => {
+                  const n = Number(e.target.value)
+                  if (!Number.isFinite(n)) return toast('巩固时间填 0–23')
+                  saveCfg({
+                    memory: {
+                      ...(config?.memory || {}),
+                      consolidateHour: Math.min(23, Math.max(0, Math.round(n))),
+                    },
+                  })
+                },
+              }), '点'),
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+              '巩固会话',
+              h('input', {
+                className: 'roost-input', type: 'text', style: { width: 130 },
+                value: config?.memory?.consolidateChat ?? 'consolidate',
+                onChange: (e) => saveCfg({
+                  memory: { ...(config?.memory || {}), consolidateChat: e.target.value },
+                }),
+              }))),
+          h('div', { style: { fontSize: 11.5, marginBottom: 4 } }, '按人不记（一行一个 openid，留空 = 都记）：'),
+          h('textarea', {
+            className: 'roost-input', rows: 2, style: { width: '100%', resize: 'vertical', fontSize: 11 },
+            value: (config?.memory?.noUsers || []).join('\\n'),
+            placeholder: '填面板会话列表里的 openid',
+            onChange: (e) => saveCfg({
+              memory: {
+                ...(config?.memory || {}),
+                noUsers: e.target.value.split(/\\r?\\n/).map((x) => x.trim()).filter(Boolean),
+              },
+            }),
+          })),
+
         /**
          * 记忆星图：原位置只留一个入口按钮，点了才在弹窗里渲染星图。
          * 关掉弹窗即卸载组件 —— 自动旋转 / 星尘动画不再后台空转，
@@ -7173,6 +7272,26 @@ window.__ModuleLoader__.load({
               },
             }),
             '本地重排（装好 hs-rerank-1 后开，比向量准）'),
+          h('label', {
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 6 },
+            title: '顺着命中事实的邻接边再带几条；默认 3，0 = 不带',
+          },
+            '邻接联想',
+            h('input', {
+              className: 'roost-input', type: 'number', min: 0, max: 20, style: { width: 54 },
+              value: config?.recall?.adjacentLimit ?? 3,
+              disabled: !saveCfg || Boolean(busy),
+              onChange: (e) => {
+                const n = Number(e.target.value)
+                if (!Number.isFinite(n)) return toast('邻接联想填 0–20')
+                saveCfg({
+                  recall: {
+                    ...(config?.recall || {}),
+                    adjacentLimit: Math.min(20, Math.max(0, Math.round(n))),
+                  },
+                })
+              },
+            }), '条'),
           h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
             h('input', {
               className: 'roost-input', style: { flex: '1 1 260px' },
@@ -9870,23 +9989,24 @@ window.__ModuleLoader__.load({
       const t = st?.today
       const chain = st?.ledger?.chain
 
-      return h(Sec, {
-        title: '自驱引擎（实验）',
-        right: h('button', {
-          type: 'button', className: 'roost-btn',
-          onClick: () => patch({ enabled: c.enabled !== true }),
-        }, c.enabled ? '关掉' : '打开'),
-      },
-        h('div', { className: 'roost-note', style: { marginBottom: 8 } },
+      return h('div', { className: 'roost-at-page' },
+        h(Sec, {
+          n: '01', title: '总控与状态',
+          right: h('button', {
+            type: 'button', className: 'roost-btn',
+            onClick: () => patch({ enabled: c.enabled !== true }),
+          }, c.enabled ? '关掉' : '打开'),
+        },
+        h('div', { className: 'roost-note', style: { margin: 0 } },
           '给她一点自己的时间：自己挑一件事琢磨、记进哈希链账本。默认全关——'
           + '不开就一行代码都不跑；开了也默认只能想、不能动手，产物只进账本和这里，不会发到 QQ。'),
 
-        h('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, marginBottom: 8 } },
-          h('span', null, c.enabled ? '● 已开' : '○ 关着'),
-          h('span', null, `今天：立项 ${t?.projects ?? 0} · 推进 ${t?.steps ?? 0} · 被拦 ${t?.denies ?? 0}`),
-          h('span', { style: { color: chain?.ok ? 'var(--ok)' : 'var(--bad)' } },
+        h('div', { className: 'roost-at-status' },
+          h(Pill, { tone: c.enabled ? 'ok' : '' }, c.enabled ? '已开' : '关着'),
+          h(Pill, null, `今天：立项 ${t?.projects ?? 0} · 推进 ${t?.steps ?? 0} · 被拦 ${t?.denies ?? 0}`),
+          h(Pill, { tone: chain?.ok ? 'ok' : 'bad' },
             chain?.ok ? `账本 ${st?.ledger?.total ?? 0} 条，链完整` : `账本断在第 ${st?.ledger?.brokenAt} 条`),
-          st?.stuck ? h('span', { style: { color: 'var(--warn)' } }, '连续失败后卡住了') : null),
+          st?.stuck ? h(Pill, { tone: 'warn' }, '连续失败后卡住了') : null),
 
         /** 能力状态条：被拦原因直接可见，别让人点了按钮才知道为什么没反应（阶段 0） */
         st?.capability
@@ -9911,139 +10031,141 @@ window.__ModuleLoader__.load({
             `当前在想：${st.project.text}（已推进 ${st.project.steps ?? 0} 次）`)
           : null,
 
-        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 } },
-          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
-            h('input', {
-              type: 'checkbox', checked: c.allowAct === true,
-              onChange: (e) => patch({ allowAct: Boolean(e.target.checked) }),
-            }), '允许动手（关着只能想）'),
-          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
-            h('input', {
-              type: 'checkbox', checked: c.followUpCandidate !== false,
-              onChange: (e) => patch({ followUpCandidate: Boolean(e.target.checked) }),
-            }), '到期的事可主动提起（默认开）'),
-          h('span', { className: 'roost-muted', style: { fontSize: 11 } }, '节奏：'),
-          ...Object.entries(RHYTHM_PRESETS).map(([k, p]) => h('button', {
-            type: 'button', className: 'roost-btn', key: k,
-            title: `一键套用${p.label}节奏（maxPerDay=${p.maxPerDay}、心跳=${p.heartbeatMin}分、卡住=${p.stuckHours}时）`,
-            onClick: () => applyPreset(k),
-          }, p.label)),
-          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
-            '一天最多',
-            /** 滑块 + 数字双联（阶段 6 第 4 项）：拖滑块或直接填数，同一处落盘 */
-            h('input', {
-              type: 'range', min: 0, max: 12, step: 1,
-              style: { width: 80 }, value: Math.min(12, c.maxPerDay ?? 2),
-              onChange: (e) => patch({ maxPerDay: Number(e.target.value) }),
-            }),
-            h('input', {
-              className: 'roost-input', type: 'number', min: 0, max: 12,
-              style: { width: 60 }, value: c.maxPerDay ?? 2,
-              onChange: (e) => patch({ maxPerDay: clampNum(e.target.value, 0, 12, '一天最多次数') }),
-            }), '次')),
+        ),
+        h(Sec, { n: '02', title: '节奏与预算' },
+          h('div', { className: 'roost-at-rows' },
+            h(AtRow, { label: '她能做什么', hint: '关着只能想；开了才允许执行行动单' },
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                h('input', {
+                  type: 'checkbox', checked: c.allowAct === true,
+                  onChange: (e) => patch({ allowAct: Boolean(e.target.checked) }),
+                }), '允许动手（关着只能想）'),
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                h('input', {
+                  type: 'checkbox', checked: c.followUpCandidate !== false,
+                  onChange: (e) => patch({ followUpCandidate: Boolean(e.target.checked) }),
+                }), '到期的事可主动提起（默认开）')),
+            h(AtRow, { label: '节奏预设与额度', hint: '预设一键填入，数字还能单独改；保存即生效' },
+              ...Object.entries(RHYTHM_PRESETS).map(([k, p]) => h('button', {
+                type: 'button', className: 'roost-btn', key: k,
+                title: `一键套用${p.label}节奏（maxPerDay=${p.maxPerDay}、心跳=${p.heartbeatMin}分、卡住=${p.stuckHours}时）`,
+                onClick: () => applyPreset(k),
+              }, p.label)),
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                '一天最多',
+                /** 滑块 + 数字双联（阶段 6 第 4 项）：拖滑块或直接填数，同一处落盘 */
+                h('input', {
+                  type: 'range', min: 0, max: 12, step: 1,
+                  style: { width: 80 }, value: Math.min(12, c.maxPerDay ?? 2),
+                  onChange: (e) => patch({ maxPerDay: Number(e.target.value) }),
+                }),
+                h('input', {
+                  className: 'roost-input', type: 'number', min: 0, max: 12,
+                  style: { width: 60 }, value: c.maxPerDay ?? 2,
+                  onChange: (e) => patch({ maxPerDay: clampNum(e.target.value, 0, 12, '一天最多次数') }),
+                }), '次')),
 
         /**
          * 安静时段（阶段 6 第 5 项）：我方语义「起止相同 = 不设」，等价对方的
          * 「清空=关」；两个数字输入钳到 0–23 点。显示出来而不藏在 JSON 全文组里。
          */
-        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8, fontSize: 12 } },
-          h('span', { className: 'roost-muted' }, '安静时段：'),
-          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
-            '从',
-            h('input', {
-              className: 'roost-input', type: 'number', min: 0, max: 23, style: { width: 52 },
-              value: c.quietStartHour ?? 0,
-              onChange: (e) => patch({ quietStartHour: clampNum(e.target.value, 0, 23, '安静起始小时') }),
-            }), '点'),
-          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
-            '到',
-            h('input', {
-              className: 'roost-input', type: 'number', min: 0, max: 23, style: { width: 52 },
-              value: c.quietEndHour ?? 0,
-              onChange: (e) => patch({ quietEndHour: clampNum(e.target.value, 0, 23, '安静结束小时') }),
-            }), '点',
-          ),
-          h('span', { className: 'roost-muted', style: { fontSize: 11 } },
-            c.quietStartHour === c.quietEndHour ? '（起止相同 = 不设安静时段）' : '（这段时间不自己琢磨事）')),
+            h(AtRow, { label: '安静时段', hint: '起止相同 = 不设；填 0–23 点' },
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12 } },
+                '从',
+                h('input', {
+                  className: 'roost-input', type: 'number', min: 0, max: 23, style: { width: 52 },
+                  value: c.quietStartHour ?? 0,
+                  onChange: (e) => patch({ quietStartHour: clampNum(e.target.value, 0, 23, '安静起始小时') }),
+                }), '点'),
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12 } },
+                '到',
+                h('input', {
+                  className: 'roost-input', type: 'number', min: 0, max: 23, style: { width: 52 },
+                  value: c.quietEndHour ?? 0,
+                  onChange: (e) => patch({ quietEndHour: clampNum(e.target.value, 0, 23, '安静结束小时') }),
+                }), '点'),
+              h('span', { className: 'roost-muted', style: { fontSize: 11 } },
+                c.quietStartHour === c.quietEndHour ? '起止相同 = 不设' : '这段时间不自己琢磨事')),
 
-        /**
-         * 节奏预算（对齐 aurabot 后端真跑的三项 + 我方补的复盘/做梦）：
-         * 数额都经 normalize 夹紧，面板只管呈现；minCuriosity/maxTasksActive
-         * 不补——前者我方三段决策不是数值阈值，后者单 project 槽无可数任务。
-         */
-        h('div', { style: { marginBottom: 10, padding: '9px 10px', border: '1px solid var(--line-soft)', borderRadius: 8 } },
-          h('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 7 } }, '节奏与预算'),
-          h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 8 } },
-            h(NumRow, { label: '一轮最多立项', k: 'maxCandidates', min: 1, max: 5, hint: 'planner 产出的候选最多立几张单' }),
-            /** 同时任务上限（P3）：接任务账本 book.js 的 maxActive，超了新任务会被拒 */
-            h(NumRow, {
-              label: '同时进行的任务', k: 'maxTasksActive', min: 1, max: 40,
-              hint: '任务账本里同时挂几个 active；满了就不再立新任务，旧的让位或被拒',
-            }),
-            h(NumRow, { label: '单任务步数', k: 'maxSteps', min: 1, max: 32, hint: '一张行动单最多走几步' }),
-            h(NumRow, { label: '动作数/小时', k: 'budgetActionsPerHour', min: 1, max: 120, hint: '执行器之外的硬闸，防一晚上狂动手' })),
-          h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 8 } },
-            h(NumRow, { label: '每日一页几点', k: 'dailyReviewHour', min: 0, max: 23, suffix: '点', hint: '到点自动做一次每日复盘，与手动模式无关' }),
-            h(NumRow, { label: '攒几件才评', k: 'minBatchForReview', min: 1, max: 20, suffix: '件', hint: '攒够账本行数就提前复盘，先到者为准' })),
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 12 } },
-            h('span', { className: 'roost-muted' }, '做梦窗口：'),
-            h('input', {
-              type: 'time', className: 'roost-input', style: { width: 88 },
-              value: c.dreamFrom ?? '03:00',
-              onChange: (e) => patch({ dreamFrom: e.target.value }),
-            }), '–',
-            h('input', {
-              type: 'time', className: 'roost-input', style: { width: 88 },
-              value: c.dreamTo ?? '05:00',
-              onChange: (e) => patch({ dreamTo: e.target.value }),
-            }),
-            h('span', { className: 'roost-muted', style: { fontSize: 11 } }, '窗口外不自动做；面板手动点不受限。清空 = 关闭窗口限制')),
+            h('div', { className: 'roost-at-block' },
+              h('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 4 } }, '预算额度'),
+              h('div', { className: 'roost-at-rows' },
+                h(AtRow, { label: '立项 / 任务 / 步数 / 动作', hint: 'minCuriosity 不补——我方三段决策不是数值阈值' },
+                  h(NumRow, { label: '一轮最多立项', k: 'maxCandidates', min: 1, max: 5, hint: 'planner 产出的候选最多立几张单' }),
+                  /** 同时任务上限（P3）：接任务账本 book.js 的 maxActive，超了新任务会被拒 */
+                  h(NumRow, {
+                    label: '同时进行的任务', k: 'maxTasksActive', min: 1, max: 40,
+                    hint: '任务账本里同时挂几个 active；满了就不再立新任务，旧的让位或被拒',
+                  }),
+                  h(NumRow, { label: '单任务步数', k: 'maxSteps', min: 1, max: 32, hint: '一张行动单最多走几步' }),
+                  h(NumRow, { label: '动作数/小时', k: 'budgetActionsPerHour', min: 1, max: 120, hint: '执行器之外的硬闸，防一晚上狂动手' })),
+                h(AtRow, { label: '输出上限', hint: '单步产出多少字封顶；只管长度，不管账本总大小' },
+                  h(NumRow, {
+                    label: '一步最多写', k: 'maxOutputChars', min: 200, max: 8000,
+                    suffix: '字', hint: '默认 1200；一步写太长会把账本和预览撑爆',
+                  })),
+                h(AtRow, { label: '每日复盘', hint: '到点或攒够，先到者为准' },
+                  h(NumRow, { label: '每日一页几点', k: 'dailyReviewHour', min: 0, max: 23, suffix: '点', hint: '到点自动做一次每日复盘，与手动模式无关' }),
+                  h(NumRow, { label: '攒几件才评', k: 'minBatchForReview', min: 1, max: 20, suffix: '件', hint: '攒够账本行数就提前复盘，先到者为准' })),
+                h(AtRow, { label: '做梦窗口', hint: '窗口外不自动做；面板手动点不受限。清空 = 关闭窗口限制' },
+                  h('input', {
+                    type: 'time', className: 'roost-input', style: { width: 88 },
+                    value: c.dreamFrom ?? '03:00',
+                    onChange: (e) => patch({ dreamFrom: e.target.value }),
+                  }), '–',
+                  h('input', {
+                    type: 'time', className: 'roost-input', style: { width: 88 },
+                    value: c.dreamTo ?? '05:00',
+                    onChange: (e) => patch({ dreamTo: e.target.value }),
+                  }))))),
         ),
+        h(Sec, { n: '03', title: '她的手（高风险 · 默认全关）' },
 
         /**
          * 她的手（批次3）：两个高风险开关。开了等于允许模型在本机执行自己写的代码。
          * 风险必须写在界面上，不能只写代码注释——用户点之前要看见。
          */
-        h('div', { style: { marginBottom: 10, padding: '9px 10px', border: '1px solid var(--line-soft)', borderRadius: 8 } },
-          h('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 6 } }, '她的手（高风险 · 默认全关）'),
-          h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8, lineHeight: 1.6 } },
-            '开了等于允许她在这台机器上跑自己写的代码。沙箱只做三件事：不继承密钥环境变量、超时强杀、'
-            + '只能写自己的数据目录——**不隔离运行时能力**。框架源码 src/ 永远碰不到。'),
-          h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 8, fontSize: 12 } },
-            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
-              h('input', {
-                type: 'checkbox', checked: c.allowPython === true,
-                onChange: (e) => patch({ allowPython: Boolean(e.target.checked) }),
-              }), '允许跑 Python'),
-            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
-              h('input', {
-                type: 'checkbox', checked: c.allowUserModules === true,
-                onChange: (e) => patch({ allowUserModules: Boolean(e.target.checked) }),
-              }), '允许写用户模块'),
-            h(NumRow, { label: '脚本超时', k: 'scriptTimeoutMs', min: 5000, max: 600000, suffix: '毫秒', hint: '到点强杀（Windows 走 taskkill 连子进程一起杀）' })),
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 } },
-            h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, flex: 1 } },
-              'Python 解释器：',
-              h('input', {
-                className: 'roost-input', type: 'text', style: { flex: 1, minWidth: 160 },
-                value: c.pythonBin ?? '', placeholder: '留空自动探测',
-                onChange: (e) => patch({ pythonBin: e.target.value }),
-              }),
-            /** 重新检测（P3 前端对照补齐）：真起子进程探一次，结果写缓存 */
-            h('button', {
-              type: 'button', className: 'roost-btn', disabled: busy,
-              title: '真起一次 python --version 探测解释器，结果缓存 24 小时',
-              onClick: async () => {
-                setBusy('env')
-                try {
-                  const r = await post('/autotelic/env', {})
-                  const bin = r?.env?.pythonBin || ''
-                  toast(r?.ok === false ? (r.message || '没探到') : (bin ? `探到了：${bin}（${r.env?.version || ''}）` : '没探到可用 Python'))
-                  await load()
-                } finally { setBusy('') }
-              },
-            }, busy === 'env' ? '检测中…' : '重新检测')),
-        )),
+        h('div', { className: 'roost-note', style: { margin: '0 0 8px' } },
+          '开了等于允许她在这台机器上跑自己写的代码。沙箱只做三件事：不继承密钥环境变量、超时强杀、'
+          + '只能写自己的数据目录——**不隔离运行时能力**。框架源码 src/ 永远碰不到。'),
+        h('div', { className: 'roost-at-block' },
+          h('div', { className: 'roost-at-rows' },
+            h(AtRow, { label: '跑代码与写模块', hint: '两个开关都默认关，逐个确认再开' },
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                h('input', {
+                  type: 'checkbox', checked: c.allowPython === true,
+                  onChange: (e) => patch({ allowPython: Boolean(e.target.checked) }),
+                }), '允许跑 Python'),
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                h('input', {
+                  type: 'checkbox', checked: c.allowUserModules === true,
+                  onChange: (e) => patch({ allowUserModules: Boolean(e.target.checked) }),
+                }), '允许写用户模块'),
+              h(NumRow, { label: '脚本超时', k: 'scriptTimeoutMs', min: 5000, max: 600000, suffix: '毫秒', hint: '到点强杀（Windows 走 taskkill 连子进程一起杀）' })),
+            h(AtRow, { label: 'Python 解释器', hint: '留空自动探测；探测结果缓存 24 小时' },
+              h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, flex: 1 } },
+                'Python 解释器：',
+                h('input', {
+                  className: 'roost-input', type: 'text', style: { flex: 1, minWidth: 160 },
+                  value: c.pythonBin ?? '', placeholder: '留空自动探测',
+                  onChange: (e) => patch({ pythonBin: e.target.value }),
+                }),
+              /** 重新检测（P3 前端对照补齐）：真起子进程探一次，结果写缓存 */
+              h('button', {
+                type: 'button', className: 'roost-btn', disabled: busy,
+                title: '真起一次 python --version 探测解释器，结果缓存 24 小时',
+                onClick: async () => {
+                  setBusy('env')
+                  try {
+                    const r = await post('/autotelic/env', {})
+                    const bin = r?.env?.pythonBin || ''
+                    toast(r?.ok === false ? (r.message || '没探到') : (bin ? `探到了：${bin}（${r.env?.version || ''}）` : '没探到可用 Python'))
+                    await load()
+                  } finally { setBusy('') }
+                },
+              }, busy === 'env' ? '检测中…' : '重新检测'))))),
+        ),
+        h(Sec, { n: '04', title: '预览与决策' },
 
         h('div', { style: { fontSize: 11.5, marginBottom: 6 } }, '她想琢磨的方向（一行一个，空着就不立项）：'),
         h('textarea', {
@@ -10052,7 +10174,7 @@ window.__ModuleLoader__.load({
           style: { width: '100%', resize: 'vertical', fontSize: 12 },
           onChange: (e) => { setSeeds(e.target.value); setSeedsDirty(true) },
         }),
-        h('div', { style: { display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' } },
+        h('div', { className: 'roost-at-actions' },
           h('button', { type: 'button', className: 'roost-btn', disabled: !seedsDirty, onClick: saveSeeds }, '保存种子'),
           h('button', { type: 'button', className: 'roost-btn', disabled: Boolean(busy), onClick: () => run('preview') },
             busy === 'preview' ? '算着…' : '看会选哪个'),
@@ -10077,26 +10199,34 @@ window.__ModuleLoader__.load({
           }, '让她调松一点')),
 
         preview
-          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
-            preview.ok
-              ? `会选：${preview.project.text}（分 ${preview.project.score}）`
-              : `选不出来：${preview.reason}`,
+          ? h('div', { className: 'roost-at-block' },
+            h('div', { className: 'roost-at-status', style: { marginBottom: 4 } },
+              h(Pill, { tone: preview.ok ? 'ok' : 'warn' }, preview.ok ? '看会选这个' : '选不出来'),
+              preview.ok
+                ? h(Pill, null, `${preview.project.text} · 分 ${preview.project.score}`)
+                : h(Pill, null, preview.reason || '没给原因')),
             (preview.rejected || []).length
-              ? h('div', { style: { fontSize: 11, marginTop: 4 } },
+              ? h('div', { className: 'roost-muted', style: { fontSize: 11 } },
                 '先放着：' + preview.rejected.map((x) => `${x.text}（${x.reason}）`).join('；'))
               : null)
           : null,
 
         /** 三段决策结果：四态 verdict + 行动单 + 无出处作废原因，全链路可回查 */
         decision
-          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
-            h('div', null, `三段决策：${decision.outcome === 'tickets' ? `立项 ${(decision.tickets || []).length} 张行动单` : decision.outcome === 'all-dead' ? '这一轮全灭（没立项）' : `出错：${decision.error || ''}`}`),
+          ? h('div', { className: 'roost-at-block' },
+            h('div', { className: 'roost-at-status', style: { marginBottom: 4 } },
+              h(Pill, {
+                tone: decision.outcome === 'tickets' ? 'ok' : decision.outcome === 'all-dead' ? 'warn' : 'bad',
+              }, decision.outcome === 'tickets'
+                ? `立项 ${(decision.tickets || []).length} 张行动单`
+                : decision.outcome === 'all-dead' ? '这一轮全灭' : `出错：${decision.error || ''}`),
+              h(Pill, null, `候选 ${(decision.candidates || []).length} 个 · 把关 ${(decision.verdicts || []).length} 道`)),
             (decision.candidates || []).length
-              ? h('div', { style: { fontSize: 11, marginTop: 4 } },
+              ? h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 4 } },
                 '候选：' + decision.candidates.map((x) => `${x.title}（${x.tag}）`).join('；'))
               : null,
             (decision.verdicts || []).length
-              ? h('div', { style: { fontSize: 11, marginTop: 4 } },
+              ? h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 4 } },
                 '把关：' + decision.verdicts.map((v, i) => `${i + 1}:${v}`).join(' · '))
               : null,
             (decision.deadReasons || []).length
@@ -10104,10 +10234,23 @@ window.__ModuleLoader__.load({
                 '无出处作废：' + decision.deadReasons.join('；'))
               : null,
             (decision.tickets || []).length
-              ? h('div', { style: { fontSize: 11, marginTop: 4 } },
+              ? h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 4 } },
                 '行动单：' + decision.tickets.map((t) => `${t.id}（${t.intent}）`).join('；'))
               : null)
           : null,
+
+        /** 反馈与冷却（阶段 1 对齐）：没人回多久算负反馈、冷到多少先停一停 */
+        h('div', { className: 'roost-at-block' },
+          h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 5 } }, '反馈与冷却'),
+          h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 6 } },
+            '主动投递后没人回，过这么久记一次负反馈；冷到阈值先 park，半衰期越短忘得越快。'),
+          h('div', { className: 'roost-at-rows' },
+            h(AtRow, { label: '没人回多久算负反馈', hint: '小时；默认 48' },
+              h(NumRow, { label: '等', k: 'responseWindowHours', min: 1, max: 720, suffix: '小时' })),
+            h(AtRow, { label: '冷到多少先 park', hint: '默认 3；到点先暂停这类方向' },
+              h(NumRow, { label: '阈值', k: 'chillParkThreshold', min: 1, max: 20, suffix: '级' })),
+            h(AtRow, { label: '冷度半衰期', hint: '默认 14 天；越小忘得越快' },
+              h(NumRow, { label: '半衰期', k: 'chillHalfLifeDays', min: 1, max: 365, suffix: '天' })))),
 
         /** 执行区：贴一张行动单 JSON，走三级分级/硬禁区/确认队列（阶段 4） */
         h('div', { className: 'roost-note', style: { marginTop: 8 } },
@@ -10122,8 +10265,10 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'roost-btn', disabled: busy === 'execute', onClick: runTicket, style: { marginTop: 4 } },
             busy === 'execute' ? '执行中…' : '执行这张单')),
 
+        ),
+        h(Sec, { n: '05', title: '方向与规矩' },
         /** 主人纠偏（阶段 4）：别做 X → 抑制表；多干这种 → 偏好表 */
-        h('div', { className: 'roost-note', style: { marginTop: 8 } },
+        h('div', { className: 'roost-note', style: { marginTop: 0 } },
           h('div', { style: { fontSize: 12, marginBottom: 4 } }, '给她立规矩（「别再做…」会硬拦；「多干这种…」会加权）'),
           h('input', {
             type: 'text', value: correction,
@@ -10132,6 +10277,29 @@ window.__ModuleLoader__.load({
             style: { width: '70%', fontSize: 12 },
           }),
           h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: 6 }, onClick: submitCorrection }, '记下'),),
+
+        h('div', { className: 'roost-at-block' },
+          h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 5 } }, '硬约束与确认（不由模型自判）'),
+          h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 6 } },
+            '硬约束在立项时由代码校验，触犯直接否决；默认碰主人侧要先确认。'),
+          h('div', { className: 'roost-at-rows' },
+            h(AtRow, { label: '主人硬约束', hint: '一行一条；触犯的候选直接否决' },
+              h('textarea', {
+                className: 'roost-input', rows: 2, value: c.constraintRules ?? '',
+                placeholder: '一行一条，例如：别发外网链接',
+                style: { width: '100%', resize: 'vertical', fontSize: 11 },
+                onChange: (e) => patch({ constraintRules: e.target.value }),
+              })),
+            h(AtRow, { label: '碰主人侧先确认', hint: '默认要确认；关掉等于放弃这道闸' },
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                h('input', {
+                  type: 'checkbox', checked: c.autoConfirmOwner !== true,
+                  onChange: (e) => patch({ autoConfirmOwner: !e.target.checked }),
+                }), '要主人确认（默认）'),
+              h(NumRow, {
+                label: '等', k: 'confirmWindowMinutes', min: 1, max: 10080,
+                suffix: '分钟', hint: '默认 720；超时自动取消',
+              })))),
 
         skillState
           ? h('div', { className: 'roost-note', style: { marginTop: 8, fontSize: 11 } },
@@ -10153,7 +10321,7 @@ window.__ModuleLoader__.load({
           : null,
 
         /** 她的小闹钟（A1）：到点叫醒她，她真说的话投递到设闹钟的那个私聊，`<<skip>>` 不发 */
-        h('div', { className: 'roost-note', style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--line-soft)' } },
+        h('div', { className: 'roost-at-block' },
           h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 5 } }, '小闹钟：代她设一条 / 看待触发'),
           h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8, lineHeight: 1.6 } },
             '这里是**操作**：替她记一条、看哪些还没触发、关掉某条。'
@@ -10213,8 +10381,10 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: 6 }, onClick: () => closeReminder(r.id) }, '关闭'))))
             : h('div', { className: 'roost-muted', style: { fontSize: 11 } }, '还没有待触发的小闹钟。')),
 
+        ),
+        h(Sec, { n: '06', title: '账本与复盘' },
         pending
-          ? h('div', { className: 'roost-note', style: { marginTop: 8 } },
+          ? h('div', { className: 'roost-note', style: { marginTop: 0 } },
             pending.length
               ? pending.map((x) => h('div', { key: x.ticketId || x.id, className: 'roost-item', style: { marginBottom: 4 } },
                 h('span', null, `${x.ticketId || x.id} · ${x.ticket?.intent || ''}（等主人确认）`),
@@ -10294,7 +10464,7 @@ window.__ModuleLoader__.load({
           : null,
 
         /** A3/A4/A5/A6 治理区：按日复盘 / 提案 / 收窄接管 */
-        h('div', { className: 'roost-note', style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--line-soft)' } },
+        h('div', { className: 'roost-at-block' },
           h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 6 } }, '复盘 · 提案 · 她自己调方向'),
           h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 } },
             h('input', {
@@ -10360,6 +10530,7 @@ window.__ModuleLoader__.load({
               dayDetail.dream || '这天没做梦。',
               h('div', { className: 'roost-muted', style: { marginTop: 6 } }, `当天账本 ${dayDetail.rows.length} 条`)))
           : null,
+        ),
       )
     }
 
@@ -10642,6 +10813,26 @@ window.__ModuleLoader__.load({
                   : '现在没有值得开口的理由 —— 这是正常的，不是坏了。'),
           h('div', { className: 'roost-note' },
             `清醒时段 ${cfg.awakeFrom ?? 8}–${cfg.awakeTo ?? 23} 点 · 沉默超过 ${cfg.missAfterHours ?? 6} 小时算「想你」 · 随性每天最多 ${cfg.casualPerDay ?? 1} 次`),
+          h('label', {
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 6 },
+            title: '机会分低于这个值，连模型都不问；默认 0.35',
+          },
+            '机会分门槛',
+            h('input', {
+              className: 'roost-input', type: 'number', min: 0, max: 1, step: 0.05, style: { width: 64 },
+              value: config?.awake?.minScore ?? 0.35,
+              disabled: !saveCfg || Boolean(busy),
+              onChange: (e) => {
+                const n = Number(e.target.value)
+                if (!Number.isFinite(n)) return toast('机会分门槛填 0–1')
+                saveCfg({
+                  awake: {
+                    ...(config?.awake || {}),
+                    minScore: Math.min(1, Math.max(0, Math.round(n * 100) / 100)),
+                  },
+                })
+              },
+            })),
 
           /**
            * 「上次的决定」原来是独立一节，但只有两行读数，
@@ -10985,6 +11176,41 @@ window.__ModuleLoader__.load({
         h(Sec, { n: '07', title: '群聊主动（默认全关）' },
           h('div', { className: 'roost-note', style: { marginBottom: 8 } },
             '群里主动说话极易被踢。四道门全过才会说：白名单显式开 → 有 group_push 授权 → 不在静默时段 → 当天没到上限且真冷场。'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8, fontSize: 12 } },
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+              '每群每天最多',
+              h('input', {
+                className: 'roost-input', type: 'number', min: 0, max: 20, style: { width: 54 },
+                value: config?.awake?.maxPerGroupPerDay ?? 3,
+                disabled: !saveCfg || Boolean(busy),
+                onChange: (e) => {
+                  const n = Number(e.target.value)
+                  if (!Number.isFinite(n)) return toast('每群每天最多填 0–20')
+                  saveCfg({
+                    awake: {
+                      ...(config?.awake || {}),
+                      maxPerGroupPerDay: Math.min(20, Math.max(0, Math.round(n))),
+                    },
+                  })
+                },
+              }), '次'),
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+              '群冷场多少分钟才考虑',
+              h('input', {
+                className: 'roost-input', type: 'number', min: 1, max: 1440, style: { width: 64 },
+                value: config?.awake?.groupQuietMinutes ?? 45,
+                disabled: !saveCfg || Boolean(busy),
+                onChange: (e) => {
+                  const n = Number(e.target.value)
+                  if (!Number.isFinite(n)) return toast('群冷清分钟数填 1–1440')
+                  saveCfg({
+                    awake: {
+                      ...(config?.awake || {}),
+                      groupQuietMinutes: Math.min(1440, Math.max(1, Math.round(n))),
+                    },
+                  })
+                },
+              }), '分钟')),
           groups.length
             ? h('div', { className: 'roost-list' },
                 groups.map((g) =>
@@ -12238,7 +12464,7 @@ window.__ModuleLoader__.load({
      * 页内两个页签照群聊策略页的做法（`PAGE_TABS` + `display:none`）：
      * 只切显示、不卸载，草稿和滚动位置都不会丢。
      */
-    function TalkTab({ feat, quick, toast, reload, busy, subHint, setTab }) {
+    function TalkTab({ feat, quick, toast, reload, busy, subHint, setTab, config, saveCfg }) {
       const VIEWS = [['say', '说话方式'], ['queue', '排队与插话']]
       const [view, setView] = useState('say')
       /** 三级跳转：别的页点「去调这一段」可以直达某个页签（见 RoostPage 的 `goTab`） */
@@ -12285,6 +12511,96 @@ window.__ModuleLoader__.load({
                 { label: '收尾与附件', ids: ['closing', 'sendFile'] },
               ],
             }),
+            /** 私聊「正在输入」与上游重试：后端真读，原来只能改 config.json */
+            h('div', {
+              className: 'roost-note',
+              style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--line-soft)' },
+            },
+              h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 6 } }, '正在输入与上游重试'),
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                h('input', {
+                  type: 'checkbox', checked: config?.chat?.typing !== false,
+                  disabled: !saveCfg || Boolean(busy),
+                  onChange: (e) => saveCfg({
+                    chat: { ...(config?.chat || {}), typing: Boolean(e.target.checked) },
+                  }),
+                }), '私聊回话前先显示「正在输入」（默认开）'),
+              h('details', { style: { marginTop: 8 } },
+                h('summary', { style: { fontSize: 12, cursor: 'pointer' } }, '上游重试（网关挂掉时补一轮，默认开）'),
+                h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, fontSize: 12 } },
+                  h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+                    h('input', {
+                      type: 'checkbox', checked: config?.chat?.upstreamRetry?.enabled !== false,
+                      disabled: !saveCfg || Boolean(busy),
+                      onChange: (e) => saveCfg({
+                        chat: {
+                          ...(config?.chat || {}),
+                          upstreamRetry: {
+                            ...(config?.chat?.upstreamRetry || {}),
+                            enabled: Boolean(e.target.checked),
+                          },
+                        },
+                      }),
+                    }), '开启'),
+                  h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+                    '补几次',
+                    h('input', {
+                      className: 'roost-input', type: 'number', min: 0, max: 3, style: { width: 54 },
+                      value: config?.chat?.upstreamRetry?.attempts ?? 1,
+                      onChange: (e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return toast('补几次填 0–3')
+                        saveCfg({
+                          chat: {
+                            ...(config?.chat || {}),
+                            upstreamRetry: {
+                              ...(config?.chat?.upstreamRetry || {}),
+                              attempts: Math.min(3, Math.max(0, Math.round(n))),
+                            },
+                          },
+                        })
+                      },
+                    })),
+                  h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+                    '等多久',
+                    h('input', {
+                      className: 'roost-input', type: 'number', min: 0, max: 30000, step: 500, style: { width: 74 },
+                      value: config?.chat?.upstreamRetry?.delayMs ?? 3000,
+                      onChange: (e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return toast('等待毫秒填 0–30000')
+                        saveCfg({
+                          chat: {
+                            ...(config?.chat || {}),
+                            upstreamRetry: {
+                              ...(config?.chat?.upstreamRetry || {}),
+                              delayMs: Math.min(30000, Math.max(0, Math.round(n))),
+                            },
+                          },
+                        })
+                      },
+                    }), '毫秒'),
+                  h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+                    '整轮总预算',
+                    h('input', {
+                      className: 'roost-input', type: 'number', min: 30, max: 600, style: { width: 64 },
+                      value: config?.chat?.upstreamRetry?.budgetSec ?? 170,
+                      onChange: (e) => {
+                        const n = Number(e.target.value)
+                        if (!Number.isFinite(n)) return toast('总预算填 30–600 秒')
+                        saveCfg({
+                          chat: {
+                            ...(config?.chat || {}),
+                            upstreamRetry: {
+                              ...(config?.chat?.upstreamRetry || {}),
+                              budgetSec: Math.min(600, Math.max(30, Math.round(n))),
+                            },
+                          },
+                        })
+                      },
+                    }), '秒')),
+                h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 6 } },
+                  '只对上游 5xx / 网关挂掉补一轮；blocked / empty / busy 重投只会刷屏。'))),
             /**
              * 引用 / 撤回不重复渲染，只指路。写成 `roost-note` + 一个 chip，
              * 而不是再开一张卡：那两项在群聊策略页已经有完整控件与说明。
@@ -20620,6 +20936,17 @@ window.__ModuleLoader__.load({
             '顺序：这个聊天 > 私聊 / 群聊默认 > 上面那个默认模型 > DSH 全局。'
             + '没配的那一级自动往下用；选的模型在 DSH 里找不到时也自动退回。'
             + '只有你能在这里改，聊天里的人换不了。'),
+          h('label', {
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 6 },
+            title: '按用途分别指定推理强度；默认开。关掉就都用同一个档位',
+          },
+            h('input', {
+              type: 'checkbox', checked: config?.model?.effortByKind !== false,
+              disabled: !saveCfg || Boolean(busy),
+              onChange: (e) => saveCfg({
+                model: { ...(config?.model || {}), effortByKind: Boolean(e.target.checked) },
+              }),
+            }), '按用途分推理强度（默认开：闲聊省一点，琢磨事用高一档）'),
 
           row('私聊默认', '所有私聊用它；单个 QQ 的例外在下面加',
             select(valOf(kinds.c2c), optsOf(valOf(kinds.c2c), true, '跟随上一级'), (v) => {
@@ -20725,6 +21052,88 @@ window.__ModuleLoader__.load({
                     ))),
                 ),
         ),
+      )
+    }
+
+    /**
+     * 聊天命令（2026-11-28）：commands.enabled / disabled 原来只能在「配置全文」里手改 JSON，
+     * 现在做成开关 + 逐条勾选。清单与框架回执都来自后端只读视图，不另造数据；
+     * 保存仍走 saveCfg（整段替换），改完要重连一次才重新上报框架。
+     */
+    function CommandCard({ config, saveCfg, toast }) {
+      const [view, setView] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const load = useCallback(async () => {
+        const r = await get('/panel/chat-commands').catch(() => null)
+        if (r?.ok === false) return toast(r.message || '读不到命令状态')
+        setView(r)
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const cmds = Array.isArray(view?.commands) ? view.commands : []
+      const enabled = view?.enabled !== false
+      const disabled = new Set(Array.isArray(view?.disabled) ? view.disabled : [])
+      const report = view?.report || null
+
+      const save = async (next) => {
+        setBusy(true)
+        try {
+          const r = await saveCfg({ commands: { enabled: next.enabled, disabled: next.disabled } })
+          if (r?.ok === false) return toast(r.message || '没存上')
+          toast('存好了；改完要重连一次才重新上报到框架')
+          await load()
+        } finally { setBusy(false) }
+      }
+      const toggleOne = (name, on) => {
+        const next = new Set(disabled)
+        if (on) next.delete(name)
+        else next.add(name)
+        save({ enabled, disabled: [...next] })
+      }
+      const fmtAt = (ts) => {
+        const d = new Date(Number(ts) || 0)
+        return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN')
+      }
+
+      return h(Sec, {
+        n: '02', title: '聊天命令',
+        right: h('button', {
+          type: 'button', className: 'roost-btn', disabled: busy,
+          onClick: () => save({ enabled: !enabled, disabled: [...disabled] }),
+        }, enabled ? '关掉' : '打开'),
+      },
+        h('div', { className: 'roost-note', style: { margin: 0 } },
+          '群里直接发 /model、/dstatus 这些指令。要框架 1.2.0 以上；'
+          + '改完要重连一次才重新上报到框架，中文别名跟着主名一起关。'),
+        h('div', { className: 'roost-at-status' },
+          h(Pill, { tone: enabled ? 'ok' : '' }, enabled ? '已开' : '关着'),
+          h(Pill, { tone: view?.support ? 'ok' : 'warn' },
+            view?.support ? '框架支持命令' : '框架较旧，不支持'),
+          h(Pill, null, report?.at ? `上次上报 ${fmtAt(report.at)}` : '还没上报过')),
+        report?.error
+          ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } }, `上次上报失败：${report.error}`)
+          : null,
+        Array.isArray(report?.renamed) && report.renamed.length
+          ? h('div', { className: 'roost-note', style: { color: 'var(--warn)' } },
+            '框架改了名：' + report.renamed.map((x) => `${x.from} → ${x.to}`).join('；'))
+          : null,
+        Array.isArray(report?.rejected) && report.rejected.length
+          ? h('div', { className: 'roost-note', style: { color: 'var(--bad)' } },
+            '没装上：' + report.rejected.map((x) => `${x.name || x.from}（${x.reason || ''}）`).join('；'))
+          : null,
+        h('div', { className: 'roost-at-rows' },
+          cmds.map((c) => h(AtRow, {
+            key: c.name,
+            label: `${view?.prefix || '/'}${c.name}`,
+            hint: `${c.desc || ''}${c.aliases?.length ? ' · ' + c.aliases.join('/') : ''}${c.ownerOnly ? ' · 仅主人' : c.admin ? ' · 管理员' : ''}`,
+          },
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+              h('input', {
+                type: 'checkbox', disabled: busy || !enabled,
+                checked: !disabled.has(c.name),
+                onChange: (e) => toggleOne(c.name, e.target.checked),
+              }), '启用'))),
+      ),
       )
     }
 
@@ -20895,6 +21304,27 @@ window.__ModuleLoader__.load({
         toast(r.message || '存好了')
       }
 
+      /** 高级配置里的数字控件：域 + 键 + clamp + 分域保存，避免每段复制一遍 */
+      const advNum = (domain, key, label, min, max, suffix) => h('label', {
+        style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 },
+      },
+        label,
+        h('input', {
+          className: 'roost-input', type: 'number', min, max, style: { width: 64 },
+          value: config?.[domain]?.[key] ?? '',
+          onChange: (e) => {
+            const n = Number(e.target.value)
+            if (!Number.isFinite(n)) return toast(label + '要填数字')
+            saveCfg({
+              [domain]: {
+                ...(config?.[domain] || {}),
+                [key]: Math.min(max, Math.max(min, Math.round(n))),
+              },
+            })
+          },
+        }),
+        suffix || '')
+
       return h('div', null,
         /**
          * 配置全文弹窗（2026-11-26 从页面正文搬进来）。
@@ -20951,7 +21381,9 @@ window.__ModuleLoader__.load({
             '工作区目录和名字在「首次设置」页里改——那是装机时定一次的事，跟本页的配置全文不是一个使用频率。改完要重启会话才挂上新工作区。'),
         ),
 
-        h(Sec, { n: '02', title: '配置全文',
+        h(CommandCard, { config, saveCfg, toast }),
+
+        h(Sec, { n: '03', title: '配置全文',
           right: h('button', {
             type: 'button', className: 'roost-primary',
             onClick: () => setJsonOpen(true),
@@ -20969,7 +21401,7 @@ window.__ModuleLoader__.load({
             : null,
         ),
 
-        h(Sec, { n: '03', title: '各段是干什么的' },
+        h(Sec, { n: '04', title: '各段是干什么的' },
           h('div', { className: 'roost-list' },
             JSON_SECTIONS.map(([k, label, desc]) =>
               h('div', { key: k, className: 'roost-item' },
@@ -20982,6 +21414,73 @@ window.__ModuleLoader__.load({
               ),
             ),
           ),
+        ),
+
+        /** 低频但后端真接线：收进折叠卡，不跟上面常改项抢视觉 */
+        h(Sec, { n: '05', title: '高级配置（默认折叠）', defaultOpen: false },
+          h('div', { className: 'roost-note', style: { margin: 0 } },
+            '这几组平时不用动，改完下一轮生效。节假日覆盖表结构较复杂，仍在「编辑配置全文」里改。'),
+
+          h('div', { className: 'roost-at-block' },
+            h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 5 } }, '上下文压缩'),
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+              advNum('compact', 'keepRecentUser', '开场带用户原话', 0, 30, '条'),
+              advNum('compact', 'keepRecentBot', '开场带她自己原话', 0, 30, '条'))),
+
+          h('div', { className: 'roost-at-block' },
+            h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 5 } }, '错峰'),
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                '判据',
+                h(Dropdown, {
+                  className: 'roost-input', style: { width: 130 },
+                  value: config?.offpeak?.mode ?? 'self',
+                  onChange: (e) => saveCfg({
+                    offpeak: { ...(config?.offpeak || {}), mode: e.target.value },
+                  }),
+                },
+                  h('option', { value: 'self' }, '自定义谷时'),
+                  h('option', { value: 'official' }, '官方峰时'))),
+              advNum('offpeak', 'startHour', '谷时从', 0, 23, '点'),
+              advNum('offpeak', 'endHour', '到', 0, 23, '点'),
+              advNum('offpeak', 'quietMinutes', '安静', 0, 240, '分钟'),
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                h('input', {
+                  type: 'checkbox', checked: config?.offpeak?.deferHeavy === true,
+                  onChange: (e) => saveCfg({
+                    offpeak: { ...(config?.offpeak || {}), deferHeavy: Boolean(e.target.checked) },
+                  }),
+                }), '重活限到谷时')),
+            h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 6 } },
+              'official 按北京时间工作日 9–12 / 14–18 为高峰；自定义谷时只在 self 模式下生效。')),
+
+          h('div', { className: 'roost-at-block' },
+            h('div', { style: { fontSize: 12.5, fontWeight: 600, marginBottom: 5 } }, '扩展市场'),
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                '数据源',
+                h(Dropdown, {
+                  className: 'roost-input', style: { width: 130 },
+                  value: config?.extensions?.marketSource ?? 'github',
+                  onChange: (e) => saveCfg({
+                    extensions: { ...(config?.extensions || {}), marketSource: e.target.value },
+                  }),
+                },
+                  h('option', { value: 'github' }, 'GitHub（官方）'),
+                  h('option', { value: 'gitee' }, 'Gitee（镜像）'),
+                  h('option', { value: 'custom' }, '自建源'))),
+              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
+                '自建索引地址',
+                h('input', {
+                  className: 'roost-input', type: 'text', style: { width: 220 },
+                  value: config?.extensions?.indexUrl ?? '', placeholder: 'custom 时填，需 https',
+                  onChange: (e) => saveCfg({
+                    extensions: { ...(config?.extensions || {}), indexUrl: e.target.value },
+                  }),
+                })),
+              advNum('extensions', 'backupKeepDays', '覆盖备份保留', 0, 365, '天')),
+            h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 6 } },
+              '国内访问 GitHub 源常被重置可切 Gitee；0 天 = 永久保留备份。')),
         ),
       )
     }
@@ -27703,7 +28202,7 @@ window.__ModuleLoader__.load({
            * 不再单独请求——同一份数据在两个页面各拉一次会出现「这边开了那边没变」。
            */
           tab === 'talk' ? h(TalkTab, {
-            feat: capFeat, quick, toast, reload: loadCaps, busy, setTab,
+            feat: capFeat, quick, toast, reload: loadCaps, busy, setTab, config, saveCfg,
             /** 三级跳转：从权限页 / 概览点「说话方式」直达 say 页签 */
             subHint: tabHint && tabHint.tab === 'talk' ? tabHint.sub : null,
           }) : null,

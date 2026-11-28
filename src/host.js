@@ -6212,6 +6212,8 @@ export function apply(ctx) {
   let lastCatalogSig = null;
   let lastCatalogAt = 0;
   let catalogInFlight = false;
+  /** 最近一次框架回执（改名/没装上）；面板「设置 → 聊天命令」要只读展示，不再只写日志 */
+  let lastCatalogReport = null;
   /**
    * 框架重启后它那份清单是空的，而 DSH 这边的签名没变。
    * 完全跳过会让它永久为空（直到下一次装卸扩展），所以隔一段时间补报一次。
@@ -6250,6 +6252,12 @@ export function apply(ctx) {
     catalogInFlight = true;
     try {
       const r = await roost.rpc('ext.register', { extensions, ...(host ? { host } : {}) });
+      lastCatalogReport = {
+        at: Date.now(),
+        renamed: Array.isArray(r?.renamed) ? r.renamed : [],
+        rejected: Array.isArray(r?.rejected) ? r.rejected : [],
+        error: r?.ok === false ? String(r?.message || '上报被拒') : '',
+      };
       if (r?.ok === false) {
         log.warn(`上报扩展能力清单被框架拒了：${r?.message ?? ''}`);
         return;
@@ -16475,6 +16483,25 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
         } catch (e) {
           return send(res, 500, { ok: false, message: e.message });
         }
+      }),
+
+      /**
+       * 聊天命令面板视图（只读）：命令表 + 逐条禁用状态 + 最近一次框架回执。
+       * 写仍走「配置全文」的 saveCfg —— 和 commands.enabled/disabled 是同一份配置，
+       * 不另开一份状态；重报发生在重连（onReady），面板只提示「改完要重连一次」。
+       */
+      route('/panel/chat-commands', async (req, res) => {
+        if (req.method !== 'GET') return send(res, 405, { ok: false, message: '只读接口' });
+        const disabled = Array.isArray(cfg.commands?.disabled) ? cfg.commands.disabled : [];
+        return send(res, 200, {
+          ok: true,
+          enabled: cfg.commands?.enabled !== false,
+          disabled,
+          commands: chatCommands.specs({ allow: () => true }),
+          support: frameworkTakesCommands(),
+          prefix: cfg.commandPrefix || '/',
+          report: lastCatalogReport,
+        });
       }),
 
       /**

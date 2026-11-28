@@ -1980,6 +1980,28 @@ test('路由：/stickers/delete 能删「未分类」子目录里的图（显示
   off?.();
 });
 
+/* ---------------- 聊天命令面板（只读视图） ---------------- */
+
+test('路由：/panel/chat-commands 暴露命令表与开关状态，且只读', async () => {
+  const { call, off } = await bootHost({ commands: { enabled: false, disabled: ['mood', 'diary'] } });
+
+  const r = await call('/panel/chat-commands');
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.enabled, false);
+  assert.deepEqual(r.json.disabled, ['mood', 'diary']);
+  /** 命令表来自 chat-commands.js 的 specs()，不另造一份；14 条按固定顺序 */
+  assert.equal(r.json.commands.length, 14);
+  assert.deepEqual(r.json.commands.slice(0, 3).map((c) => c.name), ['model', 'effort', 'silent']);
+  assert.ok(r.json.commands.every((c) => typeof c.desc === 'string' && Array.isArray(c.aliases)),
+    '每条都要带说明与中文别名，面板才能逐条勾选');
+  assert.equal(r.json.support, false, '假 ctx 没声明 ext.command.reply 能力');
+  assert.equal(r.json.report, null, '还没上报过框架');
+
+  const post = await call('/panel/chat-commands', { method: 'POST', body: {} });
+  assert.equal(post.status, 405, '这里只读，写仍走配置全文的 saveCfg');
+  off?.();
+});
+
 /* ---------------- 自驱引擎（实验，默认关） ---------------- */
 
 test('路由：/autotelic/status 默认关着，think 被拒且留痕', async () => {
