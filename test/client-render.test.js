@@ -2838,8 +2838,95 @@ test('5.1 Alt+K 全局查找：页名与中文别名都能搜到', () => {
   assert.ok(src.includes("e.altKey && (e.key === 'k' || e.key === 'K')"), '要监听 Alt+K');
   assert.ok(src.includes("e.key === 'Escape'"), 'Esc 要能关');
   assert.ok(src.includes("e.key === 'Enter'"), '回车要能跳');
-  assert.ok(src.includes('搜页面：页名或别名'), '要有查找面板');
+  assert.ok(src.includes('搜设置项 / 配置段 / 页面'), '要有查找面板');
   void h
+})
+
+test('查找 P0：页面 / 功能项 / 配置段三类都进索引，布尔项给快切', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const entries = mod.buildSearchEntries({
+    tabs: [['memory', '记忆'], ['config', '配置']],
+    features: [
+      { id: 'memory', label: '三层记忆', desc: '记人、记约定', home: 'memory', kind: 'toggle', requires: [] },
+      { id: 'queueMax', label: '排队上限', desc: '', home: 'talk', kind: 'number' },
+    ],
+    sections: [['memory', '记忆', '日记寿命、注入条数']],
+    on: { memory: true },
+    labelOfTab: (id) => ({ memory: '记忆', config: '配置', talk: '聊天' })[id] || '',
+    groupOfTab: (id) => (id === 'memory' ? '人设' : '系统'),
+  })
+  assert.equal(entries.length, 5, '2 页 + 2 功能项 + 1 配置段')
+  const page = entries.find((x) => x.id === 'page:memory')
+  const feat = entries.find((x) => x.id === 'feature:memory')
+  const num = entries.find((x) => x.id === 'feature:queueMax')
+  const sec = entries.find((x) => x.id === 'section:memory')
+  assert.match(page.keywords, /日记/, '页面沿用 TAB_ALIAS 的别名')
+  assert.equal(feat.action, 'toggle', '布尔功能项应该能直接切')
+  assert.equal(feat.state, true, '开/关要读生效态')
+  assert.equal(feat.breadcrumb, '人设 › 记忆', '结果要带面包屑')
+  assert.equal(num.action, 'jump', '非布尔项只跳页，不在弹窗里写值')
+  assert.equal(sec.action, 'section', '配置段走定位，不走 patch')
+  assert.equal(sec.sectionKey, 'memory')
+})
+
+test('查找 P0：排序按 label > 别名 > 描述，空查询按原序', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const entries = mod.buildSearchEntries({
+    tabs: [['memory', '记忆']],
+    features: [{ id: 'memory', label: '三层记忆', desc: '记人', home: 'memory', kind: 'toggle' }],
+    sections: [['memory', '记忆', '日记寿命、注入条数']],
+    on: {},
+    labelOfTab: () => '记忆',
+    groupOfTab: () => '人设',
+  })
+  const byLabel = mod.matchSettings('三层记忆', entries)
+  assert.equal(byLabel[0].id, 'feature:memory', '功能项 label 命中要排前面')
+  const byExact = mod.matchSettings('记忆', entries)
+  assert.equal(byExact[0].id, 'section:memory', '完全命中「记忆」比「三层记忆」这种部分命中更靠前')
+  const byAlias = mod.matchSettings('日记', entries)
+  assert.ok(byAlias.some((x) => x.id === 'page:memory'), 'TAB_ALIAS 的「日记」要能找到记忆页')
+  const byDesc = mod.matchSettings('日记寿命', entries)
+  assert.ok(byDesc.some((x) => x.id === 'section:memory'), '描述也能命中，但排在后面')
+  const all = mod.matchSettings('', entries)
+  assert.deepEqual(all.map((x) => x.id), entries.map((x) => x.id), '空查询保持导航原序')
+  assert.deepEqual(mod.matchSettings('完全没这个词', entries), [])
+})
+
+test('查找 P0：入口在顶部导航，features.get 定义不丢，快切走 features.patch', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("className: 'roost-nav-search'"), '一级导航要有查找按钮')
+  assert.ok(src.includes('setFeatDefs(Array.isArray(r.features) ? r.features : [])'), 'features.get 的定义要留下')
+  assert.ok(src.includes("quick('features.patch', { id: fid, on: next })"), '布尔快切必须走 features.patch')
+  assert.ok(src.includes('searchJump: configJump'), '配置段定位要传给 ConfigTab')
+  assert.ok(src.includes('布尔开关直接切换'), '弹窗要说明可快切')
+})
+
+test('查找 P1：行级项带归属页与锚点，同页同名去重', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const row = mod.registerSettingRow({ label: '行级测试半衰期XYZ', desc: '心情回落', tab: 'mood' })
+  assert.equal(row.action, 'focus', '行级项的动作是定位控件')
+  assert.equal(row.anchorId, 'mood|行级测试半衰期xyz', '锚点带页归属，跨页不串')
+  const one = mod.rowEntries().filter((x) => x.label === '行级测试半衰期XYZ')
+  assert.equal(one.length, 1)
+  const again = mod.registerSettingRow({ label: '行级测试半衰期XYZ', desc: '改过的说明', tab: 'mood' })
+  assert.equal(mod.rowEntries().filter((x) => x.label === '行级测试半衰期XYZ').length, 1, '同页同名不重复')
+  assert.equal(again.desc, '改过的说明', '重复登记更新说明，不留旧副本')
+})
+
+test('查找 P1：公共组件写锚点，切页后补扫 DOM，命中后聚焦', () => {
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  assert.ok(src.includes("'data-roost-setting': title ? settingRowId"), 'Sec 要带锚点')
+  assert.ok(src.includes("'data-roost-setting': label ? settingRowId"), 'GRow 要带锚点')
+  assert.ok(src.includes('scanSettingRows(body, tab)'), '切页后要扫当前页 DOM')
+  assert.ok(src.includes('focusSettingRow(pick)'), '命中行级项要滚过去高亮')
+  assert.ok(src.includes("['row', '具体设置']"), '结果里要有具体设置分组')
+  assert.ok(src.includes('if (featSeqAtStart === featSeq.current) setCapFeat('),
+    'loadCaps 的 capFeat 也要受序号锁保护，别把快切结果弹回去')
+  assert.ok(src.includes('.roost-root:has(.cap-modal) .roost-scroll-body'),
+    '同级渲染的查找弹窗也要锁住底层滚动')
 })
 
 /**
