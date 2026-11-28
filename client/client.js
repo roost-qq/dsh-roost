@@ -17219,6 +17219,8 @@ window.__ModuleLoader__.load({
         + 'maxPerDay 一天最多推进几次、failLimit 连续失败几次自动卡住、stuckHours 卡多久；'
         + 'heartbeatMin 是自动心跳间隔（0 = 只能手动点）；seeds 是她可以琢磨的方向，空就不立项。'
         + '所有动作都进 autotelic-ledger.jsonl 的哈希链账本，面板能看链完整性和断在第几条'],
+      ['commands', '聊天命令', 'enabled：把 /model、/dstatus 这些基础指令注册到 roost 侧，群里直接发就能用（要框架 1.2.0 以上；老的会被忽略）。'
+        + 'disabled 按英文命令名单条关（model / silent / reset…），中文别名跟着主名一起关。改完要重连一次才重新上报'],
       ['model', '模型', '三层回退：byChat[chatId] > byKind.c2c / byKind.group > default > DSH 全局默认模型。'
         + 'default 是「所有聊天都用它」（面板「聊天用的模型」那张卡）。'
         + 'effort 是全局思考强度（low / high / max，空 = 不传）：哪一级显式写了 reasoningEffort 就以它为准。'

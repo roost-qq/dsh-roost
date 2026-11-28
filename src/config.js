@@ -70,6 +70,20 @@ export const DEFAULTS = {
    * 这也正是之前 `ext.purpose.enabled` 存不住、目的引擎永远开不起来的原因。
    */
   ext: {},
+  /**
+   * 聊天内命令（框架 1.2.0 起）：宿主把自己的基础指令注册到 roost 侧，
+   * 群里发 `/model` 由框架拦下再转给宿主执行。
+   *
+   * **默认开**（主人 2026-11-28 定）：装了就该能用，不然「功能写了但没人知道
+   * 要开」；多个机器人在同一个群里抢 `/model` 的情况，用 `disabled` 单条关。
+   *
+   * `disabled` 是**命令名**（英文规范名，不是中文别名）——别名是入口，关的
+   * 应该是那条命令本身。
+   */
+  commands: {
+    enabled: true,
+    disabled: [],
+  },
   server: {
     /** 固定服务的端口（/v1 控制面、TTS、健康检查）。端口被占会自动顺延 */
     port: 17321,
@@ -1827,6 +1841,26 @@ function sleepSync(ms) {
   } catch { /* 环境不支持就当场不睡，最多多试两次 */ }
 }
 
+/**
+ * 聊天命令配置的归一化。
+ *
+ * `disabled` 是用户手写的开放数组，必须在进出磁盘时夹紧：限长、去重、
+ * 只留合法命令名（小写字母开头）。`enabled` 只认布尔——写成字符串 "false"
+ * 会让 `!== false` 判成开，面板关掉了实际还在跑。
+ */
+function normalizeChatCommandsCfg(cmds) {
+  if (!cmds || typeof cmds !== 'object' || Array.isArray(cmds)) return;
+  cmds.enabled = cmds.enabled !== false;
+  const out = [];
+  for (const x of Array.isArray(cmds.disabled) ? cmds.disabled : []) {
+    const name = String(x ?? '').trim().toLowerCase();
+    if (!/^[a-z][a-z0-9_-]{0,15}$/.test(name) || out.includes(name)) continue;
+    out.push(name);
+    if (out.length >= 64) break;
+  }
+  cmds.disabled = out;
+}
+
 /** 群响应模式只有这三档；未知值一律回 chat，避免手改配置把群聊弄哑。 */
 const GROUP_RESPONSE_MODES = new Set(['chat', 'observe', 'off']);
 
@@ -1949,6 +1983,7 @@ export function loadConfig() {
   migrateChannel(saved);
   const cfg = upgradeOldDefaults(merge(structuredClone(DEFAULTS), saved));
   normalizeChatGroup(cfg.group);
+  normalizeChatCommandsCfg(cfg.commands);
   /**
    * 小闹钟/追问四键的**读盘兜底**（对齐 aurabot core/config.js:738-740）。
    * pruneTo 只裁键不裁值：没有这层，config.json 里写 reminderLimit=100 就真允许
@@ -2118,6 +2153,7 @@ export function saveConfig(next) {
   const merged = merge(structuredClone(DEFAULTS), safeNext);
   const cfg = coerceSecrets(pruneTo(DEFAULTS, merged));
   normalizeChatGroup(cfg.group);
+  normalizeChatCommandsCfg(cfg.commands);
   writeFileSync(FILE(), JSON.stringify(cfg, null, 2), 'utf8');
   /**
    * 权限收紧：这份文件里有 `roostHost.token`、`server.token`、几个 apiKey。
