@@ -1370,12 +1370,12 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
   const mod = loadClient(rt.React)
   const ns = (node) => sectionsOf(node).filter((s) => s.n).map((s) => s.n)
 
-  /* 设置页：工作区 / 配置全文 / 各段说明 */
+  /* 设置页：工作区 / 聊天命令 / 配置全文 / 各段说明 / 高级配置（默认折叠） */
   rt.reset()
   assert.deepEqual(ns(expand(mod.ConfigTab({
     config: {}, save: () => {}, saveCfg: () => {}, toast: () => {},
     stickers: null, setupSt: null, reload: () => {},
-  }), rt)), ['01', '02', '03'], '设置页编号应 01–03 连续')
+  }), rt)), ['01', '02', '03', '04', '05'], '设置页编号应 01–05 连续')
 
   /* 表达页：语音合成 / 表情包（两边原本是 05 和 04，拆出来后各自的编号要归一） */
   rt.reset()
@@ -1415,7 +1415,7 @@ test('拆分后每页分节编号都从 01 起、连续', () => {
 /**
  * 页内页签拆分（2026-11-27）。
  *
- * 记忆页 16 张、主动搭话页 11 张平铺一页要滚三屏，上面写了什么谁也记不住。
+ * 记忆页 17 张、主动搭话页 11 张平铺一页要滚三屏，上面写了什么谁也记不住。
  * 按「你此刻想干什么」各分四段，每段 ≤ 5 张。
  *
  * 这条断言锁两件事：
@@ -1455,8 +1455,8 @@ test('页内页签：记忆页 / 主动搭话页各分四段，每段不超过 5
     config: {}, saveCfg: async () => ({ ok: true }), feat: null, retention: null,
   })))
   assert.equal(memPane.length, 4, '记忆页要分 4 段')
-  assert.deepEqual(memPane, [4, 5, 3, 4], '记忆页各段卡片数：开关与概览 / 认知 / 事实 / 召回')
-  assert.equal(memPane.reduce((a, b) => a + b, 0), 16, '记忆页 16 张卡一张都不能少')
+  assert.deepEqual(memPane, [5, 5, 3, 4], '记忆页各段卡片数：开关与概览（含按人不记与巩固）/ 认知 / 事实 / 召回')
+  assert.equal(memPane.reduce((a, b) => a + b, 0), 17, '记忆页 17 张卡一张都不能少')
 
   /**
    * 主动搭话页最后一段末尾还挂着两张子组件卡（`PurposeStatusCard` / `OutboundPolicyCard`），
@@ -4016,6 +4016,107 @@ test('接入页：装好之后才有「卸载重装」入口', () => {
   rt.reset()
   const empty = textOf(expand({ type: el.type, props: { ...el.props, st: { installed: false } } }, rt))
   assert.ok(!empty.includes('卸载重装'), '没装就别给卸载入口')
+})
+
+/* ---------------- 2026-11-28 自驱页重排 + 聊天命令开关卡 ---------------- */
+
+test('自驱页：拆成六张语义卡，状态用胶囊，原有操作一条不少', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  store['roost.tab'] = 'autotelic'
+  rt.reset()
+  const txt = textOf(expand(mod.RoostPage(), rt))
+  for (const title of ['总控与状态', '节奏与预算', '她的手', '预览与决策', '方向与规矩', '账本与复盘']) {
+    assert.ok(txt.includes(title), `要有「${title}」这一张卡`)
+  }
+  for (const label of ['保存种子', '看会选哪个', '立项（想一轮）', '推进一步', '三段决策', '决策链', '看账本']) {
+    assert.ok(txt.includes(label), `原有操作「${label}」不能因为重排而丢掉`)
+  }
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const body = src.slice(src.indexOf('function AutotelicCard'), src.indexOf('function OutboundPolicyCard'))
+  assert.match(body, /h\(Pill, \{ tone: c\.enabled \? 'ok' : '' \}/, '总开关状态要用胶囊，不用裸文本')
+  assert.ok(!/borderTop: '1px solid var\(--line-soft\)'/.test(body), '内联分隔线要换成语义 class')
+})
+
+test('设置页：聊天命令卡把开关与逐条勾选接到 commands 配置', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const tree = expand(mod.ConfigTab({
+    config: {}, save: () => {}, saveCfg: () => {}, toast: () => {},
+    stickers: null, setupSt: null, reload: () => {},
+  }), rt)
+  const txt = textOf(tree)
+  assert.ok(txt.includes('群里直接发 /model、/dstatus'), '命令卡要出现在设置页正文')
+  assert.ok(txt.includes('改完要重连一次才重新上报到框架'), '要说明重连才生效，不能让人以为立刻生效')
+
+  const src = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const card = src.slice(src.indexOf('function CommandCard'), src.indexOf('function ConfigTab'))
+  assert.ok(card.includes("get('/panel/chat-commands')"), '清单和框架回执要从后端只读接口取')
+  assert.ok(card.includes('saveCfg({ commands: { enabled: next.enabled, disabled: next.disabled } })'),
+    '保存仍写 commands 段，不另造一份状态')
+  assert.ok(card.includes('cmds.map((c) => h(AtRow,'), '每条命令一个左标签右控件行')
+  assert.ok(card.includes('框架改了名') && card.includes('没装上'), '改名/拒绝回执要在面板上可见')
+})
+
+test('后端已接线但原来没控件的设置项都真的画在对应页面上', () => {
+  const rt = makeReact()
+  const mod = loadClient(rt.React)
+  const cfg = {
+    autotelic: {}, persona: {}, awake: {}, memory: {}, recall: {}, model: {}, chat: {},
+    compact: {}, offpeak: {}, extensions: {},
+  }
+  const saveCfg = async () => ({ ok: true })
+  /** 这两张卡没有单独导出，只能从整页入口按 tab 进去看 */
+  const pageText = (tab) => {
+    store['roost.tab'] = tab
+    rt.reset()
+    return textOf(expand(mod.RoostPage(), rt))
+  }
+  const cases = [
+    [
+      mod.HerTab(tabProps({
+        config: cfg, save: saveCfg, personas: null, chats: [], onPickChat() {},
+        feat: null, reloadCaps() {}, repoSeed: null,
+      })),
+      ['说话规矩（私聊 / 群聊）', '私聊规矩', '群聊规矩'],
+    ],
+    [
+      mod.AwakeTab(tabProps({
+        aw: null, sp: null, chats: [], config: cfg, saveCfg, feat: null,
+      })),
+      ['机会分门槛', '每群每天最多', '群冷场多少分钟才考虑'],
+    ],
+    [
+      mod.MemoryTab(tabProps({ config: cfg, saveCfg, feat: null, retention: null })),
+      ['按人不记与巩固', '按人不记', '邻接联想'],
+    ],
+    [
+      mod.TalkTab(Object.assign({ setTab() {} }, tabProps({
+        feat: null, config: cfg, saveCfg,
+      }))),
+      ['正在输入与上游重试', '上游重试', '整轮总预算'],
+    ],
+    [
+      mod.ConfigTab({
+        config: cfg, save: saveCfg, saveCfg, toast() {},
+        stickers: null, setupSt: null, reload() {},
+      }),
+      ['高级配置（默认折叠）', '上下文压缩', '错峰', '扩展市场', '覆盖备份保留'],
+    ],
+  ]
+  for (const [node, labels] of cases) {
+    rt.reset()
+    const txt = textOf(expand(node, rt))
+    for (const label of labels) {
+      assert.ok(txt.includes(label), `面板上找不到「${label}」`)
+    }
+  }
+  const atTxt = pageText('autotelic')
+  for (const label of ['硬约束与确认', '主人硬约束', '反馈与冷却', '没人回多久算负反馈', '冷度半衰期', '一步最多写']) {
+    assert.ok(atTxt.includes(label), `自驱页上找不到「${label}」`)
+  }
+  assert.ok(pageText('model').includes('按用途分推理强度'), '模型页找不到按用途分推理强度')
+  store['roost.tab'] = 'overview'
 })
 
 /* ---------------- 2026-11-26 面板信息架构调整：配置弹窗 + 三级跳转 ---------------- */
