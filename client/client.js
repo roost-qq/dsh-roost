@@ -455,6 +455,15 @@ window.__ModuleLoader__.load({
 .roost-grp:hover{color:var(--dsw-alias-label-primary,inherit);background:var(--hover)}
 .roost-grp:active{transform:scale(.97)}
 .roost-grp:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* 一级导航右侧的查找入口：不复用 .roost-grp，免得被「一级分组」的测试与高亮算进去 */
+.roost-nav-search{margin-left:auto;flex:none;display:inline-flex;align-items:center;gap:6px;height:30px;
+  padding:0 10px;border:1px solid var(--line-soft);border-radius:9px;background:transparent;
+  color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font:inherit;font-size:12.5px}
+.roost-nav-search:hover{color:var(--dsw-alias-label-primary,inherit);background:var(--hover)}
+.roost-nav-search:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.roost-nav-search svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;
+  stroke-width:1.8;stroke-linecap:round}
+.roost-nav-search kbd{font:inherit;font-size:10.5px;opacity:.65}
 .roost-grp[data-on="1"]{color:var(--dsw-alias-label-primary,inherit);font-weight:600;
   background:color-mix(in srgb,var(--accent) 14%,transparent);
   border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
@@ -704,7 +713,7 @@ window.__ModuleLoader__.load({
 .cap-modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:60;
   display:flex;justify-content:center;padding:24px;
   overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}
-/* 弹窗是渲染在 .roost-scroll-body 里的 fixed 层。
+/* 多数弹窗渲染在 .roost-scroll-body 里；查找弹窗是它的同级节点（见下方父层那条）。
    **主防线**是下面两条：小弹窗靠 :has() 锁住底层唯一滚动区，整页弹窗由
    RoostPage 加 .is-locked；都是纯 CSS，弹窗卸载自动解锁，不用挂 effect。
    **兜底**（不依赖 :has()）：遮罩用 overflow-y:auto 自己接住滚轮，滚到边界
@@ -712,6 +721,9 @@ window.__ModuleLoader__.load({
    ⚠️ 不能写成 overflow:hidden —— 不可滚动的容器不消费滚轮，Chromium 会
    直接滚祖先，contain 也就永远不触发。 */
 .roost-scroll-body:has(.cap-modal){overflow:hidden}
+/* 查找弹窗是 .roost-scroll-body 的同级节点，上面那条 :has() 够不着；
+   在共同父层再兜一条，纯 CSS，弹窗卸载自动解锁 */
+.roost-root:has(.cap-modal) .roost-scroll-body{overflow:hidden}
 .roost-scroll-body.is-locked{overflow:hidden}
 /* 底色必须跟着主题令牌走：原来写 var(--bg, 深色兜底) 时 --bg 在本页根本没定义，
    永远取深色兜底；浅色模式下文字是深色，就成了「深底深字」几乎看不见（2026-11-11 截图）。
@@ -1426,7 +1438,12 @@ window.__ModuleLoader__.load({
        * 否则一进记忆页就是一屏几千字，想找的那块得滚半天。
        */
       const [open, setOpen] = useState(() => (key in foldState ? foldState[key] !== false : defaultOpen))
-      return h('div', { className: 'roost-sec' + (open ? '' : ' is-folded') },
+      /** 查找索引：分节标题也是可搜的具体设置，锚点落在分节根节点上 */
+      useEffect(() => { registerSettingRow({ label: title, tab: indexTab }) }, [title])
+      return h('div', {
+        className: 'roost-sec' + (open ? '' : ' is-folded'),
+        'data-roost-setting': title ? settingRowId(indexTab, title) : undefined,
+      },
         h('div', { className: 'roost-sec-h' },
           n ? h('span', { className: 'roost-sec-n' }, n) : null,
           h('span', { className: 'roost-sec-t' }, title),
@@ -2810,35 +2827,7 @@ window.__ModuleLoader__.load({
        * 五个域。每项 `[中文短语, featureId]`，`to`/`sub` 是三级跳转目标。
        * 顺序照用户日常关心的顺序：怎么说话 → 记不记得 → 找不找你 → 防不防 → 扩展。
        */
-      const DOMAINS = [
-        {
-          key: 'talk', label: '说话', to: 'talk', sub: 'say',
-          desc: '分段 / 收尾 / 附件；引用与撤回在群聊策略',
-          items: [['分段', 'qqTools'], ['收尾', 'closing'], ['发文件', 'sendFile'],
-            ['插话', 'steerInGroup'], ['语音', 'voice'], ['表情', 'stickers']],
-        },
-        {
-          key: 'memory', label: '记忆', to: 'memory', sub: 'now',
-          desc: '三层记忆、她自己翻、关系联想、上下文压缩',
-          items: [['三层', 'memory'], ['自己翻', 'memoryTools'], ['关系联想', 'graphAdjacent'],
-            ['翻记录', 'chatTools'], ['压缩', 'compact'], ['做过什么', 'events']],
-        },
-        {
-          key: 'proactive', label: '主动', to: 'awake', sub: 'gate',
-          desc: '会不会主动找你、开口前先不先想',
-          items: [['搭话', 'speakUp'], ['先想想', 'awake']],
-        },
-        {
-          key: 'guard', label: '防护', to: 'security',
-          desc: '提示词防泄露；切人格用法在人格页；熟人档案在人物页',
-          items: [['提示词', 'leakGuard'], ['切人格', 'personaCommand'], ['小档案', 'profiles'], ['心情影响', 'moodEffects']],
-        },
-        {
-          key: 'ext', label: '扩展', to: 'ext',
-          desc: '对外联动、用户扩展说明',
-          items: [['对外联动', 'bridge'], ['用户扩展', 'extensions']],
-        },
-      ]
+      const DOMAINS = SUMMARY_DOMAINS
 
       return h('div', null,
         h('div', { className: 'roost-note' },
@@ -13242,7 +13231,12 @@ window.__ModuleLoader__.load({
     }
 
     function GRow({ label, hint, children }) {
-      return h('div', { className: 'roost-g-row' },
+      /** 查找索引：行标签 + 说明一起收，命中后锚点就落在这一行 */
+      useEffect(() => { registerSettingRow({ label, desc: hint, tab: indexTab }) }, [label, hint])
+      return h('div', {
+        className: 'roost-g-row',
+        'data-roost-setting': label ? settingRowId(indexTab, label) : undefined,
+      },
         h('div', { className: 'roost-g-label' },
           h('b', null, label),
           hint ? h('small', null, hint) : null),
@@ -20734,7 +20728,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ConfigTab({ config, save, saveCfg, toast, stickers, setupSt, reload, currentChatId, setTab }) {
+    function ConfigTab({ config, save, saveCfg, toast, stickers, setupSt, reload, currentChatId, setTab, searchJump }) {
       const cfgJson = JSON.stringify(config, null, 2)
       const [draft, setDraft] = useState(cfgJson)
       const [err, setErr] = useState('')
@@ -20816,6 +20810,16 @@ window.__ModuleLoader__.load({
         const t = setTimeout(() => jumpTo(k), 0)
         return () => clearTimeout(t)
       }, [jsonOpen])
+
+      /**
+       * 从查找弹窗点「配置段」过来：searchJump 每次都是新对象（带 n），
+       * 连点同一段也会重新触发；没开编辑器时 jumpTo 自己会记 pendingJump。
+       */
+      useEffect(() => {
+        if (!searchJump?.key) return undefined
+        const t = setTimeout(() => jumpTo(searchJump.key), 0)
+        return () => clearTimeout(t)
+      }, [searchJump])
 
       /**
        * 关闭弹窗。
@@ -25950,6 +25954,219 @@ window.__ModuleLoader__.load({
       return out
     }
 
+    /**
+     * 「设置总览」的五个域 + 短别名。原先这份表藏在 SummaryTab 内部，
+     * 查找弹窗想用「分段 → qqTools」「搭话 → speakUp」这类短词就得再抄一份，
+     * 两份早晚会分家。提到模块级，两处共用同一份事实。
+     */
+    const SUMMARY_DOMAINS = [
+      {
+        key: 'talk', label: '说话', to: 'talk', sub: 'say',
+        desc: '分段 / 收尾 / 附件；引用与撤回在群聊策略',
+        items: [['分段', 'qqTools'], ['收尾', 'closing'], ['发文件', 'sendFile'],
+          ['插话', 'steerInGroup'], ['语音', 'voice'], ['表情', 'stickers']],
+      },
+      {
+        key: 'memory', label: '记忆', to: 'memory', sub: 'now',
+        desc: '三层记忆、她自己翻、关系联想、上下文压缩',
+        items: [['三层', 'memory'], ['自己翻', 'memoryTools'], ['关系联想', 'graphAdjacent'],
+          ['翻记录', 'chatTools'], ['压缩', 'compact'], ['做过什么', 'events']],
+      },
+      {
+        key: 'proactive', label: '主动', to: 'awake', sub: 'gate',
+        desc: '会不会主动找你、开口前先不先想',
+        items: [['搭话', 'speakUp'], ['先想想', 'awake']],
+      },
+      {
+        key: 'guard', label: '防护', to: 'security',
+        desc: '提示词防泄露；切人格用法在人格页；熟人档案在人物页',
+        items: [['提示词', 'leakGuard'], ['切人格', 'personaCommand'], ['小档案', 'profiles'], ['心情影响', 'moodEffects']],
+      },
+      {
+        key: 'ext', label: '扩展', to: 'ext',
+        desc: '对外联动、用户扩展说明',
+        items: [['对外联动', 'bridge'], ['用户扩展', 'extensions']],
+      },
+    ]
+
+    const searchNorm = (v) => String(v ?? '').trim().toLocaleLowerCase()
+
+    /**
+     * 查找弹窗的候选表。三层来源，都是现成事实、不新增维护负担：
+     *  · 页面     —— `paletteTabs()`（沿用 Alt+K 的别名表和隐藏页规则）
+     *  · 功能项   —— `features.get` 已下发的 `features[]`（label / desc / home / kind）
+     *  · 配置段   —— `JSON_SECTIONS`（43 段，label / desc / key）
+     *
+     * `on` 是算过依赖后的生效态，用来在结果里显示开/关；快切只认布尔项。
+     * 这里刻意不索引配置段里的每一个 JSON 键：键没有稳定中文 label，
+     * 硬抽只会得到「memory.enabled」这种用户根本不会搜的东西（P1 再做行级）。
+     */
+    function buildSearchEntries({ tabs = [], features = [], sections = [], on = {}, labelOfTab = () => '', groupOfTab = () => '' } = {}) {
+      const out = []
+      for (const [id, label] of tabs) {
+        const key = String(id ?? '')
+        out.push({
+          id: 'page:' + key, kind: 'page', label: String(label ?? ''), desc: '',
+          keywords: TAB_ALIAS[key] || '', breadcrumb: groupOfTab(key) || '',
+          tab: key, action: 'jump',
+        })
+      }
+      const aliases = new Map()
+      for (const d of SUMMARY_DOMAINS) {
+        for (const [word, fid] of d.items || []) aliases.set(fid, (aliases.get(fid) || []).concat(word))
+      }
+      for (const f of features) {
+        const fid = String(f?.id ?? '')
+        const home = String(f?.home ?? '')
+        out.push({
+          id: 'feature:' + fid, kind: 'feature', label: String(f?.label ?? fid),
+          desc: String(f?.desc ?? ''),
+          keywords: [fid, ...(aliases.get(fid) || [])].filter(Boolean).join(' '),
+          breadcrumb: [groupOfTab(home), labelOfTab(home)].filter(Boolean).join(' › '),
+          tab: home || 'overview',
+          action: (f?.kind || 'toggle') === 'toggle' ? 'toggle' : 'jump',
+          state: on[fid] === undefined ? null : !!on[fid],
+          risky: !!f?.risky,
+          requires: f?.requires || [],
+        })
+      }
+      for (const [key, label, desc] of sections) {
+        const k = String(key ?? '')
+        out.push({
+          id: 'section:' + k, kind: 'section', label: String(label ?? k),
+          desc: String(desc ?? ''), keywords: k,
+          breadcrumb: [groupOfTab('config'), labelOfTab('config')].filter(Boolean).join(' › '),
+          tab: 'config', action: 'section', sectionKey: k,
+        })
+      }
+      return out
+    }
+
+    /**
+     * 设置项匹配与排序。别用「描述里包含就算」的松标准——那会让搜「记忆」
+     * 把 43 个配置段全捞出来。分字段给权重：label > 别名/id > 描述 > 面包屑，
+     * 前缀命中再加一档；多个词要求全都出现。同类结果按索引原顺序（导航序）。
+     */
+    function searchScore(q, entry) {
+      const kw = searchNorm(q)
+      if (!kw) return 0
+      const fields = [
+        [entry.label, 100],
+        [entry.keywords, 60],
+        [entry.desc, 30],
+        [entry.breadcrumb, 15],
+      ]
+      let best = 0
+      for (const [field, base] of fields) {
+        const text = searchNorm(field)
+        if (!text) continue
+        const i = text.indexOf(kw)
+        if (i >= 0) best = Math.max(best, base + (i === 0 ? 40 : 0) - Math.min(i, 20))
+      }
+      const words = kw.split(/\s+/).filter(Boolean)
+      if (words.length > 1) {
+        const all = searchNorm([entry.label, entry.keywords, entry.desc, entry.breadcrumb].join(' '))
+        if (words.every((w) => all.includes(w))) best += 50
+      }
+      if (best > 0) best += entry.kind === 'feature' ? 8 : entry.kind === 'section' ? 4 : 0
+      return best
+    }
+
+    function matchSettings(q, entries, limit = 80) {
+      const kw = searchNorm(q)
+      const scored = []
+      for (let i = 0; i < entries.length; i += 1) {
+        const score = kw ? searchScore(kw, entries[i]) : 0
+        if (kw && score <= 0) continue
+        scored.push({ ...entries[i], score, order: i })
+      }
+      scored.sort((a, b) => b.score - a.score || a.order - b.order)
+      return limit > 0 ? scored.slice(0, limit) : scored
+    }
+
+    /** 命中词加粗；只加粗第一段，结果行本来就短，多了反而花 */
+    function highlightText(text, q) {
+      const src = String(text ?? '')
+      const needle = String(q ?? '').trim()
+      if (!needle) return src
+      const i = src.toLocaleLowerCase().indexOf(needle.toLocaleLowerCase())
+      if (i < 0) return src
+      return [
+        src.slice(0, i),
+        h('b', { key: 'hit' }, src.slice(i, i + needle.length)),
+        src.slice(i + needle.length),
+      ]
+    }
+
+    /**
+     * P1 行级索引。公共组件（Sec / GRow）渲染时自报家门，再对「已经访问过的
+     * 页面」做一次 DOM 扫描兜底，收进没走公共组件的行。
+     *
+     * 天花板说清楚：纯前端只能索引渲染过的页面。没访问过的页面仍有 P0 的
+     * 页面 / 功能项 / 配置段三层可搜，不会彻底消失；要做全量预索引就得再维护
+     * 一份和 UI 分离的元数据，那是下一档成本，不在这里偷偷加。
+     */
+    const settingRowIndex = new Map()
+    let indexTab = ''
+    const setIndexTab = (tab) => { indexTab = String(tab || '') }
+    const settingRowId = (tab, label) => `${tab || indexTab}|${searchNorm(label)}`
+    function registerSettingRow({ label, desc = '', tab = indexTab } = {}) {
+      const text = String(label ?? '').trim()
+      if (!text || text.length > 60) return null
+      const id = settingRowId(tab, text)
+      const row = {
+        id: 'row:' + id, anchorId: id, kind: 'row', label: text,
+        desc: String(desc ?? ''), breadcrumb: '', tab: String(tab || ''), action: 'focus',
+      }
+      settingRowIndex.set(id, row)
+      return row
+    }
+    function rowEntries() { return Array.from(settingRowIndex.values()) }
+
+    /** 扫描当前页已渲染的行；只补索引，不碰页面 DOM 本身 */
+    function scanSettingRows(root, tab = indexTab) {
+      if (!root || typeof root.querySelectorAll !== 'function') return 0
+      let n = 0
+      const selectors = ['.roost-sec-t', '.roost-g-label b', 'label > strong', 'label > b', '.roost-item .t']
+      for (const sel of selectors) {
+        for (const el of root.querySelectorAll(sel)) {
+          if (typeof el.closest === 'function' && el.closest('.cap-modal')) continue
+          const label = String(el.textContent || '').trim()
+          if (!label || label.length > 60) continue
+          const small = el.parentElement && typeof el.parentElement.querySelector === 'function'
+            ? el.parentElement.querySelector('small') : null
+          const desc = small ? String(small.textContent || '').trim() : ''
+          if (registerSettingRow({ label, desc, tab })) n += 1
+        }
+      }
+      return n
+    }
+
+    /** 命中行：先按锚点找，找不到退回文字匹配；只高亮 1.6 秒 */
+    function focusSettingRow(pick) {
+      if (typeof document === 'undefined' || !document.querySelector) return false
+      const root = document.querySelector('.roost-scroll-body')
+      if (!root) return false
+      let target = null
+      if (pick.anchorId) {
+        for (const el of root.querySelectorAll('[data-roost-setting]')) {
+          if (el.getAttribute('data-roost-setting') === pick.anchorId) { target = el; break }
+        }
+      }
+      if (!target) {
+        const want = searchNorm(pick.label)
+        for (const el of root.querySelectorAll('.roost-sec-t, .roost-g-label, label > strong, label > b')) {
+          if (searchNorm(el.textContent || '').includes(want)) { target = el; break }
+        }
+      }
+      if (!target || typeof target.scrollIntoView !== 'function') return false
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      target.style.outline = '2px solid var(--accent, #4f7cff)'
+      target.style.outlineOffset = '3px'
+      setTimeout(() => { target.style.outline = ''; target.style.outlineOffset = '' }, 1600)
+      return true
+    }
+
     const NAV_GROUPS = [
       { id: 'home', label: '概览', icon: 'M3 10.5 12 3l9 7.5M5.5 9v11.5h13V9M10 20.5v-6h4v6', tabs: ['overview', 'summary', 'personalize'] },
       { id: 'self', label: '人设', icon: 'M12 12.5a4.25 4.25 0 1 0 0-8.5 4.25 4.25 0 0 0 0 8.5zM4.5 20.5c.9-3.6 3.9-5.5 7.5-5.5s6.6 1.9 7.5 5.5', tabs: ['her', 'talk', 'profile', 'mood', 'awake', 'autotelic', 'memory', 'people'] },
@@ -26333,6 +26550,14 @@ window.__ModuleLoader__.load({
        */
       const [featOn, setFeatOn] = useState(null)
       /**
+       * 功能项定义（`features.get` 的 `features[]`）。以前 `loadFeatOn` 只留下
+       * `on`，把 label / desc / home / kind 全丢了，查找弹窗就只能搜页名。
+       * 这里留整份定义，索引现取现用，后端字段一变前端自动跟着变。
+       */
+      const [featDefs, setFeatDefs] = useState([])
+      /** 配置段定位请求 `{ key, n }`；n 让同一段再点一次也会重新触发 */
+      const [configJump, setConfigJump] = useState(null)
+      /**
        * 个性化偏好：顺序 / 隐藏 / 强调色 / 动效。
        *
        * **必须放在这一层**：强调色与 `no-anim` 都注入 `.roost-root`，
@@ -26378,14 +26603,16 @@ window.__ModuleLoader__.load({
           return 'overview'
         }
       })
+      /** 当前页同步给行级索引：Sec / GRow 渲染时靠它标归属 */
+      setIndexTab(tab)
       /** 接入是整页弹窗：不占页签，也不写「上次停留」 */
       const [pageModal, setPageModal] = useState(null)
       /** 打开试运行的二次确认：用面板同款 Modal，原生 confirm 在 webview 里常受限 */
       const [dryRunConfirm, setDryRunConfirm] = useState(false)
       /** 问题反馈弹窗：页头常驻按钮，任何页面都能打开（面板异常时最需要它） */
       const [supportOpen, setSupportOpen] = useState(false)
-      /** Alt+K 全局查找（5.1） */
-      const [palette, setPalette] = useState({ open: false, q: '', idx: 0 })
+      /** 查找弹窗（5.1）：q 是关键词，filter 是「全部 / 设置项 / 配置段 / 页面」 */
+      const [palette, setPalette] = useState({ open: false, q: '', idx: 0, filter: 'all' })
       const setTab = useCallback((id) => {
         if (id === 'setup') { setPageModal(id); return }
         /** 老频道 key 一律归一到 ch-api：state 与 localStorage 只存正式页签 */
@@ -26416,37 +26643,6 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (tabHint && tabHint.tab !== tab) setTabHint(null)
       }, [tab, tabHint])
-      /**
-       * Alt+K 打开全局查找；Esc 关；↑↓ 选择；回车跳转。
-       * 只在面板里监听（卸载即移除），不污染宿主页面。
-       */
-      useEffect(() => {
-        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
-        const onKey = (e) => {
-          if (e.altKey && (e.key === 'k' || e.key === 'K')) {
-            e.preventDefault()
-            setPalette((p) => ({ open: !p.open, q: '', idx: 0 }))
-            return
-          }
-          if (!palette.open) return
-          if (e.key === 'Escape') { e.preventDefault(); setPalette({ open: false, q: '', idx: 0 }); return }
-          const list = matchTabs(palette.q, paletteTabs(), NAV_GROUPS, extPages)
-          if (e.key === 'ArrowDown') {
-            e.preventDefault()
-            setPalette((p) => ({ ...p, idx: Math.min(p.idx + 1, Math.max(0, list.length - 1)) }))
-          } else if (e.key === 'ArrowUp') {
-            e.preventDefault()
-            setPalette((p) => ({ ...p, idx: Math.max(0, p.idx - 1) }))
-          } else if (e.key === 'Enter') {
-            e.preventDefault()
-            const pick = list[palette.idx]
-            if (pick) { setTab(pick.id); setPalette({ open: false, q: '', idx: 0 }) }
-          }
-        }
-        window.addEventListener('keydown', onKey)
-        return () => window.removeEventListener('keydown', onKey)
-      }, [palette.open, palette.q, palette.idx, setTab])
-
       /**
        * 每组记住最后看的那页：点一级分组回到那页，而不是每次都跳组内第一页。
        *
@@ -26981,6 +27177,8 @@ window.__ModuleLoader__.load({
         if (r.ok === false) return
         if (seq !== featSeq.current) return
         setFeatOn(r.on || null)
+        /** 查找弹窗用的定义：同一次请求顺手留下，不多打接口 */
+        setFeatDefs(Array.isArray(r.features) ? r.features : [])
       }, [quick])
       useEffect(() => { loadFeatOn() }, [loadFeatOn])
 
@@ -27027,6 +27225,130 @@ window.__ModuleLoader__.load({
       }, [quick, toast])
 
       /**
+       * 查找弹窗的候选：Alt+K 的页签清单 + features.get 的功能项 + JSON_SECTIONS。
+       * 每次现算：总共一百多条，缓存/失效逻辑比这点计算贵得多；而且 featOn、
+       * 扩展页随时会变，缓存反而容易给出旧结果。
+       */
+      const paletteEntries = () => {
+        const tabs = paletteTabs()
+        const base = buildSearchEntries({
+          tabs,
+          features: featDefs,
+          sections: JSON_SECTIONS,
+          on: featOn || {},
+          labelOfTab: (id) => {
+            const hit = tabs.find(([x]) => x === id)
+            return hit ? hit[1] : tabLabel(id)
+          },
+          groupOfTab: (id) => (navGroupOf(id, extPages)?.label || ''),
+        })
+        /**
+         * P1：叠行级项。同页同名的行如果已经在 P0 索引里（多半就是那个
+         * 功能开关本身），留 P0 那条——它有开/关状态和快切动作。
+         */
+        const seen = new Set(base.map((x) => searchNorm(x.label) + '@' + x.tab))
+        const rows = rowEntries().filter((x) => !seen.has(searchNorm(x.label) + '@' + x.tab))
+        return base.concat(rows)
+      }
+      const paletteList = () => {
+        const all = matchSettings(palette.q, paletteEntries(), 0)
+        const picked = palette.filter === 'all' ? all
+          : palette.filter === 'item' ? all.filter((x) => x.kind === 'feature' || x.kind === 'row')
+            : all.filter((x) => x.kind === palette.filter)
+        return picked.slice(0, 60)
+      }
+
+      /**
+       * 在弹窗里直接切布尔项。走和页头开关同一个 `features.patch`：
+       * 依赖（requires）、staged、风险提示的判定都在后端，前端不自己猜。
+       * 失败时不写本地状态——否则会出现「弹窗说开着、后端其实关着」。
+       */
+      const toggleFeatureFromSearch = useCallback(async (pick) => {
+        const fid = String(pick?.id || '').slice('feature:'.length)
+        if (!fid || pick?.state === null || pick?.state === undefined) {
+          toast('开关状态还没读到，稍后再试')
+          return
+        }
+        const next = !pick.state
+        /** 试运行开到 true 必须走和页头一样的确认，不许从搜索绕过去 */
+        if (fid === 'dryRun' && next === true) {
+          setPalette({ open: false, q: '', idx: 0, filter: 'all' })
+          setDryRunConfirm(true)
+          return
+        }
+        featSeq.current += 1
+        const r = await quick('features.patch', { id: fid, on: next })
+        if (r.ok === false) { toast(r.message || '改不了，稍后再试'); return }
+        if (r.message) toast(r.message)
+        setFeatOn((prev) => ({ ...(prev || {}), [fid]: next }))
+        setCapFeat((prev) => (prev ? { ...prev, on: { ...(prev.on || {}), [fid]: next } } : prev))
+        setPalette({ open: false, q: '', idx: 0, filter: 'all' })
+      }, [quick, toast])
+
+      /** 命中行的动作：布尔项直接切；配置段带定位请求；行级项跳页后滚过去高亮 */
+      const applySearchPick = useCallback(async (pick) => {
+        if (!pick) return
+        if (pick.action === 'toggle') { await toggleFeatureFromSearch(pick); return }
+        if (pick.action === 'section' && pick.sectionKey) {
+          setConfigJump({ key: pick.sectionKey, n: Date.now() })
+        }
+        goTab(pick.tab || 'overview')
+        setPalette({ open: false, q: '', idx: 0, filter: 'all' })
+        if (pick.action === 'focus' && pick.anchorId) {
+          /** 等目标页渲染完再找锚点；找不到至少已经落到正确的页 */
+          setTimeout(() => {
+            if (!focusSettingRow(pick)) {
+              toast('已跳到「' + (pick.label || '') + '」所在页，没找到具体控件，请手动找一下')
+            }
+          }, 120)
+        }
+      }, [goTab, toggleFeatureFromSearch, toast])
+
+      /**
+       * Alt+K 打开查找；Esc 关；↑↓ 选择；回车执行（跳页或快切）。
+       * 只在面板里监听（卸载即移除），不污染宿主页面。
+       */
+      useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+        const onKey = (e) => {
+          if (e.altKey && (e.key === 'k' || e.key === 'K')) {
+            e.preventDefault()
+            setPalette((p) => ({ open: !p.open, q: '', idx: 0, filter: 'all' }))
+            return
+          }
+          if (!palette.open) return
+          if (e.key === 'Escape') { e.preventDefault(); setPalette({ open: false, q: '', idx: 0, filter: 'all' }); return }
+          const list = paletteList()
+          if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            setPalette((p) => ({ ...p, idx: Math.min(p.idx + 1, Math.max(0, list.length - 1)) }))
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            setPalette((p) => ({ ...p, idx: Math.max(0, p.idx - 1) }))
+          } else if (e.key === 'Enter') {
+            e.preventDefault()
+            const pick = list[palette.idx]
+            if (pick) applySearchPick(pick)
+          }
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [palette.open, palette.q, palette.idx, palette.filter, applySearchPick])
+
+      /**
+       * P1 行级索引兜底：每次切页后扫一遍当前页 DOM，把没走 Sec / GRow 的行也收进来。
+       * 只扫当前页——没访问过的页面仍由 P0 三层覆盖，不会完全搜不到。
+       */
+      useEffect(() => {
+        if (typeof document === 'undefined' || !document.querySelector) return undefined
+        const t = setTimeout(() => {
+          const body = document.querySelector('.roost-scroll-body')
+          scanSettingRows(body, tab)
+        }, 160)
+        return () => clearTimeout(t)
+      }, [tab])
+
+      /**
        * 能力页：一次拉两份——策略本体 + 四个档位的试算。
        *
        * 试算放服务端算（`capabilities.preview`），用的是和真实生效同一个
@@ -27040,7 +27362,10 @@ window.__ModuleLoader__.load({
        * 概览的「设置总览」卡只需要 `on`，没必要为首屏多压 5 个请求。
        */
       const loadFeatOnly = useCallback(async () => {
+        /** 查找弹窗快切会抬高 featSeq；它之后回来的这份快照必须作废 */
+        const seq = featSeq.current
         const f = await quick('features.get')
+        if (seq !== featSeq.current) return
         setCapFeat(f.ok === false ? null : f)
       }, [quick])
 
@@ -27061,7 +27386,12 @@ window.__ModuleLoader__.load({
         ])
         setCapPreview(p.ok === false ? null : p)
         setCapChats(c && c.ok !== false ? c.chats || [] : [])
-        setCapFeat(f.ok === false ? null : f)
+        /**
+         * `capFeat` 也要和 `featOn` 用同一把序号锁。查找弹窗快切已经改过
+         * capFeat 的本地值，这份在途快照若晚回来会把整份定义弹回旧状态，
+         * 出现「页头开着、能力页显示关着」。
+         */
+        if (featSeqAtStart === featSeq.current) setCapFeat(f.ok === false ? null : f)
         /**
          * 顺带刷页头的 `featOn`：`voice`/`stickers` 的开关在权限页改，
          * 走的是这条路径（`reload()` → `loadCaps`），不是页头那两个。
@@ -27271,6 +27601,16 @@ window.__ModuleLoader__.load({
                   onClick: () => openGroup(g),
                 }, navIcon(g.icon), h('span', null, g.label))
               }),
+              /** 查找入口在一级那一行的最右：和分组同级，但不参与分组高亮 */
+              h('button', {
+                key: '__search', type: 'button', className: 'roost-nav-search',
+                title: '查找设置项、配置段或页面（Alt+K）',
+                'aria-label': '查找设置',
+                onClick: () => setPalette((p) => ({ open: !p.open, q: '', idx: 0, filter: 'all' })),
+              },
+                navIcon('M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM15.5 15.5 20 20'),
+                h('span', null, '查找'),
+                h('kbd', null, 'Alt+K')),
             ),
             /** 二级只在该组超过一页时出现：概览单独成组，不该留一条空的二级行。 */
             groupTabs.length > 1
@@ -27512,6 +27852,7 @@ window.__ModuleLoader__.load({
                       config, save: saveAll, saveCfg, toast,
                       stickers: her?.stickers ?? null, setupSt, reload: loadHer,
                       currentChatId: mem?.chatId || '', setTab,
+                      searchJump: configJump,
                     })
                   : h('div', { className: 'roost-empty' }, '读取配置…'),
                 h(Sec, { title: '危险操作' },
@@ -27614,45 +27955,95 @@ window.__ModuleLoader__.load({
           : null,
 
         /**
-         * Alt+K 查找面板。用 .cap-modal 那套遮罩（fixed + 点击关闭），
-         * z-index 压过普通弹窗、低于 toast。
+         * 查找弹窗。沿用 .cap-modal 遮罩（固定层、点外部关闭、锁底层滚动），
+         * z-index 压过普通弹窗、低于 toast。结果按「设置项 / 配置段 / 页面」
+         * 分组，行序仍按匹配得分；↑↓ 用的是展平后的全局下标。
          */
         palette.open
           ? (() => {
-              const list = matchTabs(palette.q, paletteTabs(), NAV_GROUPS, extPages)
+              const list = paletteList()
+              const close = () => setPalette({ open: false, q: '', idx: 0, filter: 'all' })
+              const kinds = [['feature', '功能开关'], ['row', '具体设置'], ['section', '配置段'], ['page', '页面']]
+              const row = (x, i) => h('button', {
+                key: x.id, type: 'button',
+                style: {
+                  display: 'flex', width: '100%', alignItems: 'center', gap: 10,
+                  padding: '8px 10px', marginBottom: 4, borderRadius: 8, cursor: 'pointer',
+                  border: '1px solid ' + (i === palette.idx ? 'var(--accent)' : 'transparent'),
+                  background: i === palette.idx ? 'var(--hover)' : 'transparent',
+                  color: 'inherit', font: 'inherit', textAlign: 'left',
+                },
+                onMouseEnter: () => setPalette((p) => (p.idx === i ? p : { ...p, idx: i })),
+                onClick: () => applySearchPick(x),
+              },
+                h('span', { style: { flex: '1 1 auto', minWidth: 0 } },
+                  h('span', { style: { display: 'block', fontSize: 13 } }, highlightText(x.label, palette.q)),
+                  x.desc
+                    ? h('span', {
+                        className: 'roost-muted',
+                        style: { display: 'block', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                      }, x.desc)
+                    : null,
+                  x.breadcrumb
+                    ? h('span', { className: 'roost-muted', style: { display: 'block', fontSize: 10.5 } }, x.breadcrumb)
+                    : null),
+                x.kind === 'feature' && x.action === 'toggle' && x.state !== null
+                  ? h('span', {
+                      style: {
+                        flex: '0 0 auto', fontSize: 10.5, padding: '2px 7px', borderRadius: 999,
+                        border: '1px solid var(--line-soft)',
+                      },
+                    }, x.state ? '开' : '关')
+                  : null,
+                h('span', { className: 'roost-muted', style: { flex: '0 0 auto', fontSize: 10.5 } },
+                  x.action === 'toggle' ? '回车切换'
+                    : x.action === 'focus' ? '定位控件'
+                      : x.action === 'section' ? '定位配置' : '跳转'))
               return h('div', {
                 className: 'cap-modal', style: { zIndex: 2147483100, alignItems: 'flex-start' },
-                onClick: () => setPalette({ open: false, q: '', idx: 0 }),
+                onClick: close,
               },
                 h('div', {
                   className: 'cap-modal-b',
-                  style: { width: 'min(560px,100%)', marginTop: 90, padding: 14 },
+                  style: { width: 'min(640px,100%)', marginTop: 80 },
                   onClick: (e) => e.stopPropagation(),
                 },
-                  h('input', {
-                    className: 'roost-input', autoFocus: true,
-                    placeholder: '搜页面：页名或别名，比如「日记」「群管」（↑↓ 选择，回车打开）',
-                    value: palette.q,
-                    onChange: (e) => setPalette({ open: true, q: e.target.value, idx: 0 }),
-                  }),
-                  h('div', { style: { marginTop: 10, maxHeight: 320, overflow: 'auto' } },
+                  h('div', { className: 'cap-modal-h' },
+                    h('span', { className: 't' }, '查找设置'),
+                    h('span', { className: 'roost-muted', style: { fontSize: 11 } }, `共 ${list.length} 条`)),
+                  h('div', { className: 'cap-modal-s' },
+                    h('input', {
+                      className: 'roost-input', autoFocus: true,
+                      placeholder: '搜设置项 / 配置段 / 页面，比如「分段」「召回参数」',
+                      value: palette.q,
+                      onChange: (e) => setPalette({ open: true, q: e.target.value, idx: 0, filter: palette.filter }),
+                    }),
+                    h('div', { style: { display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' } },
+                      [['all', '全部'], ['item', '设置项'], ['section', '配置段'], ['page', '页面']].map(([k, label]) =>
+                        h('button', {
+                          key: k, type: 'button', className: 'roost-chip',
+                          'data-on': palette.filter === k ? '1' : '0',
+                          style: { fontSize: 11, opacity: palette.filter === k ? 1 : 0.65 },
+                          onClick: () => setPalette({ open: true, q: palette.q, idx: 0, filter: k }),
+                        }, label)))),
+                  h('div', { className: 'cap-modal-c', style: { maxHeight: 380 } },
                     list.length === 0
-                      ? h('div', { className: 'roost-muted', style: { fontSize: 12, padding: '8px 4px' } }, '没找到这个页面')
-                      : list.map((x, i) => h('div', {
-                          key: x.id,
-                          role: 'button',
-                          onClick: () => { setTab(x.id); setPalette({ open: false, q: '', idx: 0 }) },
-                          style: {
-                            display: 'flex', alignItems: 'center', gap: 8, padding: '7px 9px',
-                            borderRadius: 8, cursor: 'pointer', fontSize: 12.5,
-                            background: i === palette.idx ? 'var(--hover)' : 'transparent',
-                          },
-                        },
-                          h('b', { style: { flex: '1 1 auto' } }, x.label),
-                          h('span', { className: 'roost-muted', style: { fontSize: 11 } }, x.group || '隐藏页'))),
-                  ),
-                  h('div', { className: 'roost-muted', style: { fontSize: 11, marginTop: 8 } },
-                    'Alt+K 开关；Esc 关闭。'),
+                      ? h('div', { className: 'roost-muted', style: { fontSize: 12, padding: '8px 4px' } },
+                          palette.q ? '没找到匹配的设置项' : '输入关键词开始查找')
+                      : kinds.map(([kind, title]) => {
+                          const rows = list
+                            .map((x, i) => ({ x, i }))
+                            .filter(({ x }) => x.kind === kind)
+                          if (!rows.length) return null
+                          return h('div', { key: kind },
+                            h('div', {
+                              className: 'roost-muted',
+                              style: { fontSize: 11, margin: '6px 2px 4px' },
+                            }, title),
+                            rows.map(({ x, i }) => row(x, i)))
+                        })),
+                  h('div', { className: 'roost-muted', style: { fontSize: 11, padding: '8px 16px' } },
+                    '↑↓ 选择 · Enter 执行 · Esc 关闭；布尔开关直接切换，行级项跳过去高亮。'),
                 ))
             })()
           : null,
@@ -27762,8 +28153,15 @@ window.__ModuleLoader__.load({
      * 数据构建、筛选、2D/3D 投影、缩放档位、标签避让都能单独断言，
      * 不用起浏览器；3D 透视的正确性尤其是"看代码看不出来"的那一类。
      */
-    /** 5.1：Alt+K 查找的匹配函数，导出给测试（搜别名能不能命中） */
+    /** 5.1：查找弹窗的纯函数，导出给测试（索引覆盖 / 排序 / 别名命中） */
     exports.matchTabs = matchTabs
+    exports.buildSearchEntries = buildSearchEntries
+    exports.matchSettings = matchSettings
+    exports.searchScore = searchScore
+    /** P1 行级索引的纯函数，导出给测试 */
+    exports.registerSettingRow = registerSettingRow
+    exports.rowEntries = rowEntries
+    exports.settingRowId = settingRowId
     /* 个性化：纯函数导出给单测（渲染测试的假 React 不跑 effect，读不到真实 featOn） */
     exports.hiddenTabIds = hiddenTabIds
     exports.orderTabs = orderTabs
