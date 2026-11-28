@@ -6238,7 +6238,12 @@ export function apply(ctx) {
     let host = null;
     if (frameworkTakesCommands() && cfg.commands?.enabled !== false) {
       const disabled = new Set(Array.isArray(cfg.commands?.disabled) ? cfg.commands.disabled : []);
-      host = { name: 'DSH', commands: chatCommands.specs({ allow: (n) => !disabled.has(n) }) };
+      /**
+       * `name` 是**协议里的自报名**：框架拿它当菜单栏标题，也当重名改名的前缀
+       * （`/model` 撞了就改成 `/dsh-model`）。所以这里写短名 `dsh`，不写包名
+       * `dsh-roost`——后者拼成 `/dsh-roost-model` 太长，16 字上限会截断。
+       */
+      host = { name: 'dsh', commands: chatCommands.specs({ allow: (n) => !disabled.has(n) }) };
     }
     const sig = JSON.stringify({ extensions, host });
     if (sig === lastCatalogSig && Date.now() - lastCatalogAt < CATALOG_REPORT_TTL_MS) return;
@@ -6249,7 +6254,17 @@ export function apply(ctx) {
         log.warn(`上报扩展能力清单被框架拒了：${r?.message ?? ''}`);
         return;
       }
-      /** 重名之类的冲突框架不报错、只回 rejected，这里记一句便于排查「命令没出来」 */
+      /**
+       * 重名不再直接拒：框架会改注册成 `<自报名>-<命令名>`。这里记一句，
+       * 否则用户发 `/model` 落到别的插件上、发 `/dsh-model` 又有用，完全对不上。
+       */
+      if (Array.isArray(r?.renamed) && r.renamed.length) {
+        log.info(
+          `有 ${r.renamed.length} 条命令与已有命令重名，框架改成了：` +
+            r.renamed.map((x) => `${x.from} → ${x.to}`).join('；'),
+        );
+      }
+      /** 改了还撞、或超出上限的，框架只回 rejected，这里记一句便于排查「命令没出来」 */
       if (Array.isArray(r?.rejected) && r.rejected.length) {
         log.warn(
           `有 ${r.rejected.length} 条命令没装上：` +

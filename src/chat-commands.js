@@ -62,7 +62,7 @@ export const HOST_COMMANDS = Object.freeze([
   { name: 'reset', aliases: ['重开'], desc: '重置这个会话的上下文（记忆不动）', usage: '/reset', ownerOnly: true },
   { name: 'on', aliases: ['开机'], desc: '打开机器人总开关', usage: '/on', ownerOnly: true },
   { name: 'off', aliases: ['关机'], desc: '关闭机器人总开关', usage: '/off', ownerOnly: true },
-  { name: 'dstatus', aliases: ['状态'], desc: '看看 DSH 这边的状态', usage: '/dstatus' },
+  { name: 'dstatus', aliases: ['状态'], desc: '看看 dsh-roost 这边的状态', usage: '/dstatus' },
   { name: 'mood', aliases: ['心情'], desc: '看看 ta 现在的心情', usage: '/mood' },
   { name: 'diary', aliases: ['日记'], desc: '往这个会话的日记里记一条', usage: '/diary <内容>', ownerOnly: true },
   {
@@ -161,7 +161,7 @@ export function createChatCommands({ prefix = () => '/', api, log = () => {} } =
 
     if (arg.toLowerCase() === 'list') {
       const list = await api.modelList();
-      if (!list?.length) return '这会儿列不出模型清单（DSH 那边可能没有可用模型）。';
+      if (!list?.length) return '这会儿列不出模型清单（dsh-roost 那边可能没有可用模型）。';
       const lines = list.slice(0, 20).map((it, i) => `${i + 1}. ${modelLabel(it) || it?.id || '?'}`);
       return clip(
         [`可用模型：`, ...lines, `发 ${P()}model <序号> 或 ${P()}model provider/model 切换`].join('\n'),
