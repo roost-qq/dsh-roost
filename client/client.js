@@ -9566,6 +9566,16 @@ window.__ModuleLoader__.load({
       const [reminders, setReminders] = useState([])
       const [remindAt, setRemindAt] = useState('')
       const [remindNote, setRemindNote] = useState('')
+      const [remindRepeat, setRemindRepeat] = useState('none')
+      const [remindWeekdays, setRemindWeekdays] = useState('')
+      const [remindInterval, setRemindInterval] = useState('60')
+      const [remindUntil, setRemindUntil] = useState('')
+      const reminderUntilText = (ts) => {
+        const d = new Date(Number(ts))
+        if (!Number(ts) || Number.isNaN(d.getTime())) return ''
+        const p = (n) => String(n).padStart(2, '0')
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+      }
       /** A3-A6：任务详情弹窗 / 某天复盘 / 提案列表 / 接管状态 */
       const [taskDetail, setTaskDetail] = useState(null)
       const [dayDetail, setDayDetail] = useState(null)
@@ -9638,9 +9648,16 @@ window.__ModuleLoader__.load({
         const at = String(remindAt || '').trim()
         const note = String(remindNote || '').trim()
         if (!at || !note) return toast('填好时间和提醒内容')
-        const r = await post('/autotelic/reminders', { at, note })
+        const repeat = String(remindRepeat || 'none')
+        const weekdays = repeat === 'daily' ? String(remindWeekdays || '').trim() : ''
+        const intervalMin = repeat === 'interval' ? Number(remindInterval) : undefined
+        if (repeat === 'interval' && (!Number.isFinite(intervalMin) || intervalMin < 1 || intervalMin > 10080)) {
+          return toast('间隔填 1–10080 之间的分钟数')
+        }
+        const until = repeat !== 'none' ? String(remindUntil || '').trim() : ''
+        const r = await post('/autotelic/reminders', { at, note, repeat, weekdays, intervalMin, until })
         toast(r?.ok === false ? (r.message || '没记上') : (r.message || '记下了'))
-        if (r?.ok !== false) { setRemindAt(''); setRemindNote(''); load() }
+        if (r?.ok !== false) { setRemindAt(''); setRemindNote(''); setRemindUntil(''); load() }
       }
       const closeReminder = async (id) => {
         const r = await post('/autotelic/reminders', { action: 'close', id })
@@ -10090,7 +10107,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'roost-muted', style: { fontSize: 11, marginBottom: 8, lineHeight: 1.6 } },
             '这里是**操作**：替她记一条、看哪些还没触发、关掉某条。'
             + '开关（允许她自己设 / 问了没回会轻追 / 失败重试）和上限在「主动搭话 → 05 她的小闹钟与追问」页。'
-            + '到点会先叫醒她，她决定说就发到设闹钟的那个私聊，回 <<skip>> 就不发。'),
+            + '默认一次性；选重复方式后到点会续下一次。她决定说才发，回 <<skip>> 就不发。'),
           h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 } },
             h('input', {
               type: 'text', className: 'roost-input', value: remindAt,
@@ -10103,10 +10120,45 @@ window.__ModuleLoader__.load({
               placeholder: '提醒她做什么', style: { flex: 1, minWidth: 130, fontSize: 11 },
             }),
             h('button', { type: 'button', className: 'roost-btn', onClick: addReminder }, '设一条')),
+          h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6, fontSize: 11 } },
+            h('span', { className: 'roost-muted' }, '重复：'),
+            h(Dropdown, {
+              className: 'roost-input', style: { width: 'auto', padding: '3px 8px', fontSize: 11 },
+              value: remindRepeat, onChange: (e) => setRemindRepeat(e.target.value),
+            },
+              h('option', { value: 'none' }, '不重复（一次性）'),
+              h('option', { value: 'daily' }, '每天 / 指定星期'),
+              h('option', { value: 'weekdays' }, '工作日（周一至五）'),
+              h('option', { value: 'interval' }, '每隔 N 分钟'),
+            ),
+            remindRepeat === 'daily'
+              ? h('input', {
+                type: 'text', className: 'roost-input', value: remindWeekdays,
+                onChange: (e) => setRemindWeekdays(e.target.value),
+                placeholder: '星期 0-6 逗号分隔，如 1,3,5；空=每天', style: { width: 210, fontSize: 11 },
+              })
+              : null,
+            remindRepeat === 'interval'
+              ? h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+                h('span', { className: 'roost-muted' }, '每'),
+                h('input', {
+                  type: 'number', className: 'roost-input', value: remindInterval, min: 1, max: 10080,
+                  onChange: (e) => setRemindInterval(e.target.value), style: { width: 70, fontSize: 11 },
+                }),
+                h('span', { className: 'roost-muted' }, '分钟'))
+              : null,
+            remindRepeat !== 'none'
+              ? h('input', {
+                type: 'text', className: 'roost-input', value: remindUntil,
+                onChange: (e) => setRemindUntil(e.target.value),
+                placeholder: '截止（可选）2026-12-31 09:00', style: { width: 190, fontSize: 11 },
+              })
+              : null,
+          ),
           reminders.length
             ? h('div', { className: 'roost-list' },
               reminders.map((r) => h('div', { key: r.id, className: 'roost-item' },
-                h('span', { className: 't' }, `${r.atText} · ${r.note}`),
+                h('span', { className: 't' }, `${r.atText} · ${r.note}${r.repeat && r.repeat !== 'none' ? ` · ⟳ ${r.repeat === 'daily' ? (r.weekdays?.length ? `周${r.weekdays.join('/')}` : '每天') : r.repeat === 'weekdays' ? '工作日' : `每${r.intervalMin}分`}${r.until ? ` 至 ${reminderUntilText(r.until)}` : ''}` : ''}`),
                 h('button', { type: 'button', className: 'roost-btn', style: { marginLeft: 6 }, onClick: () => closeReminder(r.id) }, '关闭'))))
             : h('div', { className: 'roost-muted', style: { fontSize: 11 } }, '还没有待触发的小闹钟。')),
 
@@ -10716,10 +10768,11 @@ window.__ModuleLoader__.load({
          * 只列真读的键，idleMinutes/maxPerDay/awakeFrom/allow 在我方是死键，不补假控件。
          */
         h(Sec, { n: '05', title: '她的小闹钟与追问',
-          right: h('span', { className: 'roost-muted', style: { fontSize: 11 } }, '默认关 · 即点即存') },
+          right: h('span', { className: 'roost-muted', style: { fontSize: 11 } }, '默认开 · 即点即存') },
           h('div', { className: 'roost-note', style: { marginBottom: 10 } },
-            '她可以在私聊里自己设一次性提醒（「记得 X 点提醒我…」或「一分钟后…」），到点系统叫醒她，'
-            + '她决定说就发到设闹钟的那个私聊（回 <<skip>> 就不发）；'
+            '她可以在私聊里自己设提醒（「记得 X 点提醒我…」或「一分钟后…」），到点系统叫醒她，'
+            + '她决定说就发到设闹钟的那个私聊（回 <<skip>> 就不发）。'
+            + '支持一次性，也支持每天 / 每周几 / 工作日 / 每隔 N 分钟重复，可设截止。'
             + '她问了你一句、15–40 分钟没回，偶尔轻追一句，每句最多追一次。'),
           h('div', { style: { display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 10 } },
             h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },

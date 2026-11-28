@@ -76,6 +76,8 @@ test('配置：DEFAULTS 与 dataDir 都对得上（别把默认值写回旧数�
   freshDir();
   assert.equal(DEFAULTS.compact.atPercentGroup, 85);
   assert.equal(DEFAULTS.compact.atPercentC2C, 75);
+  /** 小闹钟默认开：DEFAULTS 与读盘兜底两处都要锁，别只改一处 */
+  assert.equal(DEFAULTS.speakUp.reminderEnabled, true);
   assert.ok(dataDir());
 });
 
@@ -421,7 +423,7 @@ test('speakUp 小闹钟四键读盘兜底：reminderLimit clamp 1..10，三键 b
   // loadConfig 出口的 normalize：patch/手写文件/API 三条路都覆盖，面板层 normalizeSetting 挡不到的越界值在这里收口
   const src = readFileSync(join(import.meta.dirname, '..', 'src', 'config.js'), 'utf8')
   assert.match(src, /su\.reminderLimit = num\(su\.reminderLimit, 5, 1, 10\)/, 'reminderLimit 必须 clamp 到 1..10')
-  assert.match(src, /su\.reminderEnabled = bool\(su\.reminderEnabled, false\)/, 'reminderEnabled 必须 bool 化')
+  assert.match(src, /su\.reminderEnabled = bool\(su\.reminderEnabled, true\)/, 'reminderEnabled 必须 bool 化（默认开）')
   assert.match(src, /su\.nudge = bool\(su\.nudge, true\)/, 'nudge 必须 bool 化')
   assert.match(src, /su\.reminderRetry = bool\(su\.reminderRetry, true\)/, 'reminderRetry 必须 bool 化')
 })

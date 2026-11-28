@@ -2203,13 +2203,24 @@ export function apply(ctx) {
       if (timer) clearTimeout(timer);
     }
     if (result.ok) {
-      reminderStore.remove(r.id);
-      log.info(`小闹钟触发：${r.atText} ${r.note}${result.skipped ? '（她决定不说）' : '（已投递）'}`);
+      /**
+       * 一次性删掉；周期闹钟续到下一次（含她回 <<skip>> 的那轮——
+       * 到点照常再问，不因一次沉默就停掉整条周期）。
+       */
+      const step = reminderStore.advance(r.id, Date.now());
+      const tail = step.done
+        ? (step.expired ? '（周期到期）' : '（一次性，完成）')
+        : `，下次 ${step.atText}`;
+      log.info(`小闹钟触发：${r.atText} ${r.note}${result.skipped ? '（她决定不说）' : '（已投递）'}${tail}`);
       return { ok: true };
     }
     if (cfg.speakUp?.reminderRetry === false) {
-      reminderStore.remove(r.id);
-      log.warn(`小闹钟放弃：${r.atText} ${result.why}`);
+      /**
+       * 关了重试 ≠ 停掉整条周期：一次性删掉，周期让位到下一次（私聊正忙/网络抖一下
+       * 不该让用户设的「每天」永久失效）。与 fail 耗尽走同一个 defer 口径。
+       */
+      const step = reminderStore.defer(r.id, result.why, Date.now());
+      log.warn(`小闹钟本轮放弃：${r.atText} ${result.why}${step.drop ? '' : `，${step.message}`}`);
       return { ok: false, why: result.why };
     }
     const step = reminderStore.fail(r.id, result.why);
@@ -7831,10 +7842,14 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
             if (!remindersOn()) return { ok: false, message: '小闹钟没开启（去「主动搭话」页打开）' };
             return { ok: true };
           },
-          /** `chatId` = 设闹钟的这个私聊，到点就投给它 */
-          add: (at, note, chatId) => reminderStore.add(at, note, {
+          /** `chatId` = 设闹钟的这个私聊，到点就投给它；opts 带重复节奏（工具/面板透传） */
+          add: (at, note, chatId, opts = {}) => reminderStore.add(at, note, {
             limit: cfg.speakUp?.reminderLimit ?? 5,
             chatId: String(chatId || '').trim(),
+            repeat: opts.repeat,
+            weekdays: opts.weekdays,
+            intervalMin: opts.intervalMin,
+            until: opts.until,
           }),
           close: (id) => reminderStore.close(id),
         },
@@ -17124,6 +17139,10 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
         const r = reminderStore.add(body?.at, body?.note, {
           limit: cfg.speakUp?.reminderLimit ?? 5,
           chatId: String(body?.chatId || ownerId() || '').trim(),
+          repeat: body?.repeat,
+          weekdays: body?.weekdays,
+          intervalMin: body?.intervalMin,
+          until: body?.until,
         });
         return send(res, r.ok ? 200 : 400, r);
       }),
