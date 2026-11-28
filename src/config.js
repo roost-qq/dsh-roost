@@ -1303,10 +1303,11 @@ export const DEFAULTS = {
     followUps: 1,
     prompt: '',
     /**
-     * 小闹钟（A1）：她在主人私聊自己定一次性提醒，到点把她叫醒（不直发）。
+     * 小闹钟（A1）：她在私聊自己定提醒，到点把她叫醒（不直发）。
+     * 2026-11-28 起默认开（主人定）：支持一次性 + 周期（每天/工作日/间隔）。
      * 键名冻结在 speakUp.* —— 借鉴项目多处直读这个命名空间，改键会连坐。
      */
-    reminderEnabled: false,
+    reminderEnabled: true,
     reminderLimit: 5,
     reminderRetry: true,
     /** 追问 nudge（A2）：她问了一句、主人 15–40 分钟没回，偶尔轻追一句；与我方 followUps 刹车语义不同 */
@@ -1961,7 +1962,7 @@ export function loadConfig() {
       const n = Number(v);
       return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : d;
     };
-    su.reminderEnabled = bool(su.reminderEnabled, false);
+    su.reminderEnabled = bool(su.reminderEnabled, true);
     su.reminderRetry = bool(su.reminderRetry, true);
     su.nudge = bool(su.nudge, true);
     su.reminderLimit = num(su.reminderLimit, 5, 1, 10);

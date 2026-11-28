@@ -681,23 +681,36 @@ export function buildQqToolDefs({ callerOf, sendOf, closeOf, fileOf, cfgOf, stat
    */
   const setReminder = {
     name: 'qq_set_reminder',
-    description: '给未来的自己定一个小闹钟。到点你会在「当前这个私聊」里主动开口——不是替别人发消息给第三方，对方就是现在跟你说话的人。at 可以写绝对时间 yyyy-mm-dd HH:MM（本地时间），也可以写「一分钟后 / 半小时后 / 2小时」这类相对时间（别再自己心算）。note 是到时要说的由头。面板里的小闹钟开关关着时不能用。',
+    description: '给未来的自己定一个小闹钟。到点你会在「当前这个私聊」里主动开口——不是替别人发消息给第三方，对方就是现在跟你说话的人。at 可以写绝对时间 yyyy-mm-dd HH:MM（本地时间），也可以写「一分钟后 / 半小时后 / 2小时」这类相对时间（别再自己心算）。note 是到时要说的由头。不填 repeat 就是一次性；想 recurring 就填 repeat。面板里的小闹钟开关关着时不能用。',
     parameters: {
-      at: { type: 'string', required: true, description: '绝对时间 yyyy-mm-dd HH:MM（如 2026-11-26 17:30），或相对时间（如「一分钟后」「半小时后」「2小时」）' },
+      at: { type: 'string', required: true, description: '第一次触发的绝对时间 yyyy-mm-dd HH:MM（如 2026-11-26 17:30），或相对时间（如「一分钟后」「半小时后」「2小时」）。周期闹钟也是从这个时刻起算' },
       note: { type: 'string', required: true, description: '到时要提醒自己的事' },
+      repeat: {
+        type: 'string',
+        description: '重复方式，不填=一次性：daily=每天同一时刻（配 weekdays 指定星期，如 "1,3,5" 表示周一三五；0=周日，不填=每天）；weekdays=每个工作日；interval=每隔 N 分钟（配 intervalMin）',
+      },
+      weekdays: { type: 'string', description: 'repeat=daily 时指定星期，逗号分隔 0-6（0=周日），如 "1,3,5"；不填=每天' },
+      intervalMin: { type: 'number', description: 'repeat=interval 时的间隔分钟数，默认 60，范围 1-10080' },
+      until: { type: 'string', description: '可选的截止时间 yyyy-mm-dd HH:MM，到点后不再重复；不填=一直重复' },
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value ?? null) }],
     },
-    async execute({ at, note } = {}) {
+    async execute({ at, note, repeat, weekdays, intervalMin, until } = {}) {
       if (!reminderOf) return { ok: false, message: '小闹钟没接线' };
       const c = caller();
       const gate = reminderOf.gate?.(c) || { ok: false, message: '小闹钟只能在私聊里用' };
       if (!gate.ok) return { ok: false, message: gate.message || gate.why };
       /** 目标 = 当前私聊的对方：私聊里 chatId 就是对方 openid */
       const chatId = String(c?.chatId || c?.openid || '').trim();
-      return reminderOf.add(String(at || ''), String(note || ''), chatId);
+      return reminderOf.add(String(at || ''), String(note || ''), chatId, {
+        repeat: String(repeat || 'none'),
+        weekdays: String(weekdays || ''),
+        intervalMin,
+        /** until 保留原类型：store 既认字符串日期也认数字时间戳，强转 String 会把数字弄坏 */
+        until: (until === undefined || until === null) ? '' : until,
+      });
     },
   };
   const closeReminder = {
