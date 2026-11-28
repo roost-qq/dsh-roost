@@ -124,6 +124,17 @@ export function createRoostHost({
   waitPollMs = 15_000,
 } = {}) {
   let seq = 0;
+  /**
+   * 真正派发过的 seq（最近若干条）。和 `seq` 分开：
+   * `seq` 给重连的 since 用，会被 welcome 的当前 seq 抬高；
+   * 若拿它做去重，断线补拉回来的旧帧会全被当成重复吞掉。
+   *
+   * 这里只记**已经交给回调**的帧，用于跨连接兜底：同一个 DSH 进程
+   * 可能同时挂着 WS 和 SSE 两条订阅，框架每帧广播给两个 sink，
+   * 下游会收到两份（2026-11-28 真机 connections=2）。
+   */
+  const recentSeq = new Set();
+  const RECENT_SEQ_CAP = 128;
   let state = 'idle';
   /**
    * 实际在用哪条事件通道。
@@ -148,6 +159,15 @@ export function createRoostHost({
   let lastError = '';
   let ctrl = null;
   let running = false;
+  /**
+   * 代次令牌：stop / start 各 +1，pump 捕获自己那一代的 gen。
+   *
+   * 竞态背景（2026-11-28）：面板重连是同步 `stop(); start()`，running 被
+   * stop 置 false 后立刻又被 start 置回 true；而 pump 的重连退避 sleep 不可
+   * 中断，睡着的旧 pump 醒来看到 running 又是 true，就和新 pump 一起各连一条
+   * → connections 虚高、同一帧投两份。布尔 running 区分不了新旧，用代次区分。
+   */
+  let generation = 0;
   let attempt = 0;
   let rpcSeq = 0;
   let welcome = null;
@@ -267,6 +287,16 @@ export function createRoostHost({
     dispatch(frame);
   }
 
+  function isSeenSeq(n) {
+    return Number.isFinite(n) && n > 0 && recentSeq.has(n);
+  }
+
+  function markSeenSeq(n) {
+    if (!Number.isFinite(n) || n <= 0) return;
+    recentSeq.add(n);
+    if (recentSeq.size > RECENT_SEQ_CAP) recentSeq.delete(recentSeq.values().next().value);
+  }
+
   function dispatch(frame) {
     if (!frame || typeof frame !== 'object') return;
     frames += 1;
@@ -281,7 +311,16 @@ export function createRoostHost({
       return;
     }
     if (frame.type === 'heartbeat') return;
+    /**
+     * 跨连接去重兜底。只跳过**已经派发过**的同一个 seq，不用 `seq <= seq`
+     * 那种水位线——welcome 会把 `seq` 抬到对端当前值，断线补拉回来的
+     * 旧帧（seq 小于 welcome）照样要交出去，否则一重连就丢一片消息。
+     * 用有界集合而不是「小于最大值」也保住了乱序：后到的旧帧只要没派过，
+     * 仍会被处理。
+     */
     if (frame.type === 'gap') {
+      if (isSeenSeq(frame.seq)) return;
+      markSeenSeq(frame.seq);
       try {
         onGap(frame);
       } catch (e) {
@@ -290,6 +329,8 @@ export function createRoostHost({
       return;
     }
     if (frame.type !== 'event') return;
+    if (isSeenSeq(frame.seq)) return;
+    markSeenSeq(frame.seq);
 
     try {
       if (frame.event === 'message') onMessage(frame.data, frame);
@@ -329,13 +370,26 @@ export function createRoostHost({
     const url = `${b.replace(/^http/i, 'ws')}/ws?since=${seq}`;
     return await new Promise((resolve, reject) => {
       let settled = false;
+      let ws;
+      let closedByUs = false;
+      /**
+       * 无论 resolve（对端关）还是 reject（握手/读帧出错）都要把 socket 关掉。
+       *
+       * 2026-11-28 真机：WS 连上并发过 hello 后被框架注册成订阅者，随后出错
+       * 降级到 SSE；旧实现这里只写 `wsClient = null`，没 `ws.close()`，框架那边的
+       * sink 还挂着，同一帧广播两次 → 截图里「同一条消息重复投递，已忽略」。
+       * `stop()` 里有关闭，但那条路已经拿不到这个 ws 了。
+       */
       const done = (fn, arg) => {
         if (settled) return;
         settled = true;
+        if (ws && !closedByUs) {
+          closedByUs = true;
+          try { ws.close?.(); } catch { /* 已经断了 */ }
+        }
         wsClient = null;
         fn(arg);
       };
-      let ws;
       try {
         ws = new WebSocket(url, { headers: { ...authHeaders() } });
       } catch (e) {
@@ -410,12 +464,16 @@ export function createRoostHost({
     }
   }
 
-  async function pump() {
-    while (running) {
+  /** 旧代次的 pump 必须自行退出；每个不可中断的 await 之后都要复核 */
+  const stale = (gen) => gen !== generation;
+
+  async function pump(gen) {
+    while (running && !stale(gen)) {
       const b = base();
       if (!b) {
         setState('error', '还没配置 roost 外接地址');
         await sleep(BACKOFF_MS.at(-1));
+        if (stale(gen)) break;
         continue;
       }
 
@@ -437,6 +495,7 @@ export function createRoostHost({
         if (!ok) {
           setState('waiting', 'Roost 没在运行，等它启动后自动连');
           await sleep(waitPollMs);
+          if (stale(gen)) break;
           continue;
         }
       }
@@ -451,14 +510,15 @@ export function createRoostHost({
       const wantWs = transport === 'ws' || (transport === 'auto' && !wsCooling);
       if (wantWs) {
         const mod = await ensureWs();
+        if (stale(gen)) break;
         if (mod?.WebSocket) {
           try {
             if (attempt === 0) setState(seq ? 'online' : 'connecting');
             await pumpWs(mod.WebSocket);
-            if (!running) break;
+            if (!running || stale(gen)) break;
             setState('reconnecting', 'WS 被服务端关闭');
           } catch (e) {
-            if (!running) break;
+            if (!running || stale(gen)) break;
             if (e?.code === 'UNAUTHORIZED') {
               setState('error', 'token 不对（外接页里复制的那串），已停止重连');
               running = false;
@@ -516,10 +576,10 @@ export function createRoostHost({
         /** SSE 也会收到 welcome；这里是兜底，极端情况下 welcome 帧丢了仍能上报一次 */
         notifyReady(welcome);
         await readStream(res.body);
-        if (!running) break;
+        if (!running || stale(gen)) break;
         setState('reconnecting', '事件流被服务端关闭');
       } catch (e) {
-        if (!running) break;
+        if (!running || stale(gen)) break;
         /**
          * 鉴权失败不重试：token 错了重连一万次也还是错，只会把日志刷满。
          * 明确停下来，让面板上「连接状态」显示真实原因。
@@ -552,10 +612,13 @@ export function createRoostHost({
       if (running) return;
       running = true;
       attempt = 0;
-      pump().catch((e) => setState('error', e?.message ?? String(e)));
+      /** 传当前代次：stop 递增后，旧 pump 醒来发现 gen 不符就退出 */
+      pump(generation).catch((e) => setState('error', e?.message ?? String(e)));
     },
     stop() {
       running = false;
+      /** 递增代次，作废所有还在 await/sleep 里的旧 pump */
+      generation += 1;
       try {
         ctrl?.abort();
       } catch {
@@ -578,6 +641,8 @@ export function createRoostHost({
     /** 手动改起点。面板「重连」和测试用；正常重连靠内部的 seq */
     resetSeq(n) {
       seq = Math.max(0, Number(n) || 0);
+      /** 手动从头拉要让旧帧重新派发，去重集合必须跟着清 */
+      recentSeq.clear();
     },
     status() {
       return {

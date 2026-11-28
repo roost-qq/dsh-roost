@@ -320,6 +320,66 @@ test('事件处理抛错不能把流带崩（后面还有消息要收）', async
   h.stop();
 });
 
+/* ---------------- 跨连接重复投递：同一帧只派一次 ---------------- */
+
+test('事件：同一 seq 从两条连接各投一份，下游只收到一次', async (t) => {
+  const base = await withFake(t, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const frame = (seq, content) => `id: ${seq}\nevent: message\ndata: ${JSON.stringify({ type: 'event', seq, event: 'message', data: { content } })}\n\n`;
+    res.write(`data: ${JSON.stringify({ type: 'welcome', seq: 1 })}\n\n`);
+    res.write(frame(2, '第一份'));
+    res.write(frame(2, '第二份'));   // 另一条 sink 投来的同一帧
+    res.write(frame(4, '新消息'));
+    res.write(frame(3, '乱序旧帧')); // 没派过就不能吞
+  });
+  const seen = [];
+  const h = createRoostHost({ baseUrl: base, onMessage: (d) => seen.push(d.content), log: () => {} });
+  t.after(() => h.stop());
+  h.start();
+  await waitFor(() => seen.length === 3);
+  assert.deepEqual(seen, ['第一份', '新消息', '乱序旧帧']);
+});
+
+test('事件：welcome 抬高 seq 后，补拉回来的旧帧仍要派发', async (t) => {
+  /**
+   * 不能用 `seq <= 水位线` 做去重：重连时 welcome 带的是对端当前 seq，
+   * 随后补拉回来的帧 seq 比它小，拿水位线一刀切会把整段补拉吞掉。
+   */
+  const base = await withFake(t, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(`data: ${JSON.stringify({ type: 'welcome', seq: 5 })}\n\n`);
+    for (const [seq, content] of [[3, '补拉3'], [4, '补拉4'], [5, '补拉5']]) {
+      res.write(`id: ${seq}\nevent: message\ndata: ${JSON.stringify({ type: 'event', seq, event: 'message', data: { content } })}\n\n`);
+    }
+  });
+  const seen = [];
+  const h = createRoostHost({ baseUrl: base, onMessage: (d) => seen.push(d.content), log: () => {} });
+  t.after(() => h.stop());
+  h.start();
+  await waitFor(() => seen.length === 3);
+  assert.deepEqual(seen, ['补拉3', '补拉4', '补拉5']);
+});
+
+test('事件：resetSeq 要清掉去重集合，手动重连能重新收到旧帧', async (t) => {
+  let sendAgain = null;
+  const base = await withFake(t, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const frame = (content) => `id: 2\nevent: message\ndata: ${JSON.stringify({ type: 'event', seq: 2, event: 'message', data: { content } })}\n\n`;
+    res.write(`data: ${JSON.stringify({ type: 'welcome', seq: 1 })}\n\n`);
+    res.write(frame('第一次'));
+    sendAgain = () => res.write(frame('重放的同一 seq'));
+  });
+  const seen = [];
+  const h = createRoostHost({ baseUrl: base, onMessage: (d) => seen.push(d.content), log: () => {} });
+  t.after(() => h.stop());
+  h.start();
+  await waitFor(() => seen.length === 1 && typeof sendAgain === 'function');
+  h.resetSeq(0);
+  sendAgain();
+  await waitFor(() => seen.length === 2);
+  assert.deepEqual(seen, ['第一次', '重放的同一 seq']);
+});
+
 /* ------------------------------------------------------------------ */
 /* 通道                                                                */
 /* ------------------------------------------------------------------ */
@@ -818,6 +878,8 @@ function fakeWsClass({ failOnOpen = null, frames = [] } = {}) {
       this.handlers = {};
       /** 客户端主动发出的帧（hello / ping…），用来验握手有没有补齐 */
       this.sent = [];
+      /** 被客户端主动关过几次（降级时必须关掉旧 socket） */
+      this.closes = 0;
       made.push(this);
       setTimeout(() => {
         if (failOnOpen) {
@@ -833,7 +895,7 @@ function fakeWsClass({ failOnOpen = null, frames = [] } = {}) {
 
     send(data) { this.sent.push(String(data)); }
 
-    close() { this.handlers.close?.(); }
+    close() { this.closes += 1; this.handlers.close?.(); }
   }
   FakeWS.made = made;
   return FakeWS;
@@ -1005,6 +1067,96 @@ test('事件通道：降级 SSE 是暂时的——WS 恢复后会切回去', asy
   /** 冷却到点会主动断开 SSE 重连，第二次 WS 就能连上 */
   await waitFor(() => host.status().transport === 'ws', 8000);
   assert.equal(host.status().transport, 'ws', 'WS 恢复后必须切回去，不能永久停在 SSE');
+});
+
+test('事件通道：WS 已注册订阅后出错降级，必须关掉旧 socket（否则框架仍投两份）', async (t) => {
+  /**
+   * 真机形状：WS 连上、发过 hello（框架已 attach），随后 error → 降级 SSE。
+   * 旧实现只在 done() 里写 `wsClient = null`，socket 没关，框架那边的 sink 还活着，
+   * 每条消息两个 sink 各收一份 → dsh-roost 面板刷「同一条消息重复投递，已忽略」。
+   */
+  const WS = fakeWsClass({ frames: [{ type: 'welcome', seq: 3 }] });
+  let failWs = true;
+  class FlakyWS extends WS {
+    constructor(url, opts) {
+      super(url, opts);
+      if (failWs) {
+        failWs = false;
+        setTimeout(() => this.handlers.error?.(new Error('连上后出错')), 0);
+      }
+    }
+  }
+  let sseHits = 0;
+  const base = await withFake(t, (req, res) => {
+    if (req.url.startsWith('/events')) {
+      sseHits += 1;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"type":"welcome","seq":3}\n\n');
+      return;
+    }
+    json(res, { ok: true });
+  });
+  const host = createRoostHost({
+    baseUrl: () => base,
+    token: () => 'tk',
+    transport: 'auto',
+    loadWs: async () => ({ WebSocket: FlakyWS }),
+    onState: () => {},
+    log: () => {},
+  });
+  t.after(() => host.stop());
+  host.start();
+  /** status().transport 初始就是 sse（auto 的兜底显示），必须等真打了 /events */
+  await waitFor(() => sseHits >= 1 && WS.made.length >= 1);
+  assert.ok(WS.made[0].closes >= 1, '降级前必须 close 旧 WS，不能只把引用置空');
+});
+
+test('事件通道：退避中 stop→start，旧 pump 不许复活再连一条（否则 connections 虚高）', async (t) => {
+  /**
+   * 竞态（2026-11-28）：面板重连是同步 `stop(); start()`，running 被置 false
+   * 后立刻又被置 true；而重连退避 sleep 不可中断，睡着的旧 pump 醒来看到
+   * running 又是 true，就和新 pump 各连一条。用代次令牌让旧 pump 醒来自行退出。
+   */
+  let sseHits = 0;
+  let firstClosed = false;
+  let closeFirst = null;
+  const base = await withFake(t, (req, res) => {
+    if (req.url.startsWith('/events')) {
+      sseHits += 1;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"type":"welcome","seq":1}\n\n');
+      /** 第一次连上后立刻断，逼 pump 进入 500ms 退避 */
+      if (!firstClosed) {
+        firstClosed = true;
+        closeFirst = () => res.end();
+      }
+      return;
+    }
+    json(res, { ok: true });
+  });
+  const host = createRoostHost({
+    baseUrl: () => base,
+    token: () => 'tk',
+    transport: 'sse',
+    loadWs: async () => null,
+    onState: () => {},
+    log: () => {},
+  });
+  t.after(() => host.stop());
+  host.start();
+  await waitFor(() => firstClosed && sseHits === 1);
+  closeFirst();
+  /** 等 pump 进入 reconnecting（此刻正卡在退避 sleep 里） */
+  await waitFor(() => host.status().seq >= 1);
+  await new Promise((r) => setTimeout(r, 30));
+
+  /** 面板重连：stop 紧跟 start，恰好落在退避窗口内 */
+  host.stop();
+  host.start();
+  await waitFor(() => sseHits >= 2);
+  /** 再等过第一个退避档（500ms）——旧 pump 若复活会在这段时间多连一条 */
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(sseHits, 2, '退避中重连只应有新 pump 的一条连接，旧 pump 必须自行退出');
 });
 
 test('事件通道：强制 ws 但没装依赖 → 明确报错并停止，不静默降级', async (t) => {
