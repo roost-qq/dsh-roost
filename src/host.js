@@ -286,7 +286,8 @@ export const SELF_CONFIG_METHODS = new Map([
 ]);
 import { createMerger } from './roost-merge.js';
 import { createInboundDedupe } from './inbound-dedupe.js';
-import { createDecider, guestQuietSkip, resolveGroupPolicy } from './roost-decide.js';
+import { createDecider, guestQuietSkip, resolveGroupPolicy, responseModeOf } from './roost-decide.js';
+import { createChatCommands } from './chat-commands.js';
 import { createPairing } from './roost-pair.js';
 import { createSetupWizard } from './setup-wizard.js';
 import { createWsDeps } from './ws-deps.js';
@@ -4944,6 +4945,13 @@ export function apply(ctx) {
         void handleExtCallRequest(data).catch((e) => log.warn(`扩展反向调用失败：${e?.message ?? e}`));
       }
       /**
+       * 命令请求（框架 1.2.0）。同样是「只入队」：处理里要读配置、可能还要
+       * 跑扩展动作，直接在 SSE 回调里 await 会堵住补拉。
+       */
+      if (frame?.event === 'ext.command.request') {
+        void handleExtCommandRequest(data).catch((e) => log.warn(`聊天命令处理失败：${e?.message ?? e}`));
+      }
+      /**
        * 频道总开关：**只丢频道事件**。
        *
        * 位置必须卡在上面两个内部事件之后 —— `capabilities.changed` 要刷新
@@ -5937,6 +5945,236 @@ export function apply(ctx) {
   /* 反向联动：框架插件 → DSH 扩展                                       */
   /* ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ */
+  /* 聊天内命令（框架 1.2.0 起，外接客户端可在 roost 侧注册命令）        */
+  /* ------------------------------------------------------------------ */
+
+  /** 模型清单缓存：`/model 3` 的序号要靠它，10 分钟够用（与面板同源） */
+  let modelPickCache = { at: 0, list: [] };
+  async function modelPickList() {
+    if (modelPickCache.list.length && Date.now() - modelPickCache.at < 10 * 60 * 1000) {
+      return modelPickCache.list;
+    }
+    const r = await modelCatalog.list({}).catch(() => null);
+    const list = Array.isArray(r?.list) ? r.list : [];
+    if (list.length) modelPickCache = { at: Date.now(), list };
+    return list;
+  }
+
+  /**
+   * 按会话写响应模式（`chat` / `observe` / `off`），`mode = null` 表示删掉覆盖。
+   *
+   * 走的就是 `group.responseModes` 那张表——面板里改的是同一处，不存在
+   * 「聊天里关了、面板显示还开着」。深合并会保留旧键，但这里删键必须写整份，
+   * 所以用 `saveConfig`。
+   */
+  function setResponseModeFor(chatId = '', mode = null) {
+    const id = String(chatId ?? '');
+    if (!id) return null;
+    const cur = loadConfig();
+    const group = { ...(cur.group || {}) };
+    const modes = { ...(group.responseModes || {}) };
+    if (mode) modes[id] = mode;
+    else delete modes[id];
+    group.responseModes = modes;
+    cur.group = group;
+    cfg = saveConfig(cur);
+    return mode || responseModeOf(cfg, id);
+  }
+
+  /** 单独重置一个会话：清映射 + 清轮数，不动记忆与配置 */
+  function resetSessionFor(chatId = '') {
+    const id = String(chatId ?? '');
+    if (!id) return { had: false };
+    const sid = sessions.get(id) || '';
+    if (!sid) return { had: false };
+    sessions.set(id, '', { preset: '', title: '', kind: '' });
+    rounds.delete(id);
+    /** 下一轮要重新套模型：不清会以为「已经套过了」，新会话拿不到模型 */
+    modelApplied.delete(sid);
+    modelFailed.delete(sid);
+    return { had: true };
+  }
+
+  /** `/dstatus` 的快照：只读，字段够一眼看清又不至于刷屏 */
+  function hostStatusOf(chatId = '', kind = '') {
+    const st = modelStateOf(chatId, kind);
+    let facts = 0;
+    try {
+      const l = memory.list(chatId);
+      facts = (l?.global?.length || 0) + (l?.chat?.length || 0);
+    } catch {
+      /* 记忆库读不出来不该让状态命令失败 */
+    }
+    let journalRows = 0;
+    try {
+      journalRows = journal.recent(chatId, 50).length;
+    } catch {
+      /* 同上 */
+    }
+    return {
+      model: { effective: st.effective, effort: st.effort, override: st.override },
+      responseMode: responseModeOf(cfg, chatId),
+      sessionId: sessions.get(chatId) || '',
+      rounds: rounds.get(chatId)?.n || 0,
+      facts,
+      journal: journalRows,
+      enabled: cfg.enabled !== false,
+    };
+  }
+
+  function speakListOf() {
+    const allow = cfg.speakUp?.allow;
+    return (Array.isArray(allow) ? allow : []).map((x) => String(x ?? '').trim()).filter(Boolean);
+  }
+
+  function writeSpeakAllow(next) {
+    const cur = loadConfig();
+    cur.speakUp = { ...(cur.speakUp || {}), allow: next };
+    cfg = saveConfig(cur);
+  }
+
+  /**
+   * 宿主命令执行器。`api` 里全是**薄封装**：真正的状态都在本文件的闭包里，
+   * 命令表只负责解析与文案（见 `src/chat-commands.js`）。
+   */
+  const chatCommands = createChatCommands({
+    prefix: () => cfg.commandPrefix || '/',
+    log: (m) => log.warn(`[chat-commands] ${m}`),
+    api: {
+      modelState: (chatId, kind) => modelStateOf(chatId, kind),
+      modelList: () => modelPickList(),
+      pickModel: async (n) => {
+        const list = await modelPickList();
+        const one = list[Number(n) - 1];
+        return one ? { provider: one.provider, model: one.model } : null;
+      },
+      /** 改成会抛 Error；命令表统一兜成一句人话 */
+      setModel: (o) => setModelFor(o),
+      setEffort: (_chatId, effort) => setModelFor({ effort }),
+      setResponseMode: (chatId, mode) => setResponseModeFor(chatId, mode),
+      remember: (chatId, text) => memory.add(chatId, text, chatId ? 'chat' : 'global'),
+      diary: (chatId, text) => {
+        const r = journal.add({
+          id: `cmd:${chatId}:${Date.now()}`,
+          at: Date.now(),
+          chatId,
+          role: 'user',
+          /** 标明是谁让记的：和普通聊天行分开，召回时才不会当成对方说过的话 */
+          sender: '（主人让记的）',
+          text,
+          level: 'normal',
+        });
+        return Boolean(r?.added);
+      },
+      resetSession: (chatId) => resetSessionFor(chatId),
+      setEnabled: (on) => {
+        cfg = patchConfig({ enabled: Boolean(on) });
+        return Boolean(on);
+      },
+      status: (chatId, kind) => hostStatusOf(chatId, kind),
+      mood: () => mood.get(),
+      speakList: () => speakListOf(),
+      speakAdd: (openid) => {
+        const list = speakListOf();
+        if (list.includes(openid)) return { ok: true, count: list.length };
+        if (list.length >= 50) return { ok: false, message: '白名单最多 50 个人。' };
+        writeSpeakAllow([...list, openid]);
+        return { ok: true, count: list.length + 1 };
+      },
+      speakDel: (openid) => {
+        const list = speakListOf();
+        if (!list.includes(openid)) return { ok: false, message: '名单里没有这个 openid。' };
+        writeSpeakAllow(list.filter((x) => x !== openid));
+        return { ok: true, count: list.length - 1 };
+      },
+    },
+  });
+
+  /** 框架认不认命令这一套：老框架没有 `ext.command.reply`，上报了也没人接 */
+  function frameworkTakesCommands() {
+    return Boolean(caps?.has?.('ext.command.reply'));
+  }
+
+  /**
+   * 处理一条外接命令请求（`ext.command.request`）。
+   *
+   * 与 `ext.call.request` 一样**只入队不阻塞 SSE**。无论成功失败都要回执，
+   * 否则框架侧会一直挂到 30 秒超时，群里看到的是「发了命令没反应」。
+   */
+  async function handleExtCommandRequest(data) {
+    const requestId = String(data?.requestId ?? '').trim();
+    if (!requestId) return;
+    const target = String(data?.target ?? 'host') === 'ext' ? 'ext' : 'host';
+    const extId = String(data?.extId ?? '').trim();
+    const name = String(data?.name ?? '').trim().toLowerCase();
+    const msg = data?.msg && typeof data.msg === 'object' ? data.msg : null;
+
+    const done = async (ok, reply, error) => {
+      try {
+        await roost.rpc('ext.command.reply', {
+          requestId,
+          ok,
+          reply: String(reply ?? '').slice(0, 2000),
+          error: String(error ?? '').slice(0, 300),
+        });
+      } catch (e) {
+        log.warn(`命令回执送不回去（${requestId}）：${e?.message ?? e}`);
+      }
+    };
+
+    if (!msg) return void await done(false, '', '命令没带消息体，宿主不认');
+
+    if (target === 'host') {
+      /**
+       * 开关只关**宿主自己的**基础指令：扩展命令是扩展作者在清单里声明的，
+       * 宿主替它关掉会出现「清单报上去了、点下去却被拒」的半死状态。
+       */
+      if (cfg.commands?.enabled === false) {
+        return void await done(false, '', '宿主的聊天命令关着（面板「扩展 → 聊天命令」可以打开）');
+      }
+      const reply = await chatCommands.run({ name, msg });
+      /** `null` = 宿主自己发过了（这一版没有这种命令，留作扩展点） */
+      return void (reply === null ? await done(true, '') : await done(true, reply));
+    }
+
+    /** 扩展命令：转调它自己声明过的动作，payload 里带上命令上下文 */
+    const one = extRegistry.list().find((m) => m.id === extId);
+    if (!one) return void await done(false, '', `没有装扩展 ${extId}`);
+    const spec = normalizeUiSpec(one.manifest?.ui);
+    if (!spec.ok || spec.spec?.runtime !== 'inprocess') {
+      return void await done(false, '', `扩展 ${extId} 不支持进程内调用`);
+    }
+    const cmd = (spec.spec.commands ?? []).find((c) => c.name === name);
+    if (!cmd) return void await done(false, '', `扩展 ${extId} 没有声明命令 ${name}`);
+    try {
+      const rc = typeof extPanel.runtimeOf === 'function'
+        ? extPanel.runtimeOf(extId)
+        : { config: {}, secrets: {} };
+      const run = await runInProcessAction({
+        id: extId,
+        root: extRegistry.pathOf(extId),
+        entry: spec.spec.entry,
+        action: cmd.action,
+        payload: {
+          command: { name: cmd.name, args: Array.isArray(msg.args) ? msg.args : [], content: String(msg.content ?? '') },
+          msg,
+        },
+        config: rc.config,
+        secrets: rc.secrets,
+        env: { ROOST_DEPS_DIR: sharedDeps.depsDir(), ...inprocessApiEnv(extId) },
+        systemTurn,
+        log: (m) => log.warn(`[ext:${extId}] ${m}`),
+      });
+      if (!run?.handled) return void await done(false, '', run?.reason || '这个命令没有实现');
+      /** 扩展可以返回 `{reply}` 让框架代发；不返回就认为它自己发过了 */
+      const reply = typeof run.result === 'string' ? run.result : run.result?.reply;
+      return void await done(true, reply ? String(reply) : '');
+    } catch (e) {
+      return void await done(false, '', e?.message ?? e);
+    }
+  }
+
   /**
    * 上报「我这边装了哪些扩展、各自能被调哪些动作」。
    *
@@ -5953,6 +6191,18 @@ export function apply(ctx) {
       out.push({
         id: m.id,
         actions: (spec.spec.actions ?? []).map((a) => ({ id: a.id, label: a.label })),
+        /**
+         * 聊天命令跟着扩展清单一起报（框架 1.2.0 起）。老框架只读 id/actions，
+         * 多出来的字段会被忽略，所以这里不用按能力表分支。
+         */
+        commands: (spec.spec.commands ?? []).map((c) => ({
+          name: c.name,
+          aliases: [...(c.aliases ?? [])],
+          desc: c.desc,
+          usage: `${cfg.commandPrefix || '/'}${c.name}`,
+          admin: c.admin === true,
+          ownerOnly: c.ownerOnly === true,
+        })),
       });
     }
     return out;
@@ -5971,14 +6221,40 @@ export function apply(ctx) {
   async function reportExtCatalog() {
     if (catalogInFlight) return;
     const extensions = extCatalog();
-    const sig = JSON.stringify(extensions);
+    /**
+     * 宿主自己的聊天命令（`/model`、`/dstatus`…）。
+     *
+     * 只有框架认 `ext.command.reply` 才报：老框架会忽略 `host` 字段，
+     * 但多报一次会让签名变化、白刷一次日志，也容易让人以为命令已经生效。
+     * 能力表可能还没拉（`onState('online')` 那枪不 await），这里补拉一次。
+     */
+    if (!frameworkTakesCommands()) {
+      try {
+        await caps?.refresh?.({});
+      } catch {
+        /* 拉不到就按不支持处理，下次 onReady 再来 */
+      }
+    }
+    let host = null;
+    if (frameworkTakesCommands() && cfg.commands?.enabled !== false) {
+      const disabled = new Set(Array.isArray(cfg.commands?.disabled) ? cfg.commands.disabled : []);
+      host = { name: 'DSH', commands: chatCommands.specs({ allow: (n) => !disabled.has(n) }) };
+    }
+    const sig = JSON.stringify({ extensions, host });
     if (sig === lastCatalogSig && Date.now() - lastCatalogAt < CATALOG_REPORT_TTL_MS) return;
     catalogInFlight = true;
     try {
-      const r = await roost.rpc('ext.register', { extensions });
+      const r = await roost.rpc('ext.register', { extensions, ...(host ? { host } : {}) });
       if (r?.ok === false) {
         log.warn(`上报扩展能力清单被框架拒了：${r?.message ?? ''}`);
         return;
+      }
+      /** 重名之类的冲突框架不报错、只回 rejected，这里记一句便于排查「命令没出来」 */
+      if (Array.isArray(r?.rejected) && r.rejected.length) {
+        log.warn(
+          `有 ${r.rejected.length} 条命令没装上：` +
+            r.rejected.map((x) => `${x.name}（${x.reason ?? ''}）`).join('；'),
+        );
       }
       /** 只有成功才记签名：失败留着下次重连重试 */
       lastCatalogSig = sig;
@@ -7349,6 +7625,145 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
     modelWarned.add(key);
     log.warn(msg);
   };
+  /**
+   * 会话模型的读取快照。
+   *
+   * 面板 `/quick model.get` 与聊天内 `/model`、`/dstatus` 共用**同一份**口径，
+   * 免得面板显示 A、聊天里说 B。写盘动作不在这一层（见 `setModelFor`）。
+   */
+  function modelStateOf(chatId = '', kind = '') {
+    const cid = String(chatId ?? '');
+    const kd = String(kind ?? '');
+    const dm = ctx.get?.('agentDefaultModel');
+    const effective = pickModelFor({
+      byChat: cfg.model?.byChat,
+      byKind: cfg.model?.byKind,
+      defaultSel: cfg.model?.default,
+      chatId: cid,
+      kind: kd,
+      globalSel: dm?.currentSelection?.() || null,
+    });
+    return {
+      chatId: cid,
+      kind: kd,
+      override: cid ? (cfg.model?.byChat?.[cid] || null) : null,
+      byKind: kd ? (cfg.model?.byKind?.[kd] || null) : null,
+      byChat: cfg.model?.byChat || {},
+      byKindAll: {
+        c2c: cfg.model?.byKind?.c2c || {},
+        group: cfg.model?.byKind?.group || {},
+      },
+      defaultSel: cfg.model?.default || null,
+      effort: String(cfg.model?.effort ?? ''),
+      global: dm?.currentSelection?.() || null,
+      effective: effective || null,
+    };
+  }
+
+  /**
+   * 改会话模型 / 全局思考强度 / 类型默认。
+   *
+   * `arg` 与 `/quick model.set` 的载荷同形（面板与聊天命令共用），返回体也与
+   * 面板口径一致；参数不合法**抛 Error**，由调用方决定是 400 还是回一句人话。
+   *
+   * 注意 `byChat` 必须整体替换（`saveConfig`）而不是 `patchConfig`：后者是深
+   * 合并，删掉的 chatId 会被旧配置「合」回来，`/model off` 等于没生效。
+   */
+  function setModelFor(arg = {}) {
+    /** 两件「不针对某个聊天」的事先处理：键和下面两层不一样 */
+    if (arg && Object.prototype.hasOwnProperty.call(arg, 'effort')) {
+      const effort = String(arg.effort ?? '').trim();
+      if (effort.length > 32) throw new Error('effort 太长');
+      const curEffort = loadConfig();
+      curEffort.model = { ...(curEffort.model || {}), effort };
+      cfg = saveConfig(curEffort);
+      /** 所有会话下一轮重新套（effort 只有套模型那一刻才用得上） */
+      modelApplied.clear();
+      modelFailed.clear();
+      return { ok: true, effort };
+    }
+    if (arg && Object.prototype.hasOwnProperty.call(arg, 'default')) {
+      const d = arg.default;
+      const curDefault = loadConfig();
+      const next = { ...(curDefault.model || {}) };
+      if (!d || d.off) {
+        next.default = {};
+      } else {
+        const provider = String(d.provider || '').trim();
+        const model = String(d.model || '').trim();
+        if (!provider || !model) throw new Error('要 provider 和 model（或 off 清掉）');
+        next.default = {
+          provider,
+          model,
+          ...(d.reasoningEffort ? { reasoningEffort: String(d.reasoningEffort) } : {}),
+        };
+      }
+      curDefault.model = next;
+      cfg = saveConfig(curDefault);
+      modelApplied.clear();
+      modelFailed.clear();
+      return { ok: true, default: next.default || null };
+    }
+
+    const kind = String(arg?.kind || '');
+    const cid0 = String(arg?.chatId || '');
+    /**
+     * 只有**没带 chatId** 时才按类型改（`byKind`）；带 chatId 一律按单个会话。
+     * 判「有没有 kind」会让面板「给这个聊天选模型」掉进 byKind 分支，
+     * 把**所有**私聊/群都改了。
+     */
+    if (kind && !cid0) {
+      if (!['c2c', 'group'].includes(kind)) throw new Error('kind 只认 c2c / group');
+      const byKind = { ...(cfg.model?.byKind || {}) };
+      if (arg?.off) {
+        byKind[kind] = {};
+      } else {
+        const provider = String(arg?.provider || '').trim();
+        const model = String(arg?.model || '').trim();
+        if (!provider || !model) throw new Error('要 provider 和 model（或 off 恢复全局）');
+        byKind[kind] = {
+          provider,
+          model,
+          ...(arg?.reasoningEffort ? { reasoningEffort: String(arg.reasoningEffort) } : {}),
+        };
+      }
+      const curKind = loadConfig();
+      curKind.model = { ...(curKind.model || {}), byKind };
+      cfg = saveConfig(curKind);
+      modelApplied.clear();
+      modelFailed.clear();
+      return { ok: true, kind, byKind: byKind[kind] || null };
+    }
+
+    const cid = cid0;
+    if (!cid) throw new Error('缺 chatId');
+    const next = { ...(cfg.model?.byChat || {}) };
+    if (arg?.off) {
+      delete next[cid];
+    } else {
+      const provider = String(arg?.provider || '').trim();
+      const model = String(arg?.model || '').trim();
+      if (!provider || !model) throw new Error('要 provider 和 model（或 off 恢复默认）');
+      next[cid] = {
+        provider,
+        model,
+        ...(arg?.reasoningEffort ? { reasoningEffort: String(arg.reasoningEffort) } : {}),
+        /** 只用来显示「这个例外是私聊还是群」，`pickModelFor` 不看它 */
+        ...(kind ? { kind } : {}),
+      };
+    }
+    const cur = loadConfig();
+    cur.model = { ...(cur.model || {}), byChat: next };
+    cfg = saveConfig(cur);
+    /** 已存在的会话要重新套一次（`modelApplied` 缓存会挡住） */
+    const sid = sessions.get(cid);
+    if (sid) {
+      modelApplied.delete(sid);
+      modelFailed.delete(sid);
+    }
+    return { ok: true, chatId: cid, override: next[cid] || null };
+  }
+
   /**
    * 给会话套模型：**按聊天覆盖 > DSH 全局默认**（E6）。
    *
@@ -12506,50 +12921,9 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
              * 改完清掉该会话的 `modelApplied` 缓存，下一轮才会重新套模型。
              */
             case 'model.get': {
-              const cid = String(arg?.chatId || chatId || '');
-              const kind = String(arg?.kind || '');
-              const dm = ctx.get?.('agentDefaultModel');
-              /**
-               * 这个聊天最终会用哪个模型。面板拿它判断「思考强度能不能选」
-               * （模型没公布档位时置灰）、以及「自动看图」到底会不会发图。
-               */
-              const effective = pickModelFor({
-                byChat: cfg.model?.byChat,
-                byKind: cfg.model?.byKind,
-                defaultSel: cfg.model?.default,
-                chatId: cid,
-                kind,
-                globalSel: dm?.currentSelection?.() || null,
-              });
-              return send(res, 200, {
-                ok: true,
-                chatId: cid,
-                kind,
-                override: cid ? (cfg.model?.byChat?.[cid] || null) : null,
-                byKind: kind ? (cfg.model?.byKind?.[kind] || null) : null,
-                /**
-                 * 两张表整份给面板：它要列「单个 QQ / 群的例外」并支持移除，
-                 * 只回当前那一条的话，面板永远只能显示一行。
-                 */
-                byChat: cfg.model?.byChat || {},
-                byKindAll: {
-                  c2c: cfg.model?.byKind?.c2c || {},
-                  group: cfg.model?.byKind?.group || {},
-                },
-                /** 「所有聊天的默认模型」这一层（byKind 之上、DSH 全局之下） */
-                defaultSel: cfg.model?.default || null,
-                /** 全局思考强度：单个聊天没写 effort 时用它兜底 */
-                effort: String(cfg.model?.effort ?? ''),
-                global: dm?.currentSelection?.() || null,
-                effective: effective || null,
-              });
+              /** 口径集中在 modelStateOf：面板与聊天命令不能各读一套 */
+              return send(res, 200, { ok: true, ...modelStateOf(String(arg?.chatId || chatId || ''), String(arg?.kind || '')) });
             }
-            /**
-             * 模型清单：DSH 里能用哪些模型、各自支不支持思考强度 / 看图。
-             *
-             * 带缓存（10 分钟），`refresh: true` 强制重来——刚装了新模型或改完
-             * provider 配置时点面板上的「刷新」。
-             */
             case 'model.list': {
               try {
                 const r = await modelCatalog.list({ refresh: Boolean(arg?.refresh) });
@@ -12573,126 +12947,16 @@ function memoryStatic(chat = null, deepOverride = null, { live = false } = {}) {
             }
             case 'model.set': {
               /**
-               * 两件「不针对某个聊天」的事先处理掉，它们的键和下面两层不一样：
-               *
-               *   `{ effort }`  全局思考强度。单个聊天 / 单个类型**没写** effort 时
-               *                 用它兜底；写了就以写的为准（`applyDefaultModel` 里那个顺序）。
-               *   `{ default: {provider, model, reasoningEffort?} | {off:true} }`
-               *                 「所有聊天的默认模型」，夹在 `byKind` 和 DSH 全局默认之间。
-               *
-               * 不合并到下面两个分支，是因为那两个语义是「按聊天/按类型」，
-               * 混进去以后 `model.get` 回读的字段就没法区分是谁写的了。
+               * 写盘逻辑集中在 setModelFor：面板与聊天内 /model 共用。
+               * 参数不合法抛 Error，这里转成 400 + 人话。
                */
-              if (arg && typeof arg === 'object' && Object.prototype.hasOwnProperty.call(arg, 'effort')) {
-                const effort = String(arg.effort ?? '').trim();
-                if (effort.length > 32) return send(res, 400, { ok: false, message: 'effort 太长' });
-                const curEffort = loadConfig();
-                curEffort.model = { ...(curEffort.model || {}), effort };
-                cfg = saveConfig(curEffort);
-                /** 所有会话下一轮重新套（effort 只有套模型那一刻才用得上） */
-                modelApplied.clear();
-                modelFailed.clear();
-                return send(res, 200, { ok: true, effort });
+              try {
+                return send(res, 200, setModelFor(arg || {}));
+              } catch (e) {
+                return send(res, 400, { ok: false, message: e?.message ?? String(e) });
               }
-              if (arg && typeof arg === 'object' && Object.prototype.hasOwnProperty.call(arg, 'default')) {
-                const d = arg.default;
-                const curDefault = loadConfig();
-                const next = { ...(curDefault.model || {}) };
-                if (!d || d.off) {
-                  next.default = {};
-                } else {
-                  const provider = String(d.provider || '').trim();
-                  const model = String(d.model || '').trim();
-                  if (!provider || !model) {
-                    return send(res, 400, { ok: false, message: '要 provider 和 model（或 off 清掉）' });
-                  }
-                  next.default = {
-                    provider,
-                    model,
-                    ...(d.reasoningEffort ? { reasoningEffort: String(d.reasoningEffort) } : {}),
-                  };
-                }
-                curDefault.model = next;
-                cfg = saveConfig(curDefault);
-                modelApplied.clear();
-                modelFailed.clear();
-                return send(res, 200, { ok: true, default: next.default || null });
-              }
-              const kind = String(arg?.kind || '');
-              const cid0 = String(arg?.chatId || chatId || '');
-              /**
-               * 只有**没带 chatId** 时才按类型改（`byKind`）；带 chatId 一律按单个会话。
-               *
-               * 以前判的是「有没有 kind」，于是面板「给这个聊天选模型」传
-               * `{chatId, kind}` 时会掉进 byKind 分支，把**所有**私聊/群都改了——
-               * 面板上看起来是「只改了这一个」，实际影响一片。
-               */
-              if (kind && !cid0) {
-                if (!['c2c', 'group'].includes(kind)) {
-                  return send(res, 400, { ok: false, message: 'kind 只认 c2c / group' });
-                }
-                const byKind = { ...(cfg.model?.byKind || {}) };
-                if (arg?.off) {
-                  byKind[kind] = {};
-                } else {
-                  const provider = String(arg?.provider || '').trim();
-                  const model = String(arg?.model || '').trim();
-                  if (!provider || !model) {
-                    return send(res, 400, { ok: false, message: '要 provider 和 model（或 off 恢复全局）' });
-                  }
-                  byKind[kind] = {
-                    provider,
-                    model,
-                    ...(arg?.reasoningEffort ? { reasoningEffort: String(arg.reasoningEffort) } : {}),
-                  };
-                }
-                const curKind = loadConfig();
-                curKind.model = { ...(curKind.model || {}), byKind };
-                cfg = saveConfig(curKind);
-                /** 该类型的所有会话下一轮重新套；全清只是多套一次，开销可忽略 */
-                modelApplied.clear();
-                modelFailed.clear();
-                return send(res, 200, { ok: true, kind, byKind: byKind[kind] || null });
-              }
-              const cid = cid0;
-              if (!cid) return send(res, 400, { ok: false, message: '缺 chatId' });
-              const next = { ...(cfg.model?.byChat || {}) };
-              if (arg?.off) {
-                delete next[cid];
-              } else {
-                const provider = String(arg?.provider || '').trim();
-                const model = String(arg?.model || '').trim();
-                if (!provider || !model) {
-                  return send(res, 400, { ok: false, message: '要 provider 和 model（或 off 恢复默认）' });
-                }
-                next[cid] = {
-                  provider,
-                  model,
-                  ...(arg?.reasoningEffort ? { reasoningEffort: String(arg.reasoningEffort) } : {}),
-                  /**
-                   * 顺手把类型记下来：面板的「单个例外」要能标出「私聊」还是「群」。
-                   * 这一层只用来显示，`pickModelFor` 不看它（byChat 的键本身就唯一）。
-                   */
-                  ...(kind ? { kind } : {}),
-                };
-              }
-              /**
-               * 用 `saveConfig` 整体替换而不是 `patchConfig`：后者是深合并，
-               * 删掉的 chatId 键会被旧配置「合」回来，`/model off` 等于没生效。
-               */
-              const cur = loadConfig();
-              cur.model = { ...(cur.model || {}), byChat: next };
-              cfg = saveConfig(cur);
-              /** 已存在的会话要重新套一次（`modelApplied` 缓存会挡住） */
-              const sid = sessions.get(cid);
-              if (sid) {
-                modelApplied.delete(sid);
-                modelFailed.delete(sid);
-              }
-              return send(res, 200, { ok: true, chatId: cid, override: next[cid] || null });
             }
 
-            /** E4：备份清单（只读）与「下次启动生效」的恢复状态 */
             case 'backup.list': {
               return send(res, 200, {
                 ok: true,

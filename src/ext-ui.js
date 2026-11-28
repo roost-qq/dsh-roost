@@ -46,6 +46,9 @@ export const MAX_FIELD_CHARS = 500;
 /** 一页最多声明多少个字段（2026-11-14 从 12 放宽到 20） */
 export const MAX_FIELDS = 20;
 
+/** 一个扩展最多挂几条聊天命令：再多就是在跟内核抢命名空间了 */
+export const MAX_CHAT_COMMANDS = 6;
+
 /**
  * 扩展页面能挂到哪个一级菜单下。
  *
@@ -234,6 +237,8 @@ export function normalizeUiSpec(raw) {
 
   const form = normalizeForm(raw.form, errors);
   const actions = normalizeActions(raw.actions, errors);
+  /** 聊天内命令：只能转调已声明的动作，见 normalizeChatCommands */
+  const commands = normalizeChatCommands(raw.commands, actions, errors);
 
   if (errors.length) return { ok: false, errors, spec: null };
   return {
@@ -263,6 +268,8 @@ export function normalizeUiSpec(raw) {
        */
       form,
       actions,
+      /** 群里的 /xxx → 转调 commands[].action（框架 1.2.0 起） */
+      commands,
     },
   };
 }
@@ -364,6 +371,76 @@ function normalizeActions(raw, errors) {
   }
   if (out.length > MAX_UI_ACTIONS) errors.push(`ui.actions 最多 ${MAX_UI_ACTIONS} 个`);
   return out.slice(0, MAX_UI_ACTIONS);
+}
+
+/**
+ * 聊天内命令声明（2026-11-28，框架 1.2.0 起）。
+ *
+ * 扩展能把自己的能力挂成群里的 `/xxx`：框架在入站就拦下，推
+ * `ext.command.request` 给宿主，宿主执行完用 `ext.command.reply` 回执。
+ *
+ * 三条边界：
+ *   · **只允许转调已声明的动作**（`action` 必须出现在 `ui.actions` 里）——
+ *     不然这里就成了「扩展可以随便在宿主里挂一个入口」；
+ *   · 只有 `runtime: inprocess` 的扩展能这么挂，MCP 子进程拿不到同步回执，
+ *     挂了也只会每次都超时（上报时过滤，见 `host.js` 的 `extCatalog`）；
+ *   · 命令名与框架内核对齐：小写字母开头，1–16 位，别名连中文一起最多 3 个。
+ *
+ * 权限 `admin` / `ownerOnly` 由**框架**按群角色判，宿主只声明——两侧各判一次
+ * 会出现「框架放行、宿主拒绝」的鬼故事。
+ */
+function normalizeChatCommands(raw, actions, errors) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    errors.push('ui.commands 必须是数组');
+    return [];
+  }
+  const actionIds = new Set((Array.isArray(actions) ? actions : []).map((a) => a.id));
+  const out = [];
+  for (const [i, c] of raw.entries()) {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) {
+      errors.push(`commands[${i}] 必须是对象`);
+      continue;
+    }
+    /** 不做静默小写：写了大写就报错，免得作者以为 `/Bili` 也能用 */
+    const name = String(c.name ?? '').trim();
+    if (!/^[a-z][a-z0-9_-]{0,15}$/.test(name)) {
+      errors.push(`commands[${i}] 的 name「${name}」不合法（小写字母开头，只含字母数字 _ -，最多 16 位）`);
+      continue;
+    }
+    if (out.some((x) => x.name === name)) {
+      errors.push(`commands[${i}] 的 name「${name}」重复了`);
+      continue;
+    }
+    const action = String(c.action ?? '').trim();
+    if (!action) {
+      errors.push(`commands[${i}] 要写 action（转调哪个已声明的动作）`);
+      continue;
+    }
+    if (!actionIds.has(action)) {
+      errors.push(`commands[${i}] 的 action「${action}」没在 ui.actions 里声明过`);
+      continue;
+    }
+    const desc = String(c.desc ?? '').trim();
+    if (!desc || desc.length > 30) {
+      errors.push(`commands[${i}] 的 desc 必填且不超过 30 字`);
+      continue;
+    }
+    const aliases = (Array.isArray(c.aliases) ? c.aliases : [])
+      .map((a) => String(a ?? '').trim().toLowerCase())
+      .filter((a) => a && a !== name && /^[\p{L}\p{N}_-]{1,8}$/u.test(a))
+      .slice(0, 3);
+    out.push({
+      name,
+      aliases,
+      desc,
+      action,
+      admin: c.admin === true,
+      ownerOnly: c.ownerOnly === true,
+    });
+  }
+  if (out.length > MAX_CHAT_COMMANDS) errors.push(`ui.commands 最多 ${MAX_CHAT_COMMANDS} 条`);
+  return out.slice(0, MAX_CHAT_COMMANDS);
 }
 
 /**
