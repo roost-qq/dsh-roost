@@ -738,7 +738,7 @@ window.__ModuleLoader__.load({
 .pv-k{flex:0 0 auto;font-size:11px;font-weight:650;letter-spacing:.04em;
   color:var(--dsw-alias-label-secondary,inherit)}
 .pv-name{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.pv-name .roost-input{flex:1 1 180px;max-width:280px}
+.pv-name .roost-input{flex:1 1 180px;max-width:360px}
 .pv-hint{font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-tertiary,inherit);
   margin-top:-7px}
 /* 当前生效：先给一个确定答案，再把两个作用域摆开 */
@@ -4220,7 +4220,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function HerTab({ config, personas, mem, toast, save, reload, quick, repoSeed, feat, reloadCaps, busy }) {
+    function HerTab({ config, personas, mem, chats, onPickChat, toast, save, reload, quick, repoSeed, feat, reloadCaps, busy }) {
       /** 编辑区正在打开的人格 id */
       const [editId, setEditId] = useState('')
       const [raw, setRaw] = useState('')
@@ -4378,6 +4378,21 @@ window.__ModuleLoader__.load({
         const p = (personas?.personas || []).find((x) => x.id === id)
         return p ? (p.label || p.name || p.id) : id
       }
+      /**
+       * 会话显示名：和记忆页 `nameOf` 同一套口径——QQ 事件没有群名时回退到
+       * chatId 短码，必须带「群 / 私聊」标签才分得清（否则群和私聊看着一样）。
+       */
+      const chatNameOf = (c) => {
+        const tag = c?.kind === 'c2c' ? '私聊' : c?.kind === 'group' ? '群' : ''
+        const nm = c?.title || (c?.chatId ? c.chatId.slice(0, 10) : '')
+        return tag ? `${nm}（${tag}）` : nm
+      }
+      const curChat = (chats || []).find((c) => c.chatId === chatId)
+      const curChatName = chatNameOf(curChat) || (chatId ? chatId.slice(0, 10) : '')
+      /** 私聊里说「别的群」不通；按会话类型切换叫法 */
+      const isC2C = curChat?.kind === 'c2c'
+      const scopeName = isC2C ? '这个会话' : '这个群'
+      const otherScope = isC2C ? '别的会话' : '别的群'
       const override = mem?.personaOverride || ''
 
       /**
@@ -4628,7 +4643,7 @@ window.__ModuleLoader__.load({
             }, '保存'),
           ),
           h('div', { className: 'pv-hint' },
-            '全局生效，换人格不会改名；人格里写了 selfName 就会盖过这里。'),
+            '这是账号身份，换人格不会改名；如果人格正文写了 selfName，她会自称那个名字而不是这里这个。'),
 
           /**
            * 当前人格：**先回答「本群现在是谁」，再给两个作用域**。
@@ -4636,20 +4651,47 @@ window.__ModuleLoader__.load({
            * 原来两个下拉并排、没有「所以到底是谁」的结论——本群跟随全局时，
            * 用户看到两个框都得自己推一遍。现在顶上是一行结论，
            * 下面两格分别标清「全局默认」和「这个群」，改动前就知道影响面。
+           *
+           * 2026-11-28：补会话选择器 + 优先级链。原来「这个群」绑架记忆页的
+           * 选择，在这页既不能换也不显示是哪个群；真正优先级最高的覆盖/按人
+           * 散落在两百行之后，结论行会被打脸。现在开头就说清四层顺序。
            */
+          h('div', { className: 'pv-hint', style: { marginBottom: 8 } },
+            '生效顺序（后者盖前者）：全局默认 → 会话/群指定 → 按人指定 → 她自己写的 <<persona:>> 覆盖。'
+            + '先在下面选会话，再设它的人格。'),
           h('div', { className: 'pv-now' },
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 } },
+              h('span', { className: 'pv-k' }, '正在看'),
+              chats && chats.length > 1
+                ? h(Dropdown, {
+                    className: 'roost-input', value: chatId, 'aria-label': '人格页看哪个会话',
+                    style: { flex: 1, minWidth: 170 },
+                    onChange: (e) => onPickChat?.(e.target.value),
+                  },
+                    h('option', { value: '' }, '（最近说话的会话）'),
+                    chats.map((c) =>
+                      h('option', { key: c.chatId, value: c.chatId },
+                        `${chatNameOf(c)}${c.chatId === chatId ? '（正在看）' : ''}`)),
+                  )
+                : h('b', { style: { fontSize: 12 } }, curChatName || '（最近说话的会话）'),
+            ),
             h('div', { className: 'pv-now-head' },
-              h('span', { className: 'pv-k' }, chatId ? '本群现在用' : '现在用'),
+              h('span', { className: 'pv-k' }, chatId ? `${curChatName} 现在用` : '现在用'),
               h('span', { className: 'pv-now-name' }, labelOf(curId)),
               override
                 ? h(Pill, { tone: 'warn' }, '本会话被覆盖')
                 : chatPick
                   ? h(Pill, { tone: 'ok' }, '本群指定')
                   : h(Pill, null, '跟随全局'),
-              chatPick && chatPick !== globalId
-                ? h('span', { className: 'roost-note', style: { margin: 0 } }, `全局默认是「${labelOf(globalId)}」`)
-                : null,
+              override
+                ? h('span', { className: 'roost-note', style: { margin: 0 } },
+                    `实际生效：${override.slice(0, 40)}${override.length > 40 ? '…' : ''}`)
+                : chatPick && chatPick !== globalId
+                  ? h('span', { className: 'roost-note', style: { margin: 0 } }, `全局默认是「${labelOf(globalId)}」`)
+                  : null,
             ),
+            h('div', { className: 'roost-note', style: { margin: '0 0 6px' } },
+              '下面两个下拉和人格清单行里的「用这个 / 本群用」改的是同一件事，任选一处即可。'),
             h('div', { className: 'pv-sels' },
               h('div', { className: 'pv-sel' },
                 h('div', { className: 'pv-sel-h' },
@@ -4676,19 +4718,19 @@ window.__ModuleLoader__.load({
               chatId
                 ? h('div', { className: 'pv-sel' },
                     h('div', { className: 'pv-sel-h' },
-                      h('span', { className: 'pv-sel-k' }, '这个群'),
-                      h('span', { className: 'pv-sel-d' }, '只影响本群，别的群不变'),
+                      h('span', { className: 'pv-sel-k' }, scopeName),
+                      h('span', { className: 'pv-sel-d' }, `只影响${curChatName || scopeName}，${otherScope}不变`),
                     ),
                     h(Dropdown, {
-                      className: 'roost-input', value: chatPick || '', 'aria-label': '本群使用的人格',
-                      title: '只对最近说话的这个会话生效；换会话后这里跟着变',
+                      className: 'roost-input', value: chatPick || '', 'aria-label': `${scopeName}使用的人格`,
+                      title: `只对${curChatName || scopeName}生效；在上方「正在看」切换会话`,
                       onChange: async (e) => {
                         const id = e.target.value
                         const r = id
                           ? await post('/personas/use', { id, chatId })
                           : await post('/personas/unuse', { chatId })
                         if (r.ok === false) return toast(r.message || '没改成')
-                        toast(id ? '本群已指定' : '本群已跟随全局')
+                        toast(id ? `${scopeName}已指定` : `${scopeName}已跟随全局`)
                         await reload()
                       },
                     },
@@ -4702,12 +4744,40 @@ window.__ModuleLoader__.load({
                   )
                 : h('div', { className: 'pv-sel' },
                     h('div', { className: 'pv-sel-h' },
-                      h('span', { className: 'pv-sel-k' }, '这个群'),
-                      h('span', { className: 'pv-sel-d' }, '先聊一句，才有会话可选'),
+                      h('span', { className: 'pv-sel-k' }, scopeName),
+                      h('span', { className: 'pv-sel-d' }, '还没有会话，先聊一句'),
                     ),
                   ),
             ),
           ),
+
+          /**
+           * 按群覆盖：模型用 `<<persona:>>` 写进来的那一段。
+           *
+           * 它是**记忆文件里**的内容，不是配置——所以只在有会话时才有，
+           * 而且必须能一键清掉。之前这一行被删了，覆盖一旦写进去就再也
+           * 看不见、也删不掉，只能去翻记忆页。
+           *
+           * 2026-11-28 上移到结论旁边：上面「本群现在用 X」在有覆盖时是假象，
+           * 纠正信息如果还压在人格清单两百行之后，用户根本不会看到。
+           */
+          override
+            ? h('div', { style: { marginTop: 10, display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap', border: '1px solid var(--warn, #d68910)', borderRadius: 8, padding: 9 } },
+                h('div', { style: { flex: 1, minWidth: 0 } },
+                  h('div', { style: { fontSize: 12, fontWeight: 650 } }, '注意：本会话被她自己写的覆盖接管'),
+                  h('div', { className: 'roost-note', style: { marginTop: 2 } },
+                    `上面的「${labelOf(curId)}」只是会话/全局设定，结论行已标出实际生效的那段。要清掉就点右侧「恢复默认」。`),
+                ),
+                h(ConfirmLink, {
+                  label: '恢复默认', confirmLabel: '确认恢复？',
+                  onConfirm: async () => {
+                    const r = await quick('persona.set', '')
+                    toast(r.message || '回到默认人格')
+                    reload()
+                  },
+                }),
+              )
+            : null,
         ),
         sec('人格', null,
           /**
@@ -5101,30 +5171,7 @@ window.__ModuleLoader__.load({
               )
             : null,
 
-          /**
-           * 按群覆盖：模型用 `<<persona:>>` 写进来的那一段。
-           *
-           * 它是**记忆文件里**的内容，不是配置——所以只在有会话时才有，
-           * 而且必须能一键清掉。之前这一行被删了，覆盖一旦写进去就再也
-           * 看不见、也删不掉，只能去翻记忆页。
-           */
-          override
-            ? h('div', { style: { marginTop: 12, display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' } },
-                h('div', { style: { flex: 1, minWidth: 0 } },
-                  h('div', { style: { fontSize: 12, fontWeight: 600 } }, '本会话已被覆盖'),
-                  h('div', { className: 'roost-note', style: { marginTop: 2 } },
-                    override.slice(0, 60) + (override.length > 60 ? '…' : '')),
-                ),
-                h(ConfirmLink, {
-                  label: '恢复默认', confirmLabel: '确认恢复？',
-                  onConfirm: async () => {
-                    const r = await quick('persona.set', '')
-                    toast(r.message || '回到默认人格')
-                    reload()
-                  },
-                }),
-              )
-            : null,
+          /** 覆盖块已上移到「现在用」结论旁：它决定真正生效的人格，不能藏在两百行之后。 */
 
           /**
            * 说明折叠。
@@ -5201,6 +5248,21 @@ window.__ModuleLoader__.load({
               value: senderNew,
               onChange: (e) => setSenderNew(e.target.value.trim()),
             }),
+            /**
+             * 私聊会话的 chatId 就是对方 openid（和 qq_set_reminder 同一个口径），
+             * 给个快捷入口免得手抄一长串；仍保留手输，别人的会话也能填。
+             */
+            chats?.some((c) => c.kind === 'c2c')
+              ? h(Dropdown, {
+                  className: 'roost-input', value: '', 'aria-label': '从私聊会话挑发送者',
+                  onChange: (e) => { if (e.target.value) setSenderNew(e.target.value) },
+                },
+                  h('option', { value: '' }, '从私聊挑…'),
+                  chats.filter((c) => c.kind === 'c2c').map((c) =>
+                    h('option', { key: c.chatId, value: c.chatId },
+                      c.title ? `${c.title}（私聊）· ${c.chatId.slice(0, 10)}` : chatNameOf(c))),
+                )
+              : null,
             h(Dropdown, {
               className: 'roost-input',
               value: senderPick,
@@ -23989,15 +24051,15 @@ window.__ModuleLoader__.load({
           row('GitHub', h('a', { href: 'https://github.com/roost-qq/dsh-roost', target: '_blank', rel: 'noreferrer' }, 'roost-qq/dsh-roost')),
           row('Gitee', h('a', { href: 'https://gitee.com/tdcq9594/dsh-roost', target: '_blank', rel: 'noreferrer' }, 'tdcq9594/dsh-roost')),
           /**
-           * 许可改过一次：**本仓**（dsh-roost 这一层）已经换成 AGPL-3.0，
-           * 旧文案还写着「自写协议 v2.0，非 OSI 许可」——那是框架
-           * qq-bot-roost 的协议，两层不是同一个。照旧文案写会误导：
-           * AGPL 明确允许商用，义务是「改过的版本对外提供服务要公开源码」。
+           * 许可两层现在**都是 AGPL-3.0-only**（2026-11-26 四仓统一迁移）。
+           * 旧文案说「框架是另一套协议、禁止收费与商业使用」——那是早已作废的
+           * 自写协议 v2.0，和现行事实相反，已删。AGPL 不禁止商用、不禁止收费，
+           * 义务只是「改过的版本对外提供服务要公开源码」。
            */
           h('div', { className: 'roost-note' },
-            'dsh-roost 以 AGPL-3.0 发布（OSI 认可的开源许可）：可以免费使用、修改、再分发；'
-            + '改过的版本只要对外提供服务，就必须一并公开源码。'
-            + '框架本体 qq-bot-roost 是另一套协议（永久免费、禁止收费与商业使用），这一层是把它接进 DSH 的插件。'),
+            'dsh-roost 与框架本体 qq-bot-roost 均以 AGPL-3.0-only 发布（OSI 认可的开源许可）：'
+            + '可以免费使用、修改、再分发，也允许商业使用与收费；'
+            + '改过的版本只要对外提供服务，就必须一并公开源码。这一层是把它接进 DSH 的插件。'),
         ),
         h(Sec, { n: '03', title: '交流反馈群' },
           h('div', { style: { display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' } },
@@ -26767,6 +26829,8 @@ window.__ModuleLoader__.load({
           // 名字输入框读 config；「本群」下拉要 mem.chatId——都主动拉一次
           if (!config) once('config', loadConfig)
           if (!mem) once('memory', () => loadMemory())
+          /** 人格页也给了会话选择器（「这个群」要能换），和记忆页共用 /chats 这一份 */
+          once('chats', loadChats)
           /** 人格清单末尾承接 `personaCommand` 开关（2026-11-26 从权限页搬来） */
           once('caps', loadCaps)
         }
@@ -27287,7 +27351,7 @@ window.__ModuleLoader__.load({
             ? h(HerTab, {
                 config,
                 personas: her?.personas ?? null,
-                mem, toast, save: saveCfg, reload: loadHer, quick,
+                mem, chats, onPickChat: pickChat, toast, save: saveCfg, reload: loadHer, quick,
                 /** 2026-11-26：`personaCommand` 开关从权限页搬来 */
                 feat: capFeat, reloadCaps: loadCaps, busy,
               })
